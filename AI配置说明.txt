@@ -1,0 +1,38 @@
+PZ 橙子服务器控制台 - AI 配置说明
+================================
+
+一、公开发行包默认 AI 参数
+
+Provider：OpenAI Chat Completions
+接口地址：https://api.deepseek.com
+认证方式：Bearer
+模型：留空，首次配置时以账号“查询模型”返回的可用 ID 为准
+
+公开发行包默认关闭 AI，不包含 API Key、ai-config.json 或 ai-credential.dat。首次启动后面板会生成本机配置。API Key 应在目标服务器本机加密，原电脑生成的 Windows DPAPI 凭据不能迁移到另一台电脑或另一个 Windows 用户。
+
+二、新服务器配置步骤
+
+1. 在新服务器本机打开 http://127.0.0.1:8790/。
+2. 首次进入时创建 Web 面板 admin 管理员和强密码。
+3. 进入“AI 助手”。
+4. 确认 Provider、接口地址和认证方式，点击“查询模型”或填写账号实际可用的模型 ID。
+5. 填写 DeepSeek 官方 API Key。
+6. 选择要监听的游戏服务器。
+7. 点击“测试连接”。
+8. 测试成功后启用并保存 Bridge。
+
+三、模型选择
+
+模型名称、权限和可用性可能随账号与服务商变化，应以 DeepSeek 官方接口对当前账号实际返回的模型列表为准。不要凭说明文件猜测模型 ID。
+
+四、现有安全规则
+
+- 普通玩家只允许读取服务器遥测、相关沙盒配置和服务器信息库。
+- AI 不拥有 Shell、PowerShell、Lua、RCON、发物品、封禁、改配置或重启权限。
+- 会话记忆默认最多 8 轮、30 分钟。
+- 回复默认最多 900 个字符。
+- AI 审查事件和保留会话可在 Web 面板中查看。
+
+五、API Key 存储
+
+保存后，API Key 写入 ai-credential.dat，并使用 Windows DPAPI CurrentUser 加密。不要复制其他机器的 ai-credential.dat；迁移服务器后应在新机器本地重新填写。

@@ -1,0 +1,4 @@
+interface:
+  display_name: "PZ AI Server Telemetry"
+  short_description: "Inspect PZ B42 telemetry and diagnose server Mods"
+  default_prompt: "Use $pz-ai-server-telemetry to inspect this Project Zomboid server, correlate current telemetry, and identify evidence-based next actions."

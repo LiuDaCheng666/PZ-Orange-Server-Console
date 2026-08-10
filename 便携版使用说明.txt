@@ -1,0 +1,74 @@
+PZ Web 服务器控制台便携版
+==========================
+
+一、启动
+1. 将压缩包完整解压到服务器电脑的普通目录，不要直接在 ZIP 内运行。
+2. 双击“一键启动Web面板.bat”。
+3. 浏览器打开 http://127.0.0.1:8790/。
+4. 首次进入时设置 Web 面板 admin 管理员的显示名和密码。
+
+包内已附带 Node.js 运行时，不需要另行安装 Node.js。Web 面板账号和 Project Zomboid 游戏内 admin 账号互不相同。
+
+二、添加服务器
+首次启动会只读扫描当前正在运行的 Project Zomboid 专用服务器 Java 进程。若没有发现实例，面板会创建“待配置服务器”。
+
+1. 可以先启动游戏服务器，再到“服务器配置”页面执行扫描。
+2. 也可以手动填写运行目录、数据目录、Java 路径、servername 和端口。
+3. 只有将命令通道改成“受控命令队列”，并在该服务器由面板正常启动后，启停、广播、保存等控制功能才会完整接管。
+
+双击“停止Web面板.bat”只会停止 Web 面板，不会停止游戏服务器。
+
+三、远程访问
+本机地址：http://127.0.0.1:8790/
+局域网地址：启动后查看“手机访问地址.txt”。
+
+启动脚本会尝试开放 Windows 防火墙 TCP 8790。公网访问还需要在路由器端口转发或云服务器安全组中开放该端口。公网部署必须设置强密码，并建议限制允许访问的来源 IP。
+
+需要换端口时，双击“修改面板端口.bat”。
+
+四、配置 AI Bridge
+AI Bridge 已集成在 Web 面板中，不需要单独启动脚本。
+
+1. 在服务器电脑本机打开面板，进入“AI 助手”。
+2. 选择 Provider，填写接口根地址、模型 ID、认证方式和 API Key。
+3. 选择已安装 PZAIServerAgent 的游戏服务器。
+4. 先点击“测试连接”，测试成功后再启用并保存。
+
+常用配置：
+- OpenAI 官方：OpenAI Responses API；https://api.openai.com/v1；Bearer/自动；模型填写账号可用的模型 ID。
+- OpenAI 兼容中转：通常选择 OpenAI Chat Completions；地址填写服务商提供的 /v1 根地址；模型严格使用服务商给出的 ID。
+- Anthropic 官方：Anthropic Messages；https://api.anthropic.com；x-api-key/自动；模型填写账号可用的 Claude ID。
+
+API Key 不保存在 ai-config.json。它会单独保存到 ai-credential.dat，并通过 Windows DPAPI 按“当前电脑 + 当前 Windows 用户”加密。该密钥不能迁移到另一台电脑或另一个 Windows 用户；迁移面板后需要重新在本机填写。
+
+不要在游戏聊天、日志、说明文件或聊天工具中发送 API Key。便携包不会携带原电脑的 API Key。
+
+五、游戏内 Mod 要求
+使用游戏内 AI 对话至少需要：
+WorkshopItems=3777330954
+Mods=PZAIServerAgent
+
+右下角弹窗为可选功能：
+Workshop ID：3777409029
+Mod ID：PZWebNotices
+
+首次安装或更新 Mod 后，应在维护时间完整停止并重启游戏服务器。
+
+六、安全边界
+当前 Bridge 默认只读：读取相关服务器配置和 PZAI 遥测，向提问玩家回复。它不会自动执行 Shell、PowerShell、Lua、RCON、发物品、封禁、改配置或重启等管理操作。
+
+AI 页面中的玩家授权是未来类型化执行器的权限来源，不会使只读 Bridge 自动获得管理命令权限。扩展执行器前请阅读“PZAI-Mod执行器改写SOP.md”。
+
+七、便携包不包含的内容
+便携包不包含原电脑的：
+- 服务器路径和服务器列表
+- Web 用户、密码哈希和访问令牌
+- API 配置、API Key、AI 会话与玩家授权
+- 日志、审计、执行历史、广播与维护计划
+- 命令队列、回执、运行状态、截图和物品索引缓存
+
+八、Agent Skill
+skill\operate-pz-control-panel 是面板操作 Skill。
+skill\pz-ai-server-telemetry 是 PZAIServerAgent 遥测诊断 Skill。
+
+Agent 可以直接读取这些目录；如需让 Codex 自动发现，将相应 Skill 目录复制到目标 Windows 账号的 .codex\skills 目录。

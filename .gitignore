@@ -1,0 +1,44 @@
+# Web users, sessions and local server profiles
+users.json
+access-token.txt
+servers.json
+panel-state.json
+request-state.json
+手机访问地址.txt
+网站信息.txt
+
+# AI configuration, credentials, conversations and moderation
+ai-config.json
+ai-credential.dat
+ai-state.json
+ai-history.json
+ai-moderation-events.json
+
+# Schedules, history, logs and generated caches
+broadcast-schedules.json
+maintenance-schedules.json
+execution-history.json
+audit.log
+*.log
+*.bak
+*.tmp
+item-index/
+dist/
+dist-public/
+release/
+release-test/
+tools/
+runtime/node.exe
+
+# Managed server runtime state and queues
+managed/*/
+!managed/Run-ManagedPZHost.ps1
+!managed/Invoke-ManagedPZLifecycle.ps1
+
+# Private knowledge-base contents
+服务器信息库/*
+!服务器信息库/README.txt
+
+# Local test output
+pz-panel-*.png
+Test-*.result.json

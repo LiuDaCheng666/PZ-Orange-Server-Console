@@ -1,0 +1,4 @@
+interface:
+  display_name: "PZ 服务器面板操作"
+  short_description: "通过受控 Web 面板安全查询并操作 PZ 服务器"
+  default_prompt: "Use $operate-pz-control-panel to inspect the PZ servers and perform the requested safe panel operation."

@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>PZ橙子服务器控制台</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/app.css?v=20260810-2">
+</head>
+<body>
+  <div class="auth-screen" id="authScreen">
+    <section class="auth-panel">
+      <div class="auth-brand"><span class="brand-mark">PZ</span><div><strong>PZ橙子服务器控制台</strong><small id="authModeText">安全登录</small></div></div>
+      <form id="loginForm" class="auth-form">
+        <label>登录名<input name="username" maxlength="32" autocomplete="username" required></label>
+        <label>密码<input name="password" type="password" maxlength="128" autocomplete="current-password" required></label>
+        <button class="primary-button" type="submit"><i data-lucide="log-in"></i>登录</button>
+      </form>
+      <form id="setupForm" class="auth-form" hidden>
+        <p class="auth-message">首次使用，请在服务器本机创建管理员。</p>
+        <label>登录名<input name="username" value="admin" readonly></label>
+        <label>显示名称<input name="displayName" maxlength="64" required></label>
+        <label>密码<input name="password" type="password" minlength="10" maxlength="128" required></label>
+        <label>确认密码<input name="confirmPassword" type="password" minlength="10" maxlength="128" required></label>
+        <button class="primary-button" type="submit"><i data-lucide="shield-check"></i>创建管理员</button>
+      </form>
+      <p class="auth-error" id="authError" role="alert"></p>
+    </section>
+  </div>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">PZ</span><div><strong>PZ橙子服务器控制台</strong><small>Build 42 多实例</small></div></div>
+      <nav>
+        <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button>
+        <button class="nav-item" data-view="console"><i data-lucide="terminal-square"></i><span>实时日志</span></button>
+        <button class="nav-item" data-view="chat"><i data-lucide="messages-square"></i><span>游戏聊天</span></button>
+        <button class="nav-item" data-view="players"><i data-lucide="users"></i><span>玩家管理</span></button>
+        <button class="nav-item" data-view="items"><i data-lucide="package-search"></i><span>物品库</span></button>
+        <button class="nav-item" data-view="world"><i data-lucide="cloud-sun"></i><span>世界控制</span></button>
+        <button class="nav-item" data-view="commands"><i data-lucide="panel-top"></i><span>命令中心</span></button>
+        <button class="nav-item" data-view="system"><i data-lucide="activity"></i><span>本机监控</span></button>
+        <button class="nav-item" data-view="profiles"><i data-lucide="server-cog"></i><span>服务器配置</span></button>
+        <button class="nav-item" data-view="ai"><i data-lucide="bot"></i><span>AI 助手</span></button>
+        <button class="nav-item local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>Web 用户</span></button>
+        <button class="nav-item" data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
+      </nav>
+      <div class="sidebar-foot"><span id="connectionDot" class="status-dot"></span><span id="connectionText">正在连接</span></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow" id="targetEyebrow">当前目标</p><h1 id="pageTitle">服务器总览</h1></div>
+        <div class="top-actions">
+          <label class="server-picker"><span>服务器</span><select id="serverSelect" aria-label="选择服务器"></select></label>
+          <button class="icon-button" id="refreshBtn" title="立即刷新"><i data-lucide="refresh-cw"></i></button>
+          <span class="signed-user" id="signedUser"></span>
+          <button class="icon-button" id="logoutBtn" title="退出登录"><i data-lucide="log-out"></i></button>
+          <time id="serverClock">--:--:--</time>
+        </div>
+      </header>
+
+      <aside class="command-result-tray" id="commandResultTray" data-state="idle" hidden aria-live="polite"><div class="command-result-head"><span class="command-result-icon"><i data-lucide="terminal-square"></i></span><div><strong id="commandResultTitle">最近命令</strong><small id="commandResultMeta">等待执行</small></div><button class="icon-button" id="closeCommandResult" type="button" title="关闭结果"><i data-lucide="x"></i></button></div><pre id="commandResultOutput">尚未执行命令。</pre></aside>
+      <div id="toast" class="toast" role="status"></div>
+      <div id="readonlyNotice" class="readonly-notice" hidden><i data-lucide="lock-keyhole"></i><span></span></div>
+
+      <section class="view active" id="view-overview">
+        <div class="server-strip" id="serverStrip"></div>
+        <div class="metrics-band">
+          <div class="metric"><span>在线玩家</span><strong id="onlineCount">--</strong><small id="playerLimit">上限 --</small></div>
+          <div class="metric"><span>进程内存</span><strong id="memoryUsage">--</strong><small id="memoryPeak">Windows 工作集峰值 --</small></div>
+          <div class="metric"><span>JVM 堆实际</span><strong id="jvmHeapUsage">--</strong><small id="jvmHeapLimit">最近 GC 后 · 上限 --</small></div>
+          <div class="metric"><span>JVM 堆峰值</span><strong id="jvmHeapPeak">--</strong><small id="jvmHeapSample">等待 GC 采样</small></div>
+          <div class="metric"><span>运行时长</span><strong id="uptime">--</strong><small id="javaPid">PID --</small></div>
+          <div class="metric"><span>配置端口</span><strong id="ports">--</strong><small>UDP</small></div>
+        </div>
+        <div class="overview-grid">
+          <section class="panel activity-panel">
+            <div class="section-heading"><div><p class="eyebrow">最近活动</p><h2>实时事件</h2></div><button class="text-button" data-go="console">查看完整日志<i data-lucide="arrow-right"></i></button></div>
+            <div id="activityFeed" class="activity-feed"><p class="empty-state">等待服务器事件</p></div>
+          </section>
+          <section class="panel quick-panel">
+            <div class="section-heading"><div><p class="eyebrow">快捷操作</p><h2>日常控制</h2></div></div>
+            <div class="quick-actions command-control">
+              <button data-action="players"><i data-lucide="users"></i><span>刷新玩家</span></button>
+              <button data-action="save"><i data-lucide="save"></i><span>保存世界</span></button>
+              <button data-go="players"><i data-lucide="shield-check"></i><span>设置权限</span></button>
+              <button data-go="console"><i data-lucide="message-square-text"></i><span>发送广播</span></button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="view-console">
+        <div class="console-toolbar">
+          <div class="segmented" id="logFilters"><button class="active" data-filter="all">全部</button><button data-filter="error">错误</button><button data-filter="warn">警告</button><button data-filter="network">网络</button><button data-filter="compat">兼容追踪</button></div>
+          <div class="toolbar-icons"><button class="icon-button" id="pauseLog" title="暂停滚动"><i data-lucide="pause"></i></button><button class="icon-button" id="downloadLog" title="下载当前日志"><i data-lucide="download"></i></button></div>
+        </div>
+        <div class="log-surface"><pre id="logOutput">正在读取实时日志...</pre></div>
+        <form id="broadcastForm" class="command-bar command-control">
+          <i data-lucide="megaphone"></i><input id="broadcastMessage" maxlength="240" placeholder="向所有在线玩家广播消息（支持中文）" autocomplete="off"><button class="primary-button" type="submit">发送</button>
+        </form>
+      </section>
+
+      <section class="view" id="view-chat">
+        <div class="chat-toolbar">
+          <div class="segmented" id="chatFilters"><button class="active" data-chat-filter="all">全部</button><button data-chat-filter="General">全服</button><button data-chat-filter="Local">附近</button><button data-chat-filter="Whisper">私聊</button><button data-chat-filter="Faction">阵营</button><button data-chat-filter="Safehouse">安全屋</button><button data-chat-filter="Broadcast">服务器广播</button></div>
+          <button class="icon-button" id="refreshChat" type="button" title="刷新聊天"><i data-lucide="refresh-cw"></i></button>
+        </div>
+        <section class="chat-surface" id="chatSurface" aria-live="polite"><div id="chatMessages"><p class="empty-state">正在读取游戏聊天...</p></div></section>
+        <div class="chat-source-status"><span class="status-dot" id="chatStatusDot"></span><span id="chatStatus">正在查找当前服务器聊天日志</span></div>
+        <form id="chatComposer" class="chat-composer command-control">
+          <div class="chat-compose-controls">
+            <label>发送方式<select id="chatSendMode" name="mode" data-notice-control><option value="broadcast">全服广播</option><option value="notice">右下角通知（Mod）</option><option value="private">私聊在线玩家</option></select></label>
+            <label id="chatRecipientField" hidden>在线玩家<select class="online-player-select" id="chatRecipient" name="username"><option value="">正在读取在线玩家...</option></select></label>
+          </div>
+          <section class="notice-editor" id="noticeFields" hidden>
+            <div class="notice-options">
+              <fieldset class="notice-style-picker"><legend>通知样式</legend><label class="selected" data-notice-style="info"><input type="radio" name="noticeStyle" value="info" checked data-notice-control><span></span>信息</label><label data-notice-style="success"><input type="radio" name="noticeStyle" value="success" data-notice-control><span></span>成功</label><label data-notice-style="warning"><input type="radio" name="noticeStyle" value="warning" data-notice-control><span></span>警告</label><label data-notice-style="danger"><input type="radio" name="noticeStyle" value="danger" data-notice-control><span></span>紧急</label></fieldset>
+              <label>通知对象<select id="noticeTargetType" name="noticeTargetType" data-notice-control><option value="all">全部在线玩家</option><option value="player">指定在线玩家</option></select></label>
+              <label id="noticeTargetPlayerField" hidden>目标玩家<select class="online-player-select" id="noticeTargetPlayer" name="noticeTargetPlayer" data-notice-control><option value="">正在读取在线玩家...</option></select></label>
+              <label>通知标题<input id="noticeTitle" name="noticeTitle" maxlength="60" value="服务器通知" autocomplete="off" data-notice-control></label>
+              <label>显示时长（秒）<input id="noticeDuration" name="noticeDuration" type="number" min="3" max="300" value="7" data-notice-control></label>
+              <label>标题字号<select id="noticeTitleSize" name="noticeTitleSize" data-notice-control><option value="small">小</option><option value="medium" selected>中</option><option value="large">大</option></select></label>
+              <label>正文字号<select id="noticeBodySize" name="noticeBodySize" data-notice-control><option value="small" selected>小</option><option value="medium">中</option><option value="large">大</option></select></label>
+              <label class="notice-color-field">强调色<input id="noticeAccentColor" name="noticeAccentColor" type="color" value="#62a7df" title="选择通知边框和标题颜色" data-notice-control></label>
+              <label class="notice-color-field">文字色<input id="noticeTextColor" name="noticeTextColor" type="color" value="#e1e6e9" title="选择通知正文颜色" data-notice-control></label>
+              <label class="notice-native-toggle"><input id="noticeNativeBroadcast" name="noticeNativeBroadcast" type="checkbox" data-notice-control><span>同时发送原生全服广播</span></label>
+            </div>
+            <div class="notice-preview-wrap"><span>游戏内近似预览</span><div class="notice-preview" id="noticePreview" data-style="info"><strong id="noticePreviewTitle">服务器通知</strong><p id="noticePreviewMessage">通知正文会在这里预览。</p></div></div>
+            <div class="notice-channel-status"><span class="status-dot" id="noticeStatusDot"></span><span id="noticeStatus">正在检查当前服务器的通知 Mod 通道</span><button class="icon-button" id="refreshNoticeStatus" type="button" title="刷新通知通道状态" data-notice-control><i data-lucide="refresh-cw"></i></button></div>
+          </section>
+          <textarea id="chatMessage" name="message" maxlength="1200" rows="3" placeholder="输入广播内容；换行和长句会自动拆成多条，避免游戏内文字溢出" required data-notice-control></textarea>
+          <div class="chat-compose-foot"><span id="chatComposeHint">每条最多 60 个字符，较长内容将自动拆分发送。</span><button class="primary-button" id="chatSendButton" type="submit" data-notice-control><i data-lucide="send"></i>发送广播</button></div>
+        </form>
+        <section class="broadcast-scheduler">
+          <div class="section-heading"><div><p class="eyebrow">多任务循环发送</p><h2>定时广播</h2></div><button class="secondary-button" id="newBroadcastSchedule" type="button"><i data-lucide="plus"></i>新建任务</button></div>
+          <div class="broadcast-schedule-layout">
+            <div class="broadcast-schedule-list" id="broadcastScheduleList"><p class="empty-state compact">正在读取广播任务...</p></div>
+            <form class="broadcast-schedule-form" id="broadcastScheduleForm">
+              <input name="id" type="hidden">
+              <div class="profile-form-head"><div><p class="eyebrow">任务设置</p><h3 id="broadcastScheduleFormTitle">新建循环广播</h3></div><span class="badge neutral" id="broadcastScheduleMode">新任务</span></div>
+              <div class="broadcast-schedule-fields">
+                <label>任务名称<input name="name" maxlength="64" placeholder="每小时安全提醒" required></label>
+                <label>启用任务<select name="enabled"><option value="true">启用</option><option value="false">暂停</option></select></label>
+                <label>发送通道<select name="channel"><option value="native">原生全服广播</option><option value="popup">Mod 右下角弹窗</option><option value="both">原生广播 + Mod 弹窗</option></select></label>
+                <label>循环间隔（分钟）<input name="intervalMinutes" type="number" min="5" max="10080" value="60" required></label>
+                <label>弹窗样式<select name="style"><option value="info">信息</option><option value="success">成功</option><option value="warning">警告</option><option value="danger">紧急</option></select></label>
+                <label>弹窗显示（秒）<input name="duration" type="number" min="3" max="300" value="15" required></label>
+                <label class="wide">弹窗标题<input name="title" maxlength="60" value="服务器通知" required></label>
+                <label class="wide">广播内容<textarea name="message" maxlength="1200" rows="4" placeholder="输入循环发送的内容" required></textarea></label>
+              </div>
+              <div class="profile-actions"><button class="danger-button" id="deleteBroadcastSchedule" type="button"><i data-lucide="trash-2"></i>删除</button><button class="secondary-button" id="runBroadcastScheduleNow" type="button"><i data-lucide="send"></i>立即发送</button><button class="primary-button" type="submit"><i data-lucide="save"></i>保存任务</button></div>
+            </form>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" id="view-players">
+        <div class="section-heading page-heading"><div><p class="eyebrow">在线与权限</p><h2>玩家管理</h2></div><div class="heading-actions"><button class="secondary-button" id="exportPlayers" type="button"><i data-lucide="download"></i>导出全部玩家</button><button class="secondary-button command-control" data-action="players"><i data-lucide="refresh-cw"></i>刷新列表</button></div></div>
+        <div class="player-summary" id="playerSummary">尚未获取在线玩家列表。</div>
+        <div class="player-table" id="playerTable"><p class="empty-state">正在读取玩家和权限...</p></div>
+        <div class="forms-grid command-control">
+          <form class="tool-section" id="accessForm"><div class="tool-title"><i data-lucide="shield-check"></i><div><h3>访问级别</h3><p>页面玩家列表优先显示在线玩家，也可手工输入</p></div></div><label>游戏内用户名<input name="username" maxlength="64" autocomplete="new-password" required></label><label>权限<select name="level"><option value="admin">管理员</option><option value="moderator">版主</option><option value="overseer">监管员</option><option value="gm">GM</option><option value="observer">观察员</option></select></label><div class="button-pair"><button class="primary-button" type="submit" data-access="selected">应用权限</button><button class="secondary-button" type="submit" data-access="none">撤销权限</button></div></form>
+          <form class="tool-section" id="stateForm"><div class="tool-title"><i data-lucide="user-cog"></i><div><h3>玩家状态</h3><p>测试用临时状态开关</p></div></div><label>游戏内用户名<input name="username" maxlength="64" required></label><label>状态<select name="feature"><option value="godmodplayer">上帝模式</option><option value="invisibleplayer">隐身</option><option value="noclip">穿墙</option><option value="voiceban">语音禁用</option></select></label><div class="button-pair"><button class="secondary-button" type="submit" data-enabled="true">启用</button><button class="secondary-button" type="submit" data-enabled="false">关闭</button></div></form>
+          <form class="tool-section" id="teleportForm"><div class="tool-title"><i data-lucide="map-pin"></i><div><h3>玩家传送</h3><p>传送到另一在线玩家</p></div></div><label>被传送玩家<input name="username" maxlength="64" required></label><label>目标玩家<input name="target" maxlength="64" required></label><button class="primary-button" type="submit">执行传送</button></form>
+          <form class="tool-section" id="grantForm"><div class="tool-title"><i data-lucide="package-plus"></i><div><h3>发放物品</h3><p>可发给一名、部分或全部当前在线玩家</p></div><button class="icon-button help-button" type="button" data-go="items" title="打开完整物品库"><i data-lucide="library"></i></button></div><div class="item-target-picker"><span class="item-target-label">发放对象</span><div class="item-target-modes"><label><input type="radio" name="targetMode" value="single" checked><span>单个玩家</span></label><label><input type="radio" name="targetMode" value="selected"><span>选择部分</span></label><label><input type="radio" name="targetMode" value="all-online"><span>全部在线</span></label></div><label class="item-target-single">在线玩家<select class="online-player-select" name="username" required><option value="">正在读取在线玩家...</option></select></label><div class="item-target-selected" hidden><div class="item-target-actions"><span>勾选在线玩家</span><div><button type="button" data-item-target-action="all">全选</button><button type="button" data-item-target-action="clear">清空</button></div></div><div class="item-target-checklist"></div></div><p class="item-target-summary">正在读取在线玩家...</p></div><div class="item-index-status" id="itemIndexStatus" data-state="loading"><div class="item-index-head"><span class="item-index-icon"><i data-lucide="database"></i></span><div><strong id="itemIndexState">正在读取物品索引</strong><small id="itemIndexPhase">等待服务器返回扫描状态</small></div></div><progress id="itemIndexProgress" max="100" value="0"></progress><div class="item-index-stats"><span>物品 <b id="itemIndexCount">--</b></span><span>中文名 <b id="itemIndexChinese">--</b></span><span>Mod <b id="itemIndexMods">--</b></span></div><time id="itemIndexGenerated">缓存时间 --</time></div><div class="item-field"><span>物品名称或 ID</span><div class="item-combobox"><input class="item-lookup-control" id="itemSearch" name="item" value="Base.Axe" maxlength="100" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="itemResults" aria-expanded="false" required><button class="secondary-button item-lookup-control" id="rebuildItemIndex" type="button" title="重新扫描本体和启用 Mod 的物品"><i data-lucide="refresh-cw"></i><span>重新扫描</span></button><div class="item-results" id="itemResults" role="listbox" hidden></div></div><small id="itemSearchStatus">输入中文名称或完整物品 ID 搜索</small></div><label>数量<input name="count" type="number" value="1" min="1" max="100" required></label><div class="item-grant-notification"><label>发放后通知<select name="notificationChannel"><option value="none">不发送通知</option><option value="native">文字全服广播</option><option value="popup">Mod 右下角弹窗</option><option value="both">文字广播 + Mod 弹窗</option></select></label><div class="item-grant-notification-fields" hidden><label>通知内容<textarea name="notificationMessage" maxlength="1200" rows="3" placeholder="留空时自动生成物品发放通知"></textarea></label><label class="item-notice-duration" hidden>弹窗时长（秒）<input name="notificationDuration" type="number" min="3" max="300" value="10"></label><p class="item-notification-hint">通知发送给当前全服在线玩家。</p></div></div><button class="primary-button" type="submit">发放物品</button></form>
+          <form class="tool-section danger-zone" id="moderationForm"><div class="tool-title"><i data-lucide="user-x"></i><div><h3>移除玩家</h3><p>封禁操作需要确认</p></div></div><label>游戏内用户名<input name="username" maxlength="64" required></label><label>原因<input name="reason" maxlength="120" value="服务器管理操作" required></label><div class="button-pair"><button class="secondary-button" type="submit" data-mode="kick">踢出</button><button class="danger-button" type="submit" data-mode="ban">封禁</button></div></form>
+        </div>
+      </section>
+
+      <section class="view" id="view-items">
+        <div class="section-heading page-heading"><div><p class="eyebrow">本体与启用 Mod</p><h2>物品资料库</h2></div><div class="heading-actions"><span class="sample-time" id="itemCatalogSummary">正在读取物品缓存...</span><button class="secondary-button" id="catalogRebuild" type="button"><i data-lucide="refresh-cw"></i>重新扫描</button></div></div>
+        <div class="item-catalog-toolbar">
+          <label class="item-catalog-search"><span>搜索</span><div><i data-lucide="search"></i><input id="itemCatalogSearch" maxlength="100" autocomplete="off" placeholder="中文名、英文名、完整 ID 或 Mod"></div></label>
+          <label><span>分类</span><select id="itemCatalogCategory"><option value="">全部分类</option></select></label>
+          <label><span>来源</span><select id="itemCatalogSource"><option value="">全部来源</option><option value="vanilla">游戏本体</option><option value="mod">启用 Mod</option></select></label>
+          <label><span>Mod</span><select id="itemCatalogMod"><option value="">全部 Mod</option></select></label>
+        </div>
+        <div class="item-catalog-layout">
+          <section class="item-catalog-list" aria-label="物品列表">
+            <div class="item-catalog-head"><span>物品</span><span>分类</span><span>来源</span></div>
+            <div id="itemCatalogRows"><p class="empty-state">正在读取物品目录...</p></div>
+            <footer class="item-catalog-pager"><button class="icon-button" id="itemCatalogPrev" type="button" title="上一页"><i data-lucide="chevron-left"></i></button><span id="itemCatalogPage">第 -- 页</span><button class="icon-button" id="itemCatalogNext" type="button" title="下一页"><i data-lucide="chevron-right"></i></button></footer>
+          </section>
+          <aside class="item-detail" id="itemCatalogDetail">
+            <div class="item-detail-empty"><i data-lucide="package-search"></i><strong>选择一件物品查看资料</strong><span>列表采用分页加载，不会一次载入全部物品。</span></div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view" id="view-world">
+        <div class="section-heading page-heading"><div><p class="eyebrow">天气与事件</p><h2>世界控制</h2></div></div>
+        <div class="world-controls command-control">
+          <div class="event-group"><h3>环境事件</h3><div class="event-buttons"><button data-event="chopper"><i data-lucide="plane"></i>直升机</button><button data-event="gunshot"><i data-lucide="crosshair"></i>远处枪声</button><button data-event="stopweather"><i data-lucide="sun"></i>停止天气</button><button data-action="stoprain"><i data-lucide="cloud-rain-wind"></i>停止降雨</button></div></div>
+          <form class="event-group inline-form" id="rainForm"><h3>降雨</h3><label>强度<input name="value" type="number" min="1" max="100" value="50"></label><button class="primary-button" type="submit">开始降雨</button></form>
+          <form class="event-group inline-form" id="stormForm"><h3>风暴</h3><label>游戏小时<input name="value" type="number" min="1" max="168" value="2"></label><button class="primary-button" type="submit">开始风暴</button></form>
+          <form class="event-group inline-form" id="localWeatherForm"><h3>玩家位置天气</h3><label>用户名<input name="username" maxlength="64" required></label><div class="button-pair"><button class="secondary-button" data-event="thunder" type="submit">雷声</button><button class="secondary-button" data-event="lightning" type="submit">闪电</button></div></form>
+          <form class="event-group inline-form danger-zone" id="hordeForm"><h3>生成尸群</h3><label>玩家名<input name="username" maxlength="64" required></label><label>数量<input name="count" type="number" min="1" max="500" value="20" required></label><button class="danger-button" type="submit">生成</button></form>
+        </div>
+      </section>
+
+      <section class="view" id="view-commands">
+        <div class="section-heading page-heading"><div><p class="eyebrow">B42.20 实机命令</p><h2>命令中心</h2></div><div class="command-search"><i data-lucide="search"></i><input id="commandSearch" placeholder="筛选命令或用途"></div></div>
+        <div class="command-layout command-control">
+          <div class="advanced-forms">
+            <form class="tool-section" id="queryForm"><div class="tool-title"><i data-lucide="search-check"></i><div><h3>查询与诊断</h3><p>执行后直接显示服务器返回内容</p></div></div><label>查询<select name="action"><option value="players">在线玩家</option><option value="connections">连接列表</option><option value="stats">服务器统计</option><option value="showoptions">服务器选项</option><option value="check-mod-updates">检查 Mod 更新</option><option value="worldgen-status">世界生成状态</option><option value="help">完整命令帮助</option></select></label><button class="secondary-button" type="submit">执行查询</button></form>
+            <form class="tool-section" id="accountForm"><div class="tool-title"><i data-lucide="user-round-cog"></i><div><h3>白名单账号</h3><p>密码不会保存或写入审计</p></div></div><label>操作<select name="mode"><option value="adduser">新增白名单账号</option><option value="setpassword">修改账号密码</option><option value="remove">移出白名单</option></select></label><label>用户名<input name="username" maxlength="64" required></label><label>账号密码<input name="password" type="password" maxlength="128" autocomplete="new-password"></label><button class="primary-button" type="submit">应用账号操作</button></form>
+            <form class="tool-section" id="steamForm"><div class="tool-title"><i data-lucide="badge-check"></i><div><h3>SteamID 管理</h3><p>从同一玩家目录选择，在线玩家优先</p></div></div><label>操作<select name="mode"><option value="addsteamid">加入允许列表</option><option value="removesteamid">移出允许列表</option><option value="banid">封禁 SteamID</option><option value="unbanid">解封 SteamID</option></select></label><label>SteamID64<input name="steamId" inputmode="numeric" maxlength="20" autocomplete="new-password" required></label><button class="secondary-button" type="submit">应用</button></form>
+            <form class="tool-section" id="ipForm"><div class="tool-title"><i data-lucide="network"></i><div><h3>IP 封禁</h3><p>支持 IPv4 与 IPv6</p></div></div><label>操作<select name="mode"><option value="banip">封禁 IP</option><option value="unbanip">解封 IP</option></select></label><label>IP 地址<input name="ip" maxlength="45" required></label><button class="secondary-button" type="submit">应用</button></form>
+            <form class="tool-section" id="optionForm"><div class="tool-title"><i data-lucide="sliders-horizontal"></i><div><h3>服务器选项</h3><p>更改后可重新加载选项</p></div></div><label>选项名<input name="name" maxlength="80" required></label><label>新值<input name="value" maxlength="160" required></label><button class="danger-button" type="submit">修改选项</button></form>
+            <form class="tool-section" id="timeForm"><div class="tool-title"><i data-lucide="timer"></i><div><h3>时间速度</h3><p>设置服务器时间倍率周期</p></div><button class="icon-button help-button" type="button" data-help="time" title="时间倍率帮助"><i data-lucide="circle-help"></i></button></div><label>周期<input name="period" type="number" min="1" max="100" value="10" required></label><button class="secondary-button" type="submit">设置</button></form>
+            <form class="tool-section" id="xpForm"><div class="tool-title"><i data-lucide="chart-no-axes-column-increasing"></i><div><h3>经验值</h3><p>选择当前在线玩家，同时提交服务器内部技能 ID</p></div></div><label>在线玩家<select class="online-player-select" name="username" required><option value="">正在读取在线玩家...</option></select></label><label>技能<select name="perk" required><option value="Woodwork">木工 · Woodwork</option><option value="Fitness">体格 · Fitness</option><option value="Strength">力量 · Strength</option><option value="Sprinting">冲刺 · Sprinting</option><option value="Lightfoot">轻巧 · Lightfoot</option><option value="Nimble">灵活 · Nimble</option><option value="Sneak">潜行 · Sneak</option><option value="Axe">斧头 · Axe</option><option value="Blunt">长棍 · Blunt</option><option value="SmallBlunt">短棍 · SmallBlunt</option><option value="LongBlade">长刀 · LongBlade</option><option value="SmallBlade">短刀 · SmallBlade</option><option value="Spear">长矛 · Spear</option><option value="Maintenance">维护 · Maintenance</option><option value="Aiming">瞄准 · Aiming</option><option value="Reloading">装填 · Reloading</option><option value="Cooking">烹饪 · Cooking</option><option value="Farming">耕作 · Farming</option><option value="Doctor">急救 · Doctor</option><option value="Electricity">电工 · Electricity</option><option value="MetalWelding">金属加工 · MetalWelding</option><option value="FlintKnapping">打制石器 · FlintKnapping</option><option value="Carving">雕刻 · Carving</option><option value="Mechanics">技工 · Mechanics</option><option value="Tailoring">裁缝 · Tailoring</option><option value="Fishing">钓鱼 · Fishing</option><option value="Trapping">诱捕 · Trapping</option><option value="PlantScavenging">搜寻 · PlantScavenging</option><option value="Masonry">石工 · Masonry</option><option value="Pottery">陶艺 · Pottery</option><option value="Glassmaking">玻璃制造 · Glassmaking</option><option value="Husbandry">畜牧 · Husbandry</option><option value="Butchering">屠宰 · Butchering</option><option value="Tracking">追踪 · Tracking</option></select></label><label>经验<input name="amount" type="number" min="1" max="100000" value="100" required></label><button class="primary-button" type="submit">发放经验</button></form>
+            <form class="tool-section" id="vehicleForm"><div class="tool-title"><i data-lucide="car-front"></i><div><h3>生成车辆</h3><p>目标可填玩家名或 x,y,z</p></div></div><label>车辆脚本<input name="script" value="Base.VanAmbulance" maxlength="100" required></label><label>目标<input name="target" maxlength="80" required></label><button class="primary-button" type="submit">生成车辆</button></form>
+            <form class="tool-section" id="keyForm"><div class="tool-title"><i data-lucide="key-round"></i><div><h3>发放钥匙</h3><p>选择当前在线玩家，钥匙 ID 必须为数字</p></div><button class="icon-button help-button" type="button" data-help="key" title="发放钥匙帮助"><i data-lucide="circle-help"></i></button></div><label>在线玩家<select class="online-player-select" name="username" required><option value="">正在读取在线玩家...</option></select></label><label>钥匙 ID<input name="keyId" inputmode="numeric" maxlength="32" required></label><label>名称<input name="name" maxlength="80" required></label><button class="primary-button" type="submit">发放钥匙</button></form>
+            <form class="tool-section" id="safehouseForm"><div class="tool-title"><i data-lucide="house"></i><div><h3>安全屋</h3><p>成员与安全屋释放</p></div></div><label>操作<select name="mode"><option value="addtosafehouse">加入成员</option><option value="kickfromsafehouse">移除成员</option><option value="release">释放安全屋</option></select></label><label>安全屋标题<input name="title" maxlength="100" required></label><label>玩家名<input name="username" maxlength="64"></label><button class="secondary-button" type="submit">应用</button></form>
+            <form class="tool-section" id="userRepairForm"><div class="tool-title"><i data-lucide="user-round-check"></i><div><h3>用户恢复与地图</h3><p>解除用户名封禁或清除共享地图标记</p></div></div><label>操作<select name="mode"><option value="unban">解除用户名封禁</option><option value="remove-map-symbols">清除共享地图标记</option></select></label><label>用户名<input name="username" maxlength="64" required></label><button class="secondary-button" type="submit">执行</button></form>
+            <form class="tool-section danger-zone worldgen-tool" id="worldgenForm"><div class="tool-title"><i data-lucide="map-pinned"></i><div><h3>完整世界生成器</h3><p>状态查询无副作用，其余操作需谨慎</p></div><button class="icon-button help-button" type="button" data-help="worldgen" title="世界生成器帮助"><i data-lucide="circle-help"></i></button></div><div class="worldgen-warning"><i data-lucide="triangle-alert"></i><span><strong>高风险操作</strong> 此服务器版本的 recheck 会立即全量生成缺失地图块，可能长时间占满 CPU，并导致在线玩家无法连接或管理命令失效。</span></div><label>操作<select name="mode"><option value="status">查询状态</option><option value="stop">紧急停止生成</option><option value="start">启动生成</option><option value="recheck">全量重检并生成（高风险）</option></select></label><button class="danger-button" type="submit">执行世界生成操作</button><section class="command-result" id="worldgenResult" data-state="idle" aria-live="polite"><div class="command-result-head"><span class="command-result-icon"><i data-lucide="map"></i></span><div><strong id="worldgenResultTitle">尚未执行查询</strong><small id="worldgenResultMeta">执行后会在这里显示送达状态和服务器返回结果</small></div></div><pre id="worldgenResultOutput">请选择操作并执行。</pre></section></form>
+            <form class="tool-section" id="luaForm"><div class="tool-title"><i data-lucide="file-code-2"></i><div><h3>Lua 热重载</h3><p>仅用于明确了解依赖关系的脚本</p></div><button class="icon-button help-button" type="button" data-help="lua" title="Lua 热重载帮助"><i data-lucide="circle-help"></i></button></div><label>模式<select name="mode"><option value="reloadlua">reloadlua</option><option value="reloadalllua">reloadalllua</option></select></label><label>Lua 文件<input name="file" maxlength="180" required></label><button class="danger-button" type="submit">重载脚本</button></form>
+            <form class="tool-section" id="logLevelForm"><div class="tool-title"><i data-lucide="scroll-text"></i><div><h3>日志级别</h3><p>调整游戏内日志分类</p></div></div><label>分类<input name="category" value="General" maxlength="64" required></label><label>级别<select name="level"><option value="debug">Debug</option><option value="trace">Trace</option><option value="general">General</option><option value="warning">Warning</option><option value="error">Error</option><option value="off">Off</option></select></label><button class="secondary-button" type="submit">应用级别</button></form>
+          </div>
+        </div>
+        <section class="command-catalog command-control"><div class="catalog-legend"><span class="capability available">服务端可执行</span><span class="capability client">仅游戏内管理员</span><span class="capability limited">帮助信息不足</span></div><div id="commandCatalog" class="catalog-grid"></div></section>
+      </section>
+
+      <section class="view" id="view-system">
+        <div class="section-heading page-heading"><div><p class="eyebrow">Windows 主机</p><h2>本机资源监控</h2></div><span class="sample-time" id="systemSampleTime">等待采样</span></div>
+        <div class="system-summary">
+          <div><span>CPU</span><strong id="hostCpu">--</strong><small id="hostCores">--</small></div>
+          <div><span>内存</span><strong id="hostMemory">--</strong><small id="hostMemoryDetail">--</small></div>
+          <div><span>网络吞吐</span><strong id="hostNetwork">--</strong><small>接收与发送合计</small></div>
+          <div><span>系统运行时间</span><strong id="hostUptime">--</strong><small>Windows 主机</small></div>
+        </div>
+        <section class="system-section host-control-section" aria-labelledby="hostControlTitle">
+          <div class="section-heading"><div><p class="eyebrow">物理机权限</p><h2 id="hostControlTitle">开机与重新启动</h2></div><span class="badge neutral" id="hostControlBadge">正在读取</span></div>
+          <div class="host-control-grid">
+            <div class="host-control-row"><span class="host-control-icon"><i data-lucide="monitor-cog"></i></span><div><strong>Web 开机启动</strong><p id="hostStartupDetail">正在检查 Windows 计划任务...</p></div><button class="secondary-button" id="toggleHostStartup" type="button"><i data-lucide="power"></i><span>启用</span></button></div>
+            <div class="host-control-row"><span class="host-control-icon"><i data-lucide="log-in"></i></span><div><strong>自动进入桌面</strong><p id="hostAutoLogonDetail">正在检查 Windows 登录设置...</p></div><button class="secondary-button local-only" id="openHostAutoLogon" type="button"><i data-lucide="download"></i><span>下载本机工具</span></button></div>
+            <div class="host-control-row critical"><span class="host-control-icon"><i data-lucide="rotate-cw"></i></span><div><strong>重新启动物理机</strong><p id="hostRestartDetail">必须先保存并停止全部游戏服务器。</p></div><div class="host-restart-actions"><button class="secondary-button" id="cancelHostRestart" type="button" hidden><i data-lucide="x"></i><span>取消重启</span></button><button class="danger-button" id="restartPhysicalHost" type="button"><i data-lucide="rotate-cw"></i><span>重启物理机</span></button></div></div>
+          </div>
+          <p class="host-control-note">开机任务使用当前 Windows 管理员身份和最高权限，在登录桌面前恢复 Web。自动进入桌面由微软 Sysinternals Autologon 在本机配置，Windows 密码不会经过面板。</p>
+        </section>
+        <section class="system-section"><div class="section-heading"><div><p class="eyebrow">进程</p><h2>面板与游戏服务器</h2></div></div><div class="system-table" id="systemProcesses"><p class="empty-state compact">正在读取进程信息...</p></div></section>
+        <div class="system-columns">
+          <section class="system-section"><div class="section-heading"><div><p class="eyebrow">存储</p><h2>本机磁盘</h2></div></div><div class="resource-list" id="systemDisks"></div></section>
+          <section class="system-section"><div class="section-heading"><div><p class="eyebrow">网络</p><h2>活动网卡</h2></div></div><div class="resource-list" id="systemNetwork"></div></section>
+        </div>
+        <p class="monitor-note">CPU、磁盘和网络数据每 5 秒采样一次，仅打开本页时轮询。“允许逻辑处理器”表示进程亲和性范围，不代表进程此刻正在某个核心执行。</p>
+      </section>
+
+      <section class="view" id="view-maintenance">
+        <div class="section-heading page-heading"><div><p class="eyebrow">受控维护</p><h2>服务器生命周期</h2></div></div>
+        <section class="maintenance-schedule" aria-labelledby="maintenanceScheduleTitle">
+          <div class="section-heading"><div><p class="eyebrow">自动维护检查</p><h2 id="maintenanceScheduleTitle">Mod 更新计划</h2></div><span class="badge neutral" id="maintenanceScheduleBadge">未启用</span></div>
+          <form id="maintenanceScheduleForm">
+            <label class="toggle-field"><input name="enabled" type="checkbox"><span>启用定时检查</span></label>
+            <label>每隔多少小时检查<input name="intervalHours" type="number" min="1" max="168" step="1" value="3" required></label>
+            <label>停服后启动缓冲（秒）<input id="restartStabilizationSeconds" name="restartStabilizationSeconds" type="number" min="10" max="600" step="10" value="60" required><small>旧 Java 完全结束后继续等待，供大内存、端口和 Steam 资源释放；手动安全重启也使用此值。</small></label>
+            <label class="toggle-field auto-restart-toggle"><input name="autoRestartOnUpdate" type="checkbox"><span>发现更新后自动安全重启（固定通知 60 秒）</span></label>
+            <div class="schedule-actions"><button class="primary-button" type="submit"><i data-lucide="save"></i>保存计划</button><button class="secondary-button" id="maintenanceCheckNow" type="button"><i data-lucide="package-search"></i>立即检查</button></div>
+          </form>
+          <dl class="maintenance-schedule-stats"><div><dt>下次检查</dt><dd id="maintenanceNextRun">--</dd></div><div><dt>上次检查</dt><dd id="maintenanceLastRun">--</dd></div><div><dt>上次结果</dt><dd id="maintenanceLastResult">尚未执行</dd></div><div><dt>更新通知</dt><dd id="maintenanceNotification">尚未发送</dd></div></dl>
+          <p class="maintenance-result" id="maintenanceResult" aria-live="polite">通知倒计时与停服后启动缓冲是两个阶段。启用自动重启后，发现 Mod 更新会先通知 60 秒，保存退出后再按上方缓冲时间等待，最后启动新实例。</p>
+        </section>
+        <div class="maintenance-list command-control">
+          <div class="maintenance-row"><div><strong>保存当前世界</strong><p>立即写入所选实例的世界和数据库</p></div><button class="secondary-button" data-action="save"><i data-lucide="save"></i>保存</button></div>
+          <div class="maintenance-row"><div><strong>重新加载服务器选项</strong><p>读取可热加载项并同步到客户端</p></div><button class="secondary-button" data-action="reloadoptions"><i data-lucide="rotate-ccw"></i>重新加载</button></div>
+          <div class="maintenance-row critical"><div><strong>保存并停止所选服务器</strong><p>只调用该配置档显式声明的受控停止脚本</p></div><button class="danger-button" id="stopServer"><i data-lucide="power"></i>保存并停止</button></div>
+          <div class="maintenance-row critical restart-row"><div><strong>安全重启所选服务器</strong><p>先发送全服广播和右下角弹窗，倒计时后保存并正常退出，再按 Mod 更新计划中的停服缓冲等待后启动</p></div><label>通知倒计时（秒）<input id="restartWarningSeconds" type="number" min="10" max="600" step="10" value="60"></label><button class="danger-button" id="restartServer"><i data-lucide="refresh-cw"></i>安全重启</button></div>
+          <div class="maintenance-row"><div><strong>启动所选服务器</strong><p>账号数据库存在时直接启动；清除数据库开新档后，会自动要求设置一次游戏内置 admin 密码</p></div><button class="primary-button" id="startServer"><i data-lucide="play"></i>启动</button></div>
+        </div>
+        <section class="lifecycle-status" id="lifecycleStatus" data-state="idle" aria-live="polite"><div class="section-heading"><div><p class="eyebrow">执行反馈</p><h2 id="lifecycleTitle">当前没有生命周期操作</h2></div><span class="badge neutral" id="lifecycleBadge">空闲</span></div><p id="lifecycleMessage">执行停止、安全重启或程序更新后，这里会显示每个阶段。</p><dl><div><dt>开始时间</dt><dd id="lifecycleStarted">--</dd></div><div><dt>原 Java PID</dt><dd id="lifecycleOldPid">--</dd></div><div><dt>新 Java PID</dt><dd id="lifecycleNewPid">--</dd></div></dl><pre id="lifecycleDetail" hidden></pre><pre id="lifecycleError" hidden></pre></section>
+        <section class="execution-history">
+          <div class="section-heading"><div><p class="eyebrow">命令、查询、物品、广播与维护</p><h2>执行历史</h2></div><div class="history-actions"><select id="executionHistoryFilter" title="筛选执行类型"><option value="all">全部类型</option><option value="query">查询</option><option value="command">命令</option><option value="item">物品发放</option><option value="broadcast">广播通知</option><option value="update">更新检查</option><option value="lifecycle">启停重启</option></select><button class="icon-button" id="refreshExecutionHistory" type="button" title="刷新执行历史"><i data-lucide="refresh-cw"></i></button></div></div>
+          <div class="execution-history-list" id="executionHistoryList"><p class="empty-state compact">正在读取执行历史...</p></div>
+          <nav class="execution-history-pagination" aria-label="执行历史分页">
+            <button class="icon-button" id="executionHistoryPrevious" type="button" title="上一页"><i data-lucide="chevron-left"></i></button>
+            <span><strong id="executionHistoryPage">第 1 / 1 页</strong><small id="executionHistorySummary">每页 30 条</small></span>
+            <button class="icon-button" id="executionHistoryNext" type="button" title="下一页"><i data-lucide="chevron-right"></i></button>
+          </nav>
+        </section>
+        <section class="audit-section"><div class="section-heading"><div><p class="eyebrow">操作留痕</p><h2>最近审计</h2></div><button class="icon-button" id="refreshAudit" title="刷新审计"><i data-lucide="refresh-cw"></i></button></div><pre id="auditOutput">暂无操作</pre></section>
+        <section class="mobile-access"><div><p class="eyebrow">网络访问</p><h2>手机控制</h2><p>局域网可直接使用下方地址。公网访问同样需要登录；Web 用户只能在服务器本机创建和修改。</p><code id="mobileUrl"></code></div><div id="qrcode" aria-label="手机访问二维码"></div></section>
+        <section class="program-update" aria-labelledby="programUpdateTitle">
+          <div class="section-heading"><div><p class="eyebrow">Project Zomboid Dedicated Server · SteamCMD · public</p><h2 id="programUpdateTitle">检测游戏本体是否更新</h2><p class="program-update-lead">这里检查的是游戏服务器本体，不是 Mod 更新。</p></div><span class="badge neutral" id="programUpdateBadge">尚未检查</span></div>
+          <dl class="program-update-stats"><div><dt>服务器日志版本（仅参考）</dt><dd id="programLocalVersion">--</dd></div><div><dt>本地 BuildID（更新依据）</dt><dd id="programLocalBuild">--</dd></div><div><dt>public BuildID（更新依据）</dt><dd id="programRemoteBuild">尚未检查</dd></div><div><dt>SteamCMD</dt><dd id="programSteamCmd">正在检测</dd></div></dl>
+          <div class="program-update-actions"><label>维护通知倒计时（秒）<input id="programUpdateWarningSeconds" type="number" min="10" max="600" step="10" value="60"></label><button class="secondary-button" id="checkProgramUpdate" type="button"><i data-lucide="search-check"></i>检查游戏本体更新</button><button class="danger-button" id="applyProgramUpdate" type="button"><i data-lucide="download"></i>更新游戏本体并重启</button></div>
+          <p class="maintenance-result" id="programUpdateResult" aria-live="polite">检查不会停止服务器。BuildID 表示磁盘文件版本；更新会通知玩家，然后保存、正常退出、更新游戏本体并重新启动 Java 以加载新版本。</p>
+        </section>
+      </section>
+
+      <section class="view" id="view-profiles">
+        <div class="section-heading page-heading"><div><p class="eyebrow">本机配置</p><h2>服务器列表</h2></div><div class="heading-actions"><button class="secondary-button" id="scanProfiles" type="button"><i data-lucide="radar"></i>扫描运行实例</button><button class="primary-button" id="newProfile" type="button"><i data-lucide="plus"></i>添加服务器</button></div></div>
+        <div class="local-config-notice"><i data-lucide="monitor-cog"></i><span>服务器配置只允许从服务器本机的 127.0.0.1 页面新增、编辑和删除。</span></div>
+        <div class="profile-layout">
+          <div class="profile-list" id="profileList"><p class="empty-state">正在读取服务器配置...</p></div>
+          <form class="profile-form" id="profileForm">
+            <input name="mode" type="hidden" value="create">
+            <div class="profile-form-head"><div><p class="eyebrow">配置档</p><h3 id="profileFormTitle">添加服务器</h3></div><span class="badge neutral" id="profileModeBadge">新配置</span></div>
+            <div class="profile-fields">
+              <label>服务器 ID<input name="id" maxlength="32" pattern="[a-z0-9][a-z0-9_-]{0,31}" placeholder="myserver" required></label>
+              <label>显示名称<input name="name" maxlength="64" placeholder="我的服务器" required></label>
+              <label>类型<select name="kind"><option value="custom">自定义</option><option value="test">测试服</option><option value="production">生产服</option></select></label>
+              <label>servername<input name="serverName" maxlength="64" placeholder="servertest" required></label>
+              <label class="wide">运行目录<input name="runtimeRoot" maxlength="260" placeholder="D:\PZ Server" required></label>
+              <label class="wide">数据目录<input name="dataRoot" maxlength="260" placeholder="D:\PZData" required></label>
+              <label class="wide">Java 路径<input name="javaPath" maxlength="300" placeholder="D:\PZ Server\jre64\bin\java.exe" required></label>
+              <label class="wide queue-field">原启动脚本（可选）<input name="sourceStartScript" maxlength="300" placeholder="留空自动扫描运行目录中的 StartServer64.bat"></label>
+              <label class="wide">控制台日志<input name="consoleLog" maxlength="300" placeholder="D:\PZData\server-console.txt" required></label>
+              <label>UDP 端口<input name="ports" maxlength="40" placeholder="16261,16262" required></label>
+              <label>玩家上限<input name="maxPlayers" type="number" min="1" max="1000" value="32" required></label>
+              <label>局域网地址<input name="lanAddress" maxlength="120" placeholder="192.168.1.10:16261"></label>
+              <label>需要服务器密码<select name="passwordRequired"><option value="false">否</option><option value="true">是</option></select></label>
+              <label>命令通道<select name="commandChannel" id="profileChannel"><option value="readonly">只读监控</option><option value="queue">受控命令队列</option></select></label>
+              <label>控制台窗口<select name="showConsole"><option value="false">后台隐藏</option><option value="true">启动时显示</option></select></label>
+              <div class="wide managed-note queue-field"><i data-lucide="wand-sparkles"></i><span>命令队列、状态文件、启停和重启脚本由面板自动创建。原启动脚本留空时自动扫描运行目录；当前实例下次从面板启动后接管。</span></div>
+            </div>
+            <div class="profile-actions"><button class="primary-button" type="submit"><i data-lucide="save"></i>保存配置</button><button class="secondary-button" id="setDefaultProfile" type="button"><i data-lucide="star"></i>设为默认</button><button class="danger-button" id="deleteProfile" type="button"><i data-lucide="trash-2"></i>删除配置</button></div>
+          </form>
+        </div>
+      </section>
+      <section class="view" id="view-users">
+        <div class="section-heading page-heading"><div><p class="eyebrow">仅限服务器本机</p><h2>Web 登录用户</h2></div><button class="primary-button" id="newUser" type="button"><i data-lucide="user-plus"></i>添加用户</button></div>
+        <div class="local-config-notice"><i data-lucide="monitor-cog"></i><span>此页面只能通过服务器本机的 127.0.0.1 地址操作。密码不能查看，编辑时可直接设置新密码。</span></div>
+        <div class="user-layout">
+          <div class="user-list" id="userList"><p class="empty-state">正在读取用户...</p></div>
+          <form class="profile-form" id="userForm">
+            <input name="id" type="hidden">
+            <div class="profile-form-head"><div><p class="eyebrow">登录账号</p><h3 id="userFormTitle">添加用户</h3></div><span class="badge neutral" id="userModeBadge">新用户</span></div>
+            <div class="profile-fields">
+              <label>登录名<input name="username" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,31}" required></label>
+              <label>显示名称<input name="displayName" maxlength="64" required></label>
+              <label class="wide">密码<input name="password" type="password" minlength="10" maxlength="128" autocomplete="new-password" placeholder="编辑时留空表示不修改"></label>
+              <label>允许登录<select name="enabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
+            </div>
+            <div class="profile-actions"><button class="primary-button" type="submit"><i data-lucide="save"></i>保存用户</button><button class="danger-button" id="deleteUser" type="button"><i data-lucide="user-x"></i>删除用户</button></div>
+          </form>
+        </div>
+      </section>
+      <section class="view" id="view-ai">
+        <div class="section-heading page-heading"><div><p class="eyebrow">Web 内置 Bridge</p><h2>游戏内 AI 助手</h2></div><div class="heading-actions"><button class="secondary-button" id="openAIKnowledge" type="button"><i data-lucide="folder-open"></i>打开服务器信息库</button><button class="secondary-button" id="startAI" type="button"><i data-lucide="play"></i>启动</button><button class="secondary-button" id="stopAI" type="button"><i data-lucide="square"></i>停止</button><button class="secondary-button" id="restartAI" type="button"><i data-lucide="rotate-cw"></i>重启</button><button class="secondary-button" id="refreshAI" type="button"><i data-lucide="refresh-cw"></i>刷新</button></div></div>
+        <div class="local-config-notice"><i data-lucide="shield-check"></i><span>Bridge 已集成在 Web 面板进程中。API Key 使用当前 Windows 用户的 DPAPI 加密保存；服务器资料可放入面板目录下的“服务器信息库”，AI 会在实时配置和遥测之后检索这些资料。快速打开按钮会在运行面板的 Windows 主机上打开文件夹。</span></div>
+        <div class="ai-status-grid">
+          <div><span>Bridge 状态</span><strong id="aiRuntimeState">--</strong><small id="aiRuntimeDetail">等待读取</small></div>
+          <div><span>Provider / 模型</span><strong id="aiProviderState">--</strong><small id="aiModelState">--</small></div>
+          <div><span>监听服务器</span><strong id="aiServerCount">--</strong><small id="aiServerState">--</small></div>
+          <div><span>待处理请求</span><strong id="aiPendingCount">--</strong><small id="aiLastReply">最近回复 --</small></div>
+        </div>
+        <div class="ai-layout">
+          <form class="profile-form" id="aiConfigForm">
+            <div class="profile-form-head"><div><p class="eyebrow">模型连接</p><h3>AI Provider 配置</h3></div><span class="badge neutral" id="aiKeyBadge">未配置密钥</span></div>
+            <div class="profile-fields">
+              <label>启用助手<select name="enabled"><option value="false">关闭</option><option value="true">启用</option></select></label>
+              <label>Provider<select name="provider"><option value="openai-responses">OpenAI Responses API</option><option value="anthropic-messages">Anthropic Messages</option><option value="openai-chat">OpenAI Chat Completions</option></select></label>
+              <label class="wide">接口地址<input name="apiUrl" maxlength="300" placeholder="https://api.anthropic.com 或兼容中转地址"></label>
+              <label>认证方式<select name="authMode"><option value="auto">自动匹配 Provider</option><option value="bearer">Authorization: Bearer</option><option value="x-api-key">x-api-key</option></select></label>
+              <label class="wide">模型<div class="ai-model-control"><input name="model" list="aiModelOptions" maxlength="120" autocomplete="off" placeholder="输入模型 ID 或拉取后选择"><button class="secondary-button" id="fetchAIModels" type="button"><i data-lucide="list-restart"></i><span>拉取模型</span></button></div><datalist id="aiModelOptions"></datalist><small id="aiModelHint">可手动填写模型 ID；拉取列表不会保存或启用 AI。</small></label>
+              <label class="wide">API Key<input name="apiKey" type="password" maxlength="512" autocomplete="new-password" placeholder="留空表示不修改现有密钥"></label>
+              <label>推理强度<select name="reasoningEffort"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
+              <label>响应存储<select name="disableResponseStorage"><option value="true">禁用</option><option value="false">允许</option></select></label>
+              <label>temperature<input name="temperature" type="number" min="0" max="1.5" step="0.1" value="0.3"></label>
+              <label>最大输出 Token<input name="maxTokens" type="number" min="100" max="4000" value="700"></label>
+              <label>游戏内回复字符上限<input name="maxReplyCharacters" type="number" min="100" max="3000" value="900"></label>
+              <label>接口超时（秒）<input name="requestTimeoutSeconds" type="number" min="10" max="180" value="60"></label>
+              <label>最大尝试次数<input name="maximumAttempts" type="number" min="1" max="8" value="3"></label>
+              <label>重试基础等待（秒）<input name="retryBaseDelaySeconds" type="number" min="1" max="60" value="3"><small>默认按 3 秒、6 秒递增</small></label>
+              <label>全服 AI 冷却（秒）<input name="globalRequestCooldownSeconds" type="number" min="0" max="60" value="3"><small>保存后需重启游戏服务器生效</small></label>
+              <label>记忆轮数<input name="memoryTurns" type="number" min="0" max="20" value="8"></label>
+              <label>记忆时间（分钟）<input name="memoryMinutes" type="number" min="5" max="240" value="30"></label>
+              <label>通知显示时间（秒）<input name="noticeDurationSeconds" type="number" min="5" max="300" value="15"></label>
+              <label>股票 AI 新闻<select name="stockNewsEnabled"><option value="true">启用</option><option value="false">关闭（不调用 API）</option></select><small>交易 Mod 沙盒中也必须开启</small></label>
+              <label>新闻真实时间冷却（分钟）<input name="stockNewsRealCooldownMinutes" type="number" min="5" max="10080" value="60"><small>每台服务器独立限频，不受游戏加速影响</small></label>
+              <label>新闻最大输出 Token<input name="stockNewsMaxTokens" type="number" min="100" max="1000" value="300"></label>
+              <label>新闻最大字数<input name="stockNewsMaxCharacters" type="number" min="80" max="1000" value="240"></label>
+              <label>新闻失败尝试次数<input name="stockNewsMaximumAttempts" type="number" min="1" max="3" value="1"><small>默认 1 次，避免失败重试放大费用</small></label>
+              <fieldset class="ai-server-picker wide"><legend>监听服务器（启用时至少选择一台）</legend><div id="aiServerPicker"><span class="empty-state compact">正在读取服务器配置...</span></div></fieldset>
+            </div>
+            <div class="profile-actions"><button class="secondary-button" id="clearAIHistory" type="button"><i data-lucide="eraser"></i>清空会话</button><button class="secondary-button" id="testAI" type="button"><i data-lucide="plug-zap"></i>测试连接</button><button class="primary-button" type="submit"><i data-lucide="save"></i>保存配置</button></div>
+          </form>
+          <section class="ai-side">
+            <div class="ai-boundary"><div><i data-lucide="shield-check"></i><strong>当前为只读助手</strong></div><p>可以读取 PZAIServerAgent 活动会话、关联诊断快照、相关沙盒配置和服务器信息库。回复通过 Mod 受管队列校验并定向派发；执行器、任意控制台命令、Shell、Lua、RCON、发物品、封禁和重启权限全部关闭。</p><p id="aiKnowledgeStatus">服务器信息库：等待读取状态</p></div>
+            <section class="ai-guide"><div class="section-heading"><div><p class="eyebrow">内置只读规则</p><h2>SandboxVars 查询规则</h2></div></div><p>字段说明只用于解释含义；回答本服实际数值时，必须优先读取所选服务器的 <code>SandboxVars.lua</code>、服务器 ini、实时遥测或服务器信息库，找不到证据就明确说无法确认。</p><div class="ai-guide-list"><span><b>Zombies</b> 僵尸人口与数量规则</span><span><b>ZombieRespawn</b> 僵尸刷新频率</span><span><b>DayLength</b> 一天时长</span><span><b>HoursForLootRespawn</b> 物资刷新间隔</span><span><b>WaterShut / ElecShut</b> 断水断电时间</span><span><b>XP / XpMultiplier</b> 经验与倍率</span><span><b>Vehicle / CarSpawnRate</b> 车辆与车辆生成</span><span><b>PVP / SafetySystem</b> PVP 与安全系统</span><span><b>MaxPlayers</b> 玩家上限</span><span><b>Mods / Map</b> Mod 与地图列表</span></div></section>
+            <section class="ai-server-status"><div class="section-heading"><div><p class="eyebrow">Mod 链路</p><h2>服务器监听状态</h2></div></div><div id="aiMonitoredServers"><p class="empty-state compact">等待读取 Bridge 状态...</p></div></section>
+            <section class="ai-error" id="aiErrorPanel" hidden><strong>最近错误</strong><pre id="aiLastError"></pre></section>
+          </section>
+        </div>
+        <section class="ai-bridge-log"><div class="section-heading"><div><p class="eyebrow">最后 200 行，自动隐藏凭据</p><h2>Bridge 运行日志</h2></div><button class="icon-button" id="refreshAILog" type="button" title="刷新 Bridge 日志"><i data-lucide="refresh-cw"></i></button></div><pre id="aiBridgeLog">等待读取...</pre></section>
+        <section class="ai-policy-section">
+          <div class="section-heading"><div><p class="eyebrow">服务器 + 玩家名 + SteamID64 完全匹配</p><h2>AI 操作授权</h2></div><button class="secondary-button" id="newAIPolicy" type="button"><i data-lucide="user-plus"></i>添加授权</button></div>
+          <div class="ai-executor-warning" id="aiExecutorWarning"><i data-lucide="shield-alert"></i><span>执行器尚未接入。这里保存的白名单当前不会让 AI 执行游戏操作。</span></div>
+          <div class="ai-policy-layout">
+            <div class="ai-policy-list" id="aiPolicyList"><p class="empty-state compact">正在读取玩家授权...</p></div>
+            <form class="ai-policy-form" id="aiPolicyForm">
+              <input name="id" type="hidden">
+              <div class="profile-form-head"><div><p class="eyebrow">硬权限策略</p><h3 id="aiPolicyFormTitle">添加玩家授权</h3></div><span class="badge neutral" id="aiPolicyMode">新授权</span></div>
+              <div class="profile-fields">
+                <label>服务器<select name="serverId" required></select></label>
+                <label>启用授权<select name="enabled"><option value="true">启用</option><option value="false">停用</option></select></label>
+                <label>玩家名<input name="username" list="aiPolicyPlayerOptions" maxlength="64" autocomplete="off" required></label>
+                <label>SteamID64<input name="steamId" inputmode="numeric" maxlength="17" pattern="7656119[0-9]{10}" autocomplete="off" required></label>
+                <datalist id="aiPolicyPlayerOptions"></datalist>
+                <label class="wide">信任模式<select name="trustedAll"><option value="false">仅允许勾选操作</option><option value="true">完全信任管理员权限</option></select></label>
+                <fieldset class="ai-operation-picker wide"><legend>允许的具体操作</legend><div id="aiOperationPicker"><span class="empty-state compact">正在读取操作目录...</span></div></fieldset>
+              </div>
+              <div class="profile-actions"><button class="danger-button" id="deleteAIPolicy" type="button"><i data-lucide="trash-2"></i>删除</button><button class="primary-button" type="submit"><i data-lucide="save"></i>保存授权</button></div>
+            </form>
+          </div>
+        </section>
+        <section class="ai-moderation-section">
+          <div class="section-heading"><div><p class="eyebrow">固定规则 · 保留 30 天</p><h2>AI 审查名单</h2></div><button class="icon-button" id="refreshAIModeration" type="button" title="刷新 AI 审查名单"><i data-lucide="refresh-cw"></i></button></div>
+          <div class="ai-moderation-summary">
+            <div><span>审查事件</span><strong id="aiModerationTotal">0</strong></div>
+            <div><span>已警告</span><strong id="aiModerationWarned">0</strong></div>
+            <div><span>已踢出</span><strong id="aiModerationKicked">0</strong></div>
+            <div><span>处置失败</span><strong id="aiModerationFailed">0</strong></div>
+          </div>
+          <div class="ai-moderation-list" id="aiModerationList"><p class="empty-state compact">尚无 AI 审查事件。</p></div>
+        </section>
+        <section class="ai-requests"><div class="section-heading"><div><p class="eyebrow">最近 50 条</p><h2>游戏内 AI 请求</h2></div></div><div class="ai-request-list" id="aiRequestList"><p class="empty-state compact">尚无 AI 请求。</p></div></section>
+      </section>
+    </main>
+  </div>
+
+  <nav class="mobile-nav">
+    <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
+  </nav>
+  <dialog class="admin-setup-dialog" id="adminSetupDialog">
+    <form id="adminSetupForm">
+      <div class="help-dialog-head"><div><p class="eyebrow">首次创建游戏账号数据库</p><h2>设置内置 admin 密码</h2></div><button class="icon-button" id="closeAdminSetup" type="button" title="取消"><i data-lucide="x"></i></button></div>
+      <p class="admin-setup-server">目标服务器：<strong id="adminSetupServerName">--</strong></p>
+      <p class="admin-setup-note">检测到该实例的 <code>db\servername.db</code> 不存在。此处设置的是 PZ 游戏内置 <code>admin</code> 账号密码，不是 Web 登录密码、进服密码或 RCON 密码。密码只用于这次启动。</p>
+      <label>新密码<input name="adminPassword" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+      <label>确认密码<input name="confirmPassword" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label>
+      <p class="admin-setup-error" id="adminSetupError" aria-live="polite"></p>
+      <div class="admin-setup-actions"><button class="secondary-button" id="cancelAdminSetup" type="button">取消</button><button class="primary-button" type="submit"><i data-lucide="play"></i>设置并启动</button></div>
+    </form>
+  </dialog>
+  <dialog class="help-dialog" id="helpDialog"><div class="help-dialog-head"><div><p class="eyebrow">当前服务器 B42.20 内置 help</p><h2 id="helpTitle">命令帮助</h2></div><button class="icon-button" id="closeHelp" type="button" title="关闭"><i data-lucide="x"></i></button></div><div id="helpBody" class="help-body"></div><div class="help-actions"><a class="secondary-button" href="https://pzwiki.net/wiki/Admin_commands" target="_blank" rel="noreferrer">PZ Wiki 命令资料</a><button class="secondary-button" id="queryHelp" type="button"><i data-lucide="terminal"></i>向服务器查询 help</button></div></dialog>
+  <script src="/lucide.min.js?v=20260810-2"></script>
+  <script src="/qrcode.min.js?v=20260810-2"></script>
+  <script src="/app.js?v=20260810-2"></script>
+</body>
+</html>
