@@ -160,6 +160,42 @@
         <div class="section-heading page-heading"><div><p class="eyebrow">在线与权限</p><h2>玩家管理</h2></div><div class="heading-actions"><button class="secondary-button" id="exportPlayers" type="button"><i data-lucide="download"></i>导出全部玩家</button><button class="secondary-button command-control" data-action="players"><i data-lucide="refresh-cw"></i>刷新列表</button></div></div>
         <div class="player-summary" id="playerSummary">尚未获取在线玩家列表。</div>
         <div class="player-table" id="playerTable"><p class="empty-state">正在读取玩家和权限...</p></div>
+        <section class="player-data-admin" id="playerDataAdmin">
+          <div class="section-heading"><div><p class="eyebrow">账号与角色数据</p><h2>SteamID 玩家档案</h2></div><span class="badge neutral" id="playerAdminState">尚未查询</span></div>
+          <form class="player-admin-search" id="playerAdminLookupForm">
+            <label><span>SteamID64</span><div><i data-lucide="search"></i><input name="steamId" inputmode="numeric" pattern="7656119[0-9]{10}" minlength="17" maxlength="17" autocomplete="off" placeholder="7656119xxxxxxxxxx" required></div></label>
+            <button class="primary-button" type="submit"><i data-lucide="search"></i>查询档案</button>
+          </form>
+          <p class="player-admin-message" id="playerAdminMessage">按 SteamID64 查询关联账号、角色、允许列表和封禁状态。</p>
+          <div class="player-admin-result" id="playerAdminResult" hidden>
+            <dl class="player-admin-summary">
+              <div><dt>SteamID64</dt><dd><code id="playerAdminSteamId">--</code></dd></div>
+              <div><dt>关联账号</dt><dd id="playerAdminAccountCount">0</dd></div>
+              <div><dt>角色存档</dt><dd id="playerAdminCharacterCount">0</dd></div>
+              <div><dt>允许 / 封禁</dt><dd id="playerAdminAccessState">--</dd></div>
+            </dl>
+            <div class="player-admin-records">
+              <section><h3>关联账号</h3><div id="playerAdminAccounts"></div></section>
+              <section><h3>角色存档</h3><div id="playerAdminCharacters"></div></section>
+            </div>
+            <div class="player-admin-actions">
+              <form class="player-password-form" id="playerPasswordForm">
+                <div class="tool-title"><i data-lucide="key-round"></i><div><h3>修改账号密码</h3><p>通过运行中的 PZ 官方 setpassword 命令执行</p></div></div>
+                <label>关联账号<select name="username" required></select></label>
+                <label>新密码<input name="password" type="password" maxlength="128" autocomplete="new-password" required></label>
+                <label>再次输入<input name="passwordConfirm" type="password" maxlength="128" autocomplete="new-password" required></label>
+                <button class="primary-button" type="submit"><i data-lucide="key-round"></i>提交密码修改</button>
+                <p id="playerPasswordHint">服务器运行时可用。</p>
+              </form>
+              <form class="player-delete-form" id="playerDeleteForm">
+                <div class="tool-title"><i data-lucide="database-zap"></i><div><h3>永久删除玩家数据</h3><p>先备份账号库与角色库，保留封禁和审计记录</p></div></div>
+                <label>输入目标 SteamID 确认<input name="confirmSteamId" inputmode="numeric" maxlength="17" autocomplete="off" required></label>
+                <button class="danger-button" type="submit"><i data-lucide="trash-2"></i>删除账号与角色数据</button>
+                <p id="playerDeleteHint">仅在服务器完全停止且无维护任务时可用。</p>
+              </form>
+            </div>
+          </div>
+        </section>
         <div class="forms-grid command-control">
           <form class="tool-section" id="accessForm"><div class="tool-title"><i data-lucide="shield-check"></i><div><h3>访问级别</h3><p>页面玩家列表优先显示在线玩家，也可手工输入</p></div></div><label>游戏内用户名<input name="username" maxlength="64" autocomplete="new-password" required></label><label>权限<select name="level"><option value="admin">管理员</option><option value="moderator">版主</option><option value="overseer">监管员</option><option value="gm">GM</option><option value="observer">观察员</option></select></label><div class="button-pair"><button class="primary-button" type="submit" data-access="selected">应用权限</button><button class="secondary-button" type="submit" data-access="none">撤销权限</button></div></form>
           <form class="tool-section" id="stateForm"><div class="tool-title"><i data-lucide="user-cog"></i><div><h3>玩家状态</h3><p>测试用临时状态开关</p></div></div><label>游戏内用户名<input name="username" maxlength="64" required></label><label>状态<select name="feature"><option value="godmodplayer">上帝模式</option><option value="invisibleplayer">隐身</option><option value="noclip">穿墙</option><option value="voiceban">语音禁用</option></select></label><div class="button-pair"><button class="secondary-button" type="submit" data-enabled="true">启用</button><button class="secondary-button" type="submit" data-enabled="false">关闭</button></div></form>
@@ -384,6 +420,20 @@
             <section class="ai-error" id="aiErrorPanel" hidden><strong>最近错误</strong><pre id="aiLastError"></pre></section>
           </section>
         </div>
+        <section class="ai-knowledge-builder" id="aiKnowledgeBuilder" data-state="idle">
+          <div class="section-heading"><div><p class="eyebrow">本机脱敏索引 + 自适应推理解释层</p><h2>构建服务器知识库</h2></div><span class="badge neutral" id="aiKnowledgeBuildBadge">未运行</span></div>
+          <form class="ai-knowledge-build-form" id="aiKnowledgeBuildForm">
+            <label>目标服务器<select name="serverId" id="aiKnowledgeBuildServer" required><option value="">正在读取服务器...</option></select></label>
+            <label>临时构建模型<input name="model" id="aiKnowledgeBuildModel" list="aiModelOptions" maxlength="120" autocomplete="off" placeholder="留空使用当前模型"><small>仅用于本次知识库构建，不修改日常回答模型。</small></label>
+            <label>构建推理强度<select name="reasoningEffort" id="aiKnowledgeBuildReasoning"><option value="auto" selected>自动（推荐）</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select><small>DeepSeek Flash 仅允许 Auto/Low；官方 DeepSeek 的 V4 Pro 构建会自动使用可用的 Chat 路由，并保留所选推理强度。</small></label>
+            <div class="ai-knowledge-build-actions"><button class="danger-button" id="cancelAIKnowledgeBuild" type="button" disabled><i data-lucide="square"></i>取消</button><button class="primary-button" type="submit"><i data-lucide="database"></i>构建知识库</button></div>
+          </form>
+          <div class="ai-knowledge-build-status">
+            <div><strong id="aiKnowledgeBuildState">尚未构建</strong><small id="aiKnowledgeBuildMessage">自动知识库与外部手工资料会在玩家问答时共同检索。</small></div>
+            <progress id="aiKnowledgeBuildProgress" max="100" value="0"></progress>
+            <dl><div><dt>进度</dt><dd id="aiKnowledgeBuildChunks">0 / 0</dd></div><div><dt>沙盒字段</dt><dd id="aiKnowledgeBuildFields">--</dd></div><div><dt>启用 Mod</dt><dd id="aiKnowledgeBuildMods">--</dd></div><div><dt>最近完成</dt><dd id="aiKnowledgeBuildTime">--</dd></div></dl>
+          </div>
+        </section>
         <section class="ai-bridge-log"><div class="section-heading"><div><p class="eyebrow">最后 200 行，自动隐藏凭据</p><h2>Bridge 运行日志</h2></div><button class="icon-button" id="refreshAILog" type="button" title="刷新 Bridge 日志"><i data-lucide="refresh-cw"></i></button></div><pre id="aiBridgeLog">等待读取...</pre></section>
         <section class="ai-policy-section">
           <div class="section-heading"><div><p class="eyebrow">服务器 + 玩家名 + SteamID64 完全匹配</p><h2>AI 操作授权</h2></div><button class="secondary-button" id="newAIPolicy" type="button"><i data-lucide="user-plus"></i>添加授权</button></div>

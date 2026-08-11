@@ -6,6 +6,7 @@ const titles={overview:'服务器总览',console:'实时日志',chat:'游戏聊�
 let selectedId=qs.get('server')||localStorage.getItem('pz-server')||'',activeView=initialView;
 let cursor=0,paused=false,filter='all',logLines=[],lastStatus=null,statusBusy=false,logBusy=false;
 let profileConfig=null,editingProfileId='',playerDirectory=null,playersBusy=false,playerRequestServer='',playerRequestSerial=0,lastPlayersRefreshAt=0;
+let playerAdminSnapshot=null,playerAdminBusy=false,playerAdminSerial=0;
 let authSession=null,csrfToken='',appStarted=false,statusTimer=null,logTimer=null,systemTimer=null,userDirectory=[];
 let itemSearchTimer=null,itemPollTimer=null,itemRequestSerial=0,itemIndexSnapshot=null,systemBusy=false,hostControlState=null;
 let itemCatalogTimer=null,itemCatalogSerial=0,itemCatalogPage=1,itemCatalogSnapshot=null,itemCatalogSelected=null;
@@ -13,7 +14,7 @@ let chatCursor=0,chatFile='',chatMessages=[],chatFilter='all',chatBusy=false,cha
 let commandResultSerial=0,lifecycleSerial=0,lifecycleOperation=null;
 let maintenanceSchedule=null,maintenanceBusy=false,programUpdateStatus=null,programUpdateBusy=false;
 let noticeStatusBusy=false,noticeStatusServer='',noticeChannel=null,noticeSerial=0,noticeLastCheckedAt=0,noticeStatusError='';
-let aiConfig=null,aiBusy=false;
+let aiConfig=null,aiBusy=false,aiKnowledgeBuild=null,aiKnowledgeTimer=null;
 let broadcastSchedules=[],broadcastScheduleBusy=false,executionHistory=[],executionHistoryPage=1,executionHistoryPageSize=30,executionHistoryTotal=0,executionHistoryTotalPages=1;
 let aiPolicies=[],aiOperations=[],aiPolicyPlayers=[],aiModerationEvents=[];
 
@@ -211,12 +212,13 @@ function renderCurrentServer(){
   start.title=server.startReason||'';
   stop.disabled=lifecycleBusy||!server.canStop||!server.alive;
   restart.disabled=lifecycleBusy||!server.canRestart||!server.alive;
+  if(playerAdminSnapshot)renderPlayerAdmin();
   updateChatMode();
 }
 function selectServer(id){
   if(id===selectedId&&currentServer())return;
   closeAdminSetupDialog();
-  selectedId=id;localStorage.setItem('pz-server',id);cursor=0;logLines=[];chatCursor=0;chatFile='';chatMessages=[];chatFollowLatest=true;worldgenSerial+=1;commandResultSerial+=1;lifecycleSerial+=1;noticeSerial+=1;playerRequestSerial+=1;playersBusy=false;playerRequestServer='';noticeStatusServer='';noticeChannel=null;noticeLastCheckedAt=0;noticeStatusError='';lifecycleOperation=null;executionHistory=[];executionHistoryPage=1;executionHistoryTotal=0;executionHistoryTotalPages=1;document.querySelector('#commandResultTray').hidden=true;renderChat(true);renderWorldgenResult('idle','尚未执行查询','已切换服务器，请重新执行世界生成查询','请选择操作并执行。');playerDirectory=null;document.querySelector('#playerSummary').textContent='正在读取在线玩家...';document.querySelector('#playerTable').innerHTML='<p class="empty-state">正在读取所选服务器玩家列表...</p>';renderOnlinePlayerSelects();itemIndexSnapshot=null;renderItemIndexStatus({});itemRequestSerial+=1;clearTimeout(itemSearchTimer);clearTimeout(itemPollTimer);clearTimeout(itemCatalogTimer);resetItemCatalog();closeItemResults();itemSearchStatus.textContent='正在读取物品缓存状态...';
+  selectedId=id;localStorage.setItem('pz-server',id);cursor=0;logLines=[];chatCursor=0;chatFile='';chatMessages=[];chatFollowLatest=true;worldgenSerial+=1;commandResultSerial+=1;lifecycleSerial+=1;noticeSerial+=1;playerRequestSerial+=1;playerAdminSerial+=1;playerAdminBusy=false;playerAdminSnapshot=null;playersBusy=false;playerRequestServer='';noticeStatusServer='';noticeChannel=null;noticeLastCheckedAt=0;noticeStatusError='';lifecycleOperation=null;executionHistory=[];executionHistoryPage=1;executionHistoryTotal=0;executionHistoryTotalPages=1;document.querySelector('#commandResultTray').hidden=true;renderChat(true);renderWorldgenResult('idle','尚未执行查询','已切换服务器，请重新执行世界生成查询','请选择操作并执行。');playerDirectory=null;document.querySelector('#playerSummary').textContent='正在读取在线玩家...';document.querySelector('#playerTable').innerHTML='<p class="empty-state">正在读取所选服务器玩家列表...</p>';document.querySelector('#playerAdminLookupForm').reset();renderPlayerAdmin();renderOnlinePlayerSelects();itemIndexSnapshot=null;renderItemIndexStatus({});itemRequestSerial+=1;clearTimeout(itemSearchTimer);clearTimeout(itemPollTimer);clearTimeout(itemCatalogTimer);resetItemCatalog();closeItemResults();itemSearchStatus.textContent='正在读取物品缓存状态...';
   document.querySelector('#logOutput').textContent='正在读取所选服务器日志...';
   renderPicker();renderServerStrip();renderCurrentServer();pollLog();if(activeView==='chat'){pollChat();refreshNoticeStatus(true);refreshBroadcastSchedules()}if(activeView==='maintenance'){refreshLifecycleStatus();refreshMaintenanceSchedule();refreshProgramUpdateStatus();refreshExecutionHistory()}refreshPlayers();refreshItemStatus();if(activeView==='items')refreshItemCatalog();
 }
@@ -407,12 +409,25 @@ async function followBroadcastResults(serverId,requestIds,serial){
   }
   renderCommandResult('warning','全服广播等待超时',`共 ${total} 段 · 发送状态尚未全部确认`,'请在实时日志或聊天记录中查看后续结果。');
 }
+function renderPersistedItemGrantResult(submission,count){
+  if(!submission?.found||!submission.resultCode)return false;
+  const status=String(submission.status||''),code=String(submission.resultCode||''),terminal=status==='failed'||['completed','completed-with-warning','item-result-unconfirmed','failed'].includes(code);
+  if(!terminal)return false;
+  const failed=status==='failed'||code==='failed',warning=status==='warning'||code==='completed-with-warning'||code==='item-result-unconfirmed',state=failed?'error':warning?'warning':'success';
+  const title=failed?'物品发放任务已结束，存在失败':warning?'物品发放已结束，部分结果需核对':'物品发放已由游戏服务器确认';
+  renderCommandResult(state,title,`持久化任务已完成 · 共 ${Number(submission.targetCount||count)} 人`,submission.resultMessage||'执行历史已经记录物品发放完成。');
+  return true;
+}
 async function followItemGrantResults(serverId,submission,serial){
-  const itemIds=[...new Set((submission.itemRequestIds||submission.requestIds||[]).filter(Boolean))],notificationIds=[...new Set((submission.notificationRequestIds||[]).filter(Boolean))],allIds=[...new Set([...itemIds,...notificationIds])],count=Number(submission.targetCount||itemIds.length),noticeId=submission.noticeId||'',initialWarnings=[...(submission.notificationWarnings||[])];
+  const itemIds=[...new Set((submission.itemRequestIds||submission.requestIds||[]).filter(Boolean))],notificationIds=[...new Set((submission.notificationRequestIds||[]).filter(Boolean))],allIds=[...new Set([...itemIds,...notificationIds])],count=Number(submission.targetCount||itemIds.length),noticeId=submission.noticeId||'',submissionId=submission.submissionId||'',initialWarnings=[...(submission.notificationWarnings||[])];
   for(let attempt=0;attempt<55;attempt+=1){
     await sleep(attempt?1000:450);if(serial!==commandResultSerial||serverId!==selectedId)return;
     try{
-      const batch=await api(`/api/command/results?serverId=${encodeURIComponent(serverId)}&ids=${encodeURIComponent(allIds.join(','))}`),results=batch.results||[];if(serial!==commandResultSerial||serverId!==selectedId)return;
+      const [batch,persisted]=await Promise.all([
+        api(`/api/command/results?serverId=${encodeURIComponent(serverId)}&ids=${encodeURIComponent(allIds.join(','))}`),
+        submissionId?api(`/api/command/submission?serverId=${encodeURIComponent(serverId)}&id=${encodeURIComponent(submissionId)}`,{timeoutMs:3000}).catch(()=>null):Promise.resolve(null),
+      ]),results=batch.results||[];if(serial!==commandResultSerial||serverId!==selectedId)return;
+      if(renderPersistedItemGrantResult(persisted,count))return;
       const byId=new Map(allIds.map((id,index)=>[id,results[index]])),itemResults=itemIds.map(id=>byId.get(id)),notificationResults=notificationIds.map(id=>byId.get(id));
       const itemConfirmed=itemResults.filter(data=>data?.gameStatus==='success'||data?.resultCode==='item-added'),itemFailed=itemResults.filter(data=>data?.gameStatus==='failed'||data?.status==='failed'||data?.receipt?.status==='failed'),itemUnconfirmed=itemResults.filter(data=>data?.gameStatus==='unconfirmed'),itemDelivered=itemResults.filter(data=>data?.gameStatus==='pending'||(!data?.gameStatus&&data?.receipt?.status==='completed')),itemQueued=itemResults.filter(data=>!data?.receipt&&!['success','failed','unconfirmed','pending'].includes(data?.gameStatus)),notificationFailed=notificationResults.filter(data=>data?.status==='failed'||data?.receipt?.status==='failed'),notificationCompleted=notificationResults.filter(data=>data?.receipt?.status==='completed');
       let popup=null;if(noticeId)popup=await api(`/api/notices/receipt?serverId=${encodeURIComponent(serverId)}&id=${encodeURIComponent(noticeId)}`);if(serial!==commandResultSerial||serverId!==selectedId)return;
@@ -471,7 +486,27 @@ function renderPlayers(){
   const header='<div class="player-table-head"><span>玩家</span><span>状态</span><span>SteamID</span><span>权限</span><span>最近连接</span></div>';
   const rows=list=>list.map(player=>`<button type="button" class="player-table-row ${player.online?'online':''}" data-player-name="${escapeHtml(player.username)}" data-steam-id="${escapeHtml(player.steamId||'')}"><strong>${escapeHtml(player.username)}</strong><span><i></i>${player.online?'在线':'离线'}</span><code>${escapeHtml(player.steamId||'未记录')}</code><b class="role-badge ${escapeHtml(player.role)}">${escapeHtml(roleLabels[player.role]||player.role)}</b><time>${escapeHtml(player.lastConnection||'--')}</time></button>`).join('');
   table.innerHTML=`<section class="player-group"><div class="player-group-title"><strong>在线玩家</strong><span>${onlineKnown?`${online.length} 人`:'未知'}</span></div>${online.length?header+rows(online):`<p class="empty-state compact">${onlineKnown?'当前没有在线玩家。':'当前日志无法确认在线玩家。'}</p>`}</section><details class="player-history"><summary><span>历史玩家</span><b>${history.length} 人</b></summary>${history.length?header+rows(history):'<p class="empty-state compact">没有其他历史玩家。</p>'}</details>`;
-  table.querySelectorAll('[data-player-name]').forEach(row=>row.onclick=()=>{document.querySelector('#accessForm input[name="username"]').value=row.dataset.playerName;const steamInput=document.querySelector('#steamForm input[name="steamId"]');if(steamInput&&row.dataset.steamId)steamInput.value=row.dataset.steamId});
+  table.querySelectorAll('[data-player-name]').forEach(row=>row.onclick=()=>{document.querySelector('#accessForm input[name="username"]').value=row.dataset.playerName;const steamInput=document.querySelector('#steamForm input[name="steamId"]');if(steamInput&&row.dataset.steamId)steamInput.value=row.dataset.steamId;if(row.dataset.steamId){document.querySelector('#playerAdminLookupForm input[name="steamId"]').value=row.dataset.steamId;queryPlayerAdmin(row.dataset.steamId)}});
+}
+function renderPlayerAdmin(data=playerAdminSnapshot){
+  const result=document.querySelector('#playerAdminResult'),state=document.querySelector('#playerAdminState'),message=document.querySelector('#playerAdminMessage');
+  if(!data){result.hidden=true;state.textContent='尚未查询';state.className='badge neutral';message.textContent='按 SteamID64 查询关联账号、角色、允许列表和封禁状态。';return}
+  const accounts=data.accounts||[],characters=data.characters||[],server=currentServer(),running=Boolean(server?.alive),lifecycleActive=Boolean(data.lifecycleActive),deletable=accounts.length>0||characters.length>0||data.allowed;
+  result.hidden=false;state.textContent=data.found?'已找到档案':'未找到档案';state.className=`badge ${data.found?'running':'neutral'}`;
+  document.querySelector('#playerAdminSteamId').textContent=data.steamId||'--';document.querySelector('#playerAdminAccountCount').textContent=String(accounts.length);document.querySelector('#playerAdminCharacterCount').textContent=String(characters.length);document.querySelector('#playerAdminAccessState').textContent=`${data.allowed?'允许':'未允许'} / ${data.banned?'已封禁':'未封禁'}`;
+  document.querySelector('#playerAdminAccounts').innerHTML=accounts.length?accounts.map(account=>`<div class="player-admin-record"><span><strong>${escapeHtml(account.username)}</strong><small>${escapeHtml(account.displayName||'无显示名')} · ${escapeHtml(roleLabels[account.role]||account.role||'普通玩家')}</small></span><b class="${account.online?'online':''}">${account.online?'在线':'离线'}</b><code>${escapeHtml(account.steamId||account.ownerId||'未记录')}</code><time>${escapeHtml(account.lastConnection||'--')}</time></div>`).join(''):'<p class="empty-state compact">没有关联账号。</p>';
+  document.querySelector('#playerAdminCharacters').innerHTML=characters.length?characters.map(character=>`<div class="player-admin-record"><span><strong>${escapeHtml(character.name||character.username||'未命名角色')}</strong><small>${escapeHtml(character.username||'未知账号')} · 槽位 ${Number(character.playerIndex||0)}</small></span><b class="${character.isDead?'dead':''}">${character.isDead?'已死亡':'存活'}</b><code>${Number(character.x||0)}, ${Number(character.y||0)}, ${Number(character.z||0)}</code><time>${escapeHtml(character.world||'--')}</time></div>`).join(''):'<p class="empty-state compact">没有关联角色存档。</p>';
+  const passwordForm=document.querySelector('#playerPasswordForm'),passwordSelect=passwordForm.elements.username,passwordButton=passwordForm.querySelector('button[type="submit"]');passwordSelect.innerHTML=accounts.map(account=>`<option value="${escapeHtml(account.username)}">${escapeHtml(account.username)}${account.online?' · 在线':''}</option>`).join('');passwordSelect.disabled=!accounts.length;passwordButton.disabled=!accounts.length||!running;
+  document.querySelector('#playerPasswordHint').textContent=!accounts.length?'没有可修改的关联账号。':running?'密码不会写入 Web 历史或 API 回包。':'服务器已停止，官方 setpassword 命令不可用。';
+  const deleteForm=document.querySelector('#playerDeleteForm'),deleteButton=deleteForm.querySelector('button[type="submit"]');deleteButton.disabled=!deletable||running||lifecycleActive;deleteForm.elements.confirmSteamId.value='';
+  document.querySelector('#playerDeleteHint').textContent=!deletable?'没有可删除的账号、角色或允许列表数据。':running?'服务器正在运行，必须先安全停服。':lifecycleActive?'服务器生命周期任务尚未结束。':'可删除；执行前会自动备份两个数据库。';
+  message.textContent=data.found?`已读取 ${data.serverName||server?.name||'服务器'} 的玩家档案。封禁记录不会随账号删除。`:`SteamID ${data.steamId} 没有关联记录。`;
+  lucide.createIcons();
+}
+async function queryPlayerAdmin(steamId=document.querySelector('#playerAdminLookupForm input[name="steamId"]').value.trim()){
+  if(!selectedId||playerAdminBusy)return false;if(!/^7656119\d{10}$/.test(steamId)){toast('请输入 7656119 开头的 17 位 SteamID64。',true);return false}
+  const serverId=selectedId,serial=++playerAdminSerial;playerAdminBusy=true;document.querySelector('#playerAdminState').textContent='查询中';document.querySelector('#playerAdminMessage').textContent='正在读取账号数据库与角色数据库...';
+  try{const data=await api(`/api/player-admin?serverId=${encodeURIComponent(serverId)}&steamId=${encodeURIComponent(steamId)}`);if(serial!==playerAdminSerial||serverId!==selectedId)return false;playerAdminSnapshot=data;renderPlayerAdmin();return data}catch(error){if(serial===playerAdminSerial&&serverId===selectedId){playerAdminSnapshot=null;renderPlayerAdmin();document.querySelector('#playerAdminMessage').textContent=error.message;toast(error.message,true)}return false}finally{if(serial===playerAdminSerial)playerAdminBusy=false}
 }
 function renderOnlinePlayerSelects(){
   const online=(playerDirectory?.players||[]).filter(player=>player.online).sort((a,b)=>a.username.localeCompare(b.username,'zh-CN'));
@@ -550,6 +585,9 @@ document.querySelectorAll('.command-control input[name="username"],.command-cont
 });
 document.querySelectorAll('[data-action]').forEach(button=>button.onclick=()=>command({action:button.dataset.action}));
 document.querySelector('#exportPlayers').onclick=()=>{if(!selectedId){toast('请先选择服务器。',true);return}location.href=`/api/players/export?serverId=${encodeURIComponent(selectedId)}`};
+document.querySelector('#playerAdminLookupForm').onsubmit=event=>{event.preventDefault();queryPlayerAdmin()};
+document.querySelector('#playerPasswordForm').onsubmit=async event=>{event.preventDefault();if(!playerAdminSnapshot)return;const values=formData(event.currentTarget);if(values.password!==values.passwordConfirm){toast('两次输入的新密码不一致。',true);return}if(!confirm(`确认修改账号 ${values.username} 的游戏密码？`))return;try{const result=await api('/api/player-admin/password',{method:'POST',body:JSON.stringify({serverId:selectedId,steamId:playerAdminSnapshot.steamId,username:values.username,password:values.password,passwordConfirm:values.passwordConfirm})});event.currentTarget.elements.password.value='';event.currentTarget.elements.passwordConfirm.value='';toast(result.message)}catch(error){toast(error.message,true)}};
+document.querySelector('#playerDeleteForm').onsubmit=async event=>{event.preventDefault();if(!playerAdminSnapshot)return;const confirmSteamId=event.currentTarget.elements.confirmSteamId.value.trim(),steamId=playerAdminSnapshot.steamId;if(confirmSteamId!==steamId){toast('确认 SteamID 与目标不一致。',true);return}if(!confirm(`永久删除 SteamID ${steamId} 的账号和角色数据？\n\n执行前会自动备份数据库；封禁记录和审计日志保留。`))return;try{const result=await api('/api/player-admin',{method:'DELETE',body:JSON.stringify({serverId:selectedId,steamId,confirmSteamId,confirm:'DELETE_PLAYER_DATA'}),timeoutMs:30000});toast(result.message);document.querySelector('#playerAdminMessage').textContent=`${result.message} 备份：${result.backupPath}`;await refreshPlayers();await queryPlayerAdmin(steamId)}catch(error){toast(error.message,true)}};
 document.querySelector('#refreshBtn').onclick=()=>{refreshStatus();pollLog();pollChat(true)};
 document.querySelectorAll('#logFilters button').forEach(button=>button.onclick=()=>{document.querySelectorAll('#logFilters button').forEach(item=>item.classList.remove('active'));button.classList.add('active');filter=button.dataset.filter;renderLog()});
 document.querySelector('#pauseLog').onclick=()=>{paused=!paused;document.querySelector('#pauseLog').innerHTML=`<i data-lucide="${paused?'play':'pause'}"></i>`;lucide.createIcons();if(!paused)pollLog()};
@@ -882,6 +920,11 @@ function renderAIConfig(config){
   aiForm.elements.apiKey.placeholder=config.apiKeyConfigured?'密钥已保存，留空表示不修改':'输入 API Key 或中转站令牌';
   const badge=document.querySelector('#aiKeyBadge');badge.textContent=config.apiKeyConfigured?'密钥已配置':'未配置密钥';badge.className=`badge ${config.apiKeyConfigured?'running':'neutral'}`;
   document.querySelector('#aiServerPicker').innerHTML=(config.allServers||[]).map(server=>`<label><input type="checkbox" name="serverIds" value="${escapeHtml(server.id)}" ${server.enabled?'checked':''}><span>${escapeHtml(server.name)} <small>${escapeHtml(server.id)}</small></span></label>`).join('')||'<span class="empty-state compact">面板中没有服务器配置。</span>';
+  const buildServer=document.querySelector('#aiKnowledgeBuildServer'),previous=buildServer.value;
+  buildServer.innerHTML=(config.allServers||[]).map(server=>`<option value="${escapeHtml(server.id)}">${escapeHtml(server.name)} · ${escapeHtml(server.id)}</option>`).join('')||'<option value="">没有服务器配置</option>';
+  const preferred=(config.allServers||[]).some(server=>server.id===previous)?previous:(config.allServers||[]).some(server=>server.id===selectedId)?selectedId:(config.serverIds||[])[0]||(config.allServers||[])[0]?.id||'';
+  buildServer.value=preferred;
+  const buildModel=document.querySelector('#aiKnowledgeBuildModel');if(!buildModel.value)buildModel.value=config.model||'';
 }
 function renderAIStatus(status){
   const state=status.running?(status.processing?'正在处理':'运行中'):status.enabled?'配置不完整':'已关闭';
@@ -899,6 +942,27 @@ function renderAIStatus(status){
   document.querySelector('#aiMonitoredServers').innerHTML=`<div class="ai-server-list">${monitored.map(server=>`<div class="ai-server-row"><strong>${escapeHtml(server.name)}</strong><span class="${server.listening&&server.managedResponseQueue?'':'offline'}">${server.listening?(server.managedResponseQueue?'受管队列就绪':'正在监听，协议能力未确认'):server.sessionAvailable?'等待首次轮询':'没有活动会话'}</span><small>${escapeHtml(server.id)} · Mod ${escapeHtml(server.modVersion||'--')} · 游戏 ${escapeHtml(server.gameVersion||'--')} · slot ${server.slot??'--'} · 最近读取 ${formatDate(server.lastSeenAt)}</small></div>`).join('')||'<p class="empty-state compact">没有启用的监听服务器。</p>'}</div>`;
   const errorPanel=document.querySelector('#aiErrorPanel');errorPanel.hidden=!status.lastError;document.querySelector('#aiLastError').textContent=status.lastError||'';
 }
+function renderAIKnowledgeBuild(data={}){
+  aiKnowledgeBuild=data;clearTimeout(aiKnowledgeTimer);
+  const active=Boolean(data.active),status=data.status||'idle',total=Number(data.totalChunks||0),completed=Number(data.completedChunks||0),labels={idle:'未运行',scanning:'本机解析',generating:'模型生成',finalizing:'正在发布',completed:'已完成',failed:'失败',cancelled:'已取消'};
+  const panel=document.querySelector('#aiKnowledgeBuilder'),badge=document.querySelector('#aiKnowledgeBuildBadge'),form=document.querySelector('#aiKnowledgeBuildForm');panel.dataset.state=status;
+  badge.textContent=labels[status]||status;badge.className=`badge ${status==='completed'?'running':status==='failed'?'stopped':'neutral'}`;
+  const effort=data.reasoningEffort&&data.reasoningEffort!=='auto'?` · ${String(data.reasoningEffort).toUpperCase()}`:'';
+  const buildServerName=data.serverName||data.serverId||'',buildModel=data.model?` · ${data.model}`:'',buildProvider=data.provider?` · ${data.provider==='openai-chat'?'Chat':data.provider==='openai-responses'?'Responses':data.provider}`:'';
+  document.querySelector('#aiKnowledgeBuildState').textContent=buildServerName?`${labels[status]||status} · ${buildServerName}${buildModel}${buildProvider}${effort}`:labels[status]||'尚未构建';
+  document.querySelector('#aiKnowledgeBuildMessage').textContent=data.error||data.message||'自动知识库与外部手工资料会在玩家问答时共同检索。';
+  const progress=status==='completed'?100:status==='scanning'?8:status==='finalizing'?97:total?Math.min(94,10+Math.round(completed/total*84)):0;
+  document.querySelector('#aiKnowledgeBuildProgress').value=progress;
+  document.querySelector('#aiKnowledgeBuildChunks').textContent=`${completed} / ${total}`;
+  document.querySelector('#aiKnowledgeBuildFields').textContent=data.sandboxFields?Number(data.sandboxFields).toLocaleString('zh-CN'):'--';
+  document.querySelector('#aiKnowledgeBuildMods').textContent=data.enabledMods?`${Number(data.enabledMods).toLocaleString('zh-CN')} / Workshop ${Number(data.workshopItems||0).toLocaleString('zh-CN')}`:'--';
+  document.querySelector('#aiKnowledgeBuildTime').textContent=formatDate(data.completedAt);
+  form.querySelector('button[type="submit"]').disabled=active||authSession?.user?.username!=='admin';
+  document.querySelector('#cancelAIKnowledgeBuild').disabled=!active||authSession?.user?.username!=='admin';
+  form.elements.serverId.disabled=active;form.elements.model.disabled=active;form.elements.reasoningEffort.disabled=active;
+  if(active&&activeView==='ai')aiKnowledgeTimer=setTimeout(refreshAIKnowledgeBuild,1500);
+}
+async function refreshAIKnowledgeBuild(){try{renderAIKnowledgeBuild(await api('/api/ai/knowledge/build'))}catch(error){document.querySelector('#aiKnowledgeBuildMessage').textContent=error.message}}
 function renderAIRequests(requests){
   const labels={queued:'排队',processing:'模型处理中',retrying:'等待重试','queue-written':'等待服务端校验',answered:'服务端已派发','terminal-failure':'处理终止','response-rejected':'服务端拒绝','moderation-warning':'审查警告','moderation-kicked':'自动踢出','moderation-action-failed':'处置失败'};
   const failed=new Set(['terminal-failure','response-rejected','moderation-action-failed']);
@@ -954,7 +1018,7 @@ async function refreshAIPage(){
   if(aiBusy||!authSession)return;aiBusy=true;
   try{
     const [config,status,records,policies,moderation,bridgeLog]=await Promise.all([api('/api/ai/config'),api('/api/ai/status'),api('/api/ai/requests'),api('/api/ai/policies'),api('/api/ai/moderation'),api('/api/ai/log?tail=200')]);
-    renderAIConfig(config);renderAIStatus(status);renderAIRequests(records.requests||[]);renderAIPoliciesPayload(policies);renderAIModeration(moderation);lucide.createIcons();
+    renderAIConfig(config);renderAIStatus(status);renderAIKnowledgeBuild(status.knowledgeBuild||{});renderAIRequests(records.requests||[]);renderAIPoliciesPayload(policies);renderAIModeration(moderation);lucide.createIcons();
     document.querySelector('#aiBridgeLog').textContent=(bridgeLog.lines||[]).join('\n')||'暂无 Bridge 日志。';
   }catch(error){toast(error.message,true)}finally{aiBusy=false}
 }
@@ -984,6 +1048,18 @@ document.querySelector('#openAIKnowledge').onclick=async event=>{
     toast(result.message||'已在面板主机打开服务器信息库。');
   }catch(error){toast(error.message,true)}
   finally{button.disabled=false}
+};
+document.querySelector('#aiKnowledgeBuildForm').onsubmit=async event=>{
+  event.preventDefault();const form=event.currentTarget,values=formData(form),serverLabel=form.elements.serverId.selectedOptions[0]?.textContent||values.serverId,model=values.model.trim()||aiConfig?.model||'',reasoningEffort=values.reasoningEffort||'auto';
+  if(!model){toast('请先填写知识库构建模型。',true);return}
+  if(!confirm(`确认读取并脱敏“${serverLabel}”的服务器配置和 Mod 清单，并临时调用模型“${model}”构建知识库？推理强度：${reasoningEffort}。此操作可能产生多次 API 费用。`))return;
+  form.querySelector('button[type="submit"]').disabled=true;
+  try{const result=await api('/api/ai/knowledge/build',{method:'POST',body:JSON.stringify({serverId:values.serverId,model,reasoningEffort,confirm:'BUILD_AI_KNOWLEDGE'}),timeoutMs:180000});renderAIKnowledgeBuild(result);toast(result.message||'知识库构建已开始。')}catch(error){toast(error.message,true);await refreshAIKnowledgeBuild()}finally{if(!aiKnowledgeBuild?.active)form.querySelector('button[type="submit"]').disabled=false}
+};
+document.querySelector('#aiKnowledgeBuildModel').addEventListener('change',event=>{if(/^deepseek/i.test(event.target.value.trim()))document.querySelector('#aiKnowledgeBuildReasoning').value='auto'});
+document.querySelector('#cancelAIKnowledgeBuild').onclick=async()=>{
+  if(!aiKnowledgeBuild?.active||!confirm('确认取消当前知识库构建？已经上线的知识库不会被修改。'))return;
+  try{const result=await api('/api/ai/knowledge/build',{method:'DELETE',body:JSON.stringify({confirm:'CANCEL_AI_KNOWLEDGE'}),timeoutMs:30000});renderAIKnowledgeBuild(result);toast(result.message)}catch(error){toast(error.message,true)}
 };
 document.querySelector('#refreshAILog').onclick=refreshAILog;
 document.querySelector('#refreshAIModeration').onclick=refreshAIModeration;

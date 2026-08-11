@@ -20,6 +20,7 @@ $managedRoot = Join-Path $root "managed"
 $managedHostPath = Join-Path $managedRoot "Run-ManagedPZHost.ps1"
 $managedLifecyclePath = Join-Path $managedRoot "Invoke-ManagedPZLifecycle.ps1"
 $playerDbReaderPath = Join-Path $root "Read-PZPlayers.js"
+$playerDataManagerPath = Join-Path $root "Manage-PZPlayerData.js"
 $itemIndexRoot = Join-Path $root "item-index"
 $itemIndexBuilderPath = Join-Path $root "Build-PZItemIndex.js"
 $aiBridgeModulePath = Join-Path $root "PZ-AIBridge.ps1"
@@ -350,7 +351,7 @@ function Test-LocalRequest {
 function Assert-HostControlAdministrator {
     param($Session)
     if (-not $Session -or [string]$Session.user.username -ine "admin") {
-        throw "只有 Web 保留管理员账号 admin 可以控制物理机。"
+        throw "只有 Web 保留管理员账号 admin 可以执行此管理操作。"
     }
 }
 
@@ -2148,6 +2149,59 @@ function Get-PlayerDirectory {
     return [ordered]@{ onlineKnown = [bool]$state.onlineKnown; online = $online; players = $players; databaseAvailable = [bool]($accounts.Count -gt 0) }
 }
 
+function Get-PZPlayerDatabasePaths {
+    param($Profile)
+    return [pscustomobject]@{
+        account = Join-Path ([string]$Profile.dataRoot) "db\$($Profile.serverName).db"
+        players = Join-Path ([string]$Profile.dataRoot) "Saves\Multiplayer\$($Profile.serverName)\players.db"
+    }
+}
+
+function Invoke-PZPlayerDataManager {
+    param($Profile, [ValidateSet("inspect", "delete")][string]$Mode, [string]$SteamId)
+    if ($SteamId -notmatch '^7656119\d{10}$') { throw "SteamID64 格式无效，应为 7656119 开头的 17 位数字。" }
+    if (-not $nodeRuntimePath -or -not (Test-Path -LiteralPath $playerDataManagerPath -PathType Leaf)) {
+        throw "缺少玩家数据库管理运行环境。"
+    }
+    $paths = Get-PZPlayerDatabasePaths -Profile $Profile
+    $output = @(& $nodeRuntimePath --no-warnings $playerDataManagerPath $Mode $paths.account $paths.players $SteamId 2>&1 | ForEach-Object { [string]$_ })
+    if ($LASTEXITCODE -ne 0) {
+        $detail = @($output | Select-Object -Last 8) -join "`n"
+        throw "玩家数据库$($(if ($Mode -eq 'delete') { '删除' } else { '查询' }))失败：$detail"
+    }
+    $json = $output -join "`n"
+    if ([string]::IsNullOrWhiteSpace($json)) { throw "玩家数据库工具没有返回结果。" }
+    return $json | ConvertFrom-Json
+}
+
+function Backup-PZPlayerDatabases {
+    param($Profile, [string]$SteamId, $Snapshot)
+    $paths = Get-PZPlayerDatabasePaths -Profile $Profile
+    $stamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
+    $backupRoot = Join-Path $root "backups\player-data\$($Profile.id)\$SteamId\$stamp"
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    $copied = [Collections.Generic.List[string]]::new()
+    foreach ($databasePath in @($paths.account, $paths.players)) {
+        foreach ($candidate in @($databasePath, "$databasePath-wal", "$databasePath-shm", "$databasePath-journal")) {
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+            Copy-Item -LiteralPath $candidate -Destination (Join-Path $backupRoot ([IO.Path]::GetFileName($candidate))) -Force
+            $copied.Add([IO.Path]::GetFileName($candidate))
+        }
+    }
+    if ($copied.Count -eq 0) { throw "没有找到可备份的玩家数据库，已取消删除。" }
+    $manifest = [ordered]@{
+        createdAt = [DateTimeOffset]::Now.ToString("o")
+        serverId = [string]$Profile.id
+        serverName = [string]$Profile.serverName
+        steamId = $SteamId
+        accountCount = @($Snapshot.accounts).Count
+        characterCount = @($Snapshot.characters).Count
+        files = @($copied)
+    }
+    [IO.File]::WriteAllText((Join-Path $backupRoot "manifest.json"), ($manifest | ConvertTo-Json -Depth 5), $utf8)
+    return $backupRoot
+}
+
 function Queue-Command {
     param($Profile, [string]$Command, [bool]$RequireReceipt = $false)
     if ([string]$Profile.commandChannel -ne "queue" -or [string]::IsNullOrWhiteSpace([string]$Profile.queueDir)) {
@@ -2906,6 +2960,12 @@ function Get-CommandResultPayload {
 
     $output = @()
     $command = if ($tracked) { [string]$tracked.command } elseif ($receipt) { [string]$receipt.command } else { "" }
+    $sensitiveCommand = $tracked -and [string]$tracked.action -in @("user-account", "player-password") -and [string]$tracked.command -ceq "[redacted]"
+    $publicReceipt = $receipt
+    if ($sensitiveCommand -and $receipt) {
+        $publicReceipt = $receipt | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+        if ($publicReceipt.PSObject.Properties["command"]) { $publicReceipt.command = "[redacted]" }
+    }
     $isModUpdateCheck = $tracked -and [string]$tracked.action -eq "check-mod-updates"
     $isAddItem = ($tracked -and [string]$tracked.action -eq "additem") -or [bool](Get-AddItemCommandParts -Command $command)
     $logPayload = $null
@@ -3011,7 +3071,7 @@ function Get-CommandResultPayload {
         gameStatus = $gameStatus
         resultCode = $resultCode
         resultMessage = $resultMessage
-        receipt = $receipt
+        receipt = $publicReceipt
         output = @($output)
     }
 }
@@ -4035,7 +4095,7 @@ try {
                     continue
                 }
             }
-            if ($path -like "/api/ai/config*" -or $path -eq "/api/ai/models" -or $path -eq "/api/ai/test" -or $path -eq "/api/ai/clear-history" -or $path -eq "/api/ai/policies" -or $path -eq "/api/ai/runtime" -or $path -eq "/api/ai/moderation" -or $path -eq "/api/ai/knowledge/open") {
+            if ($path -like "/api/ai/config*" -or $path -eq "/api/ai/models" -or $path -eq "/api/ai/test" -or $path -eq "/api/ai/clear-history" -or $path -eq "/api/ai/policies" -or $path -eq "/api/ai/runtime" -or $path -eq "/api/ai/moderation" -or $path -eq "/api/ai/knowledge/open" -or $path -eq "/api/ai/knowledge/build") {
                 $aiRemote = $request.RemoteEndPoint.Address.ToString()
                 if ($request.HttpMethod -eq "GET" -and $path -eq "/api/ai/config") {
                     Write-JsonResponse $context 200 (Get-PublicAIConfig)
@@ -4087,6 +4147,34 @@ try {
                     Start-Process -FilePath "explorer.exe" -ArgumentList @($aiKnowledgeRoot) -WindowStyle Normal | Out-Null
                     Add-Audit -Remote $aiRemote -Action "ai-knowledge-open" -Detail "server information library opened on panel host" -Result "ok"
                     Write-JsonResponse $context 200 @{ ok = $true; message = "已在面板主机打开服务器信息库。" ; directory = "服务器信息库" }
+                    continue
+                }
+                if ($request.HttpMethod -eq "GET" -and $path -eq "/api/ai/knowledge/build") {
+                    Write-JsonResponse $context 200 (Get-AIKnowledgeBuildStatus)
+                    continue
+                }
+                if ($request.HttpMethod -eq "POST" -and $path -eq "/api/ai/knowledge/build") {
+                    if ([string]$session.user.username -ine "admin") {
+                        Write-JsonResponse $context 403 @{ ok = $false; error = "只有 Web admin 管理员可以调用付费模型构建知识库。" }
+                        continue
+                    }
+                    $body = Get-RequestBody $request
+                    if ([string]$body.confirm -cne "BUILD_AI_KNOWLEDGE") { throw "构建知识库需要确认模型调用和可能产生的 API 费用。" }
+                    $result = Start-AIKnowledgeBuild -Body $body
+                    Add-Audit -Remote $aiRemote -Action "ai-knowledge-build" -Detail "server=$($result.serverId) provider=$($result.provider) model=$($result.model) effort=$($result.reasoningEffort) chunks=$($result.totalChunks)" -Result "queued"
+                    Write-JsonResponse $context 202 $result
+                    continue
+                }
+                if ($request.HttpMethod -eq "DELETE" -and $path -eq "/api/ai/knowledge/build") {
+                    if ([string]$session.user.username -ine "admin") {
+                        Write-JsonResponse $context 403 @{ ok = $false; error = "只有 Web admin 管理员可以取消知识库构建。" }
+                        continue
+                    }
+                    $body = Get-RequestBody $request
+                    if ([string]$body.confirm -cne "CANCEL_AI_KNOWLEDGE") { throw "取消知识库构建需要二次确认。" }
+                    $result = Stop-AIKnowledgeBuild
+                    Add-Audit -Remote $aiRemote -Action "ai-knowledge-cancel" -Detail "id=$($result.id) server=$($result.serverId)" -Result "ok"
+                    Write-JsonResponse $context 200 $result
                     continue
                 }
                 if ($request.HttpMethod -eq "GET" -and $path -eq "/api/ai/policies") {
@@ -4586,6 +4674,103 @@ try {
                 Write-JsonResponse $context 200 (@{ ok = $true; serverId = [string]$profile.id } + $directory)
                 continue
             }
+            if ($request.HttpMethod -eq "GET" -and $path -eq "/api/player-admin") {
+                Assert-HostControlAdministrator -Session $session
+                $profile = Get-ServerProfile -Id ([string]$request.QueryString["serverId"])
+                $steamId = ([string]$request.QueryString["steamId"]).Trim()
+                $snapshot = Invoke-PZPlayerDataManager -Profile $profile -Mode "inspect" -SteamId $steamId
+                $serverState = Get-ServerState -Profile $profile
+                $directory = Get-PlayerDirectory -Profile $profile
+                $onlineLookup = @{}
+                foreach ($player in @($directory.players | Where-Object { [bool]$_.online })) {
+                    $onlineLookup[([string]$player.username).ToLowerInvariant()] = $true
+                }
+                $accounts = @($snapshot.accounts | ForEach-Object {
+                    [ordered]@{
+                        username = [string]$_.username
+                        displayName = [string]$_.displayName
+                        lastConnection = [string]$_.lastConnection
+                        steamId = [string]$_.steamId
+                        ownerId = [string]$_.ownerId
+                        authType = [string]$_.authType
+                        role = [string]$_.role
+                        online = [bool]$onlineLookup.ContainsKey(([string]$_.username).ToLowerInvariant())
+                    }
+                })
+                $found = $accounts.Count -gt 0 -or @($snapshot.characters).Count -gt 0 -or [bool]$snapshot.allowed -or [bool]$snapshot.banned
+                Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "player-data-inspect" -Detail "server=$($profile.id) steamId=$steamId found=$found requestedBy=$($session.user.username)" -Result "ok"
+                Write-JsonResponse $context 200 @{
+                    ok = $true
+                    serverId = [string]$profile.id
+                    serverName = [string]$profile.name
+                    steamId = $steamId
+                    found = [bool]$found
+                    accounts = $accounts
+                    characters = @($snapshot.characters)
+                    allowed = [bool]$snapshot.allowed
+                    banned = [bool]$snapshot.banned
+                    serverRunning = [bool]$serverState.alive
+                    lifecycleActive = [bool](Get-ActiveLifecycleOperation -Profile $profile)
+                }
+                continue
+            }
+            if ($request.HttpMethod -eq "POST" -and $path -eq "/api/player-admin/password") {
+                Assert-HostControlAdministrator -Session $session
+                $body = Get-RequestBody $request
+                $profile = Get-ServerProfile -Id ([string]$body.serverId)
+                $steamId = ([string]$body.steamId).Trim()
+                $username = Assert-SimpleText -Value ([string]$body.username) -Name "用户名" -MaxLength 64
+                $password = [string]$body.password
+                $passwordConfirm = [string]$body.passwordConfirm
+                if (-not [string]::Equals($password, $passwordConfirm, [StringComparison]::Ordinal)) { throw "两次输入的新密码不一致。" }
+                $snapshot = Invoke-PZPlayerDataManager -Profile $profile -Mode "inspect" -SteamId $steamId
+                $account = @($snapshot.accounts | Where-Object { [string]$_.username -ieq $username } | Select-Object -First 1)
+                if ($account.Count -eq 0) { throw "账号 $username 不属于 SteamID $steamId，已拒绝修改。" }
+                $quotedUser = Quote-PZ -Value $username -Name "用户名"
+                $quotedPassword = Quote-PZ -Value $password -Name "用户密码" -MaxLength 128
+                try {
+                    $queued = Queue-Command -Profile $profile -Command "setpassword $quotedUser $quotedPassword" -RequireReceipt:$true
+                    $requestId = [string]$queued.id
+                    $commandRequests[$requestId] = [pscustomobject]@{
+                        serverId = [string]$profile.id
+                        action = "player-password"
+                        command = "[redacted]"
+                        queuedAt = [string]$queued.createdAt
+                        logCursor = 0L
+                    }
+                    Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "player-password" -Detail "server=$($profile.id) steamId=$steamId username=$username requestedBy=$($session.user.username)" -Result "queued"
+                    [void](Add-ExecutionHistoryRecord -ServerId ([string]$profile.id) -Category "command" -Action "player-password" -Source "web" -Summary "修改玩家账号密码：$username" -Status "queued" -Message "密码修改命令已安全提交。" -RequestIds @($requestId))
+                    Write-JsonResponse $context 202 @{ ok = $true; message = "账号 $username 的密码修改命令已提交。"; requestId = $requestId; command = "[redacted]" }
+                }
+                finally {
+                    $password = $null
+                    $passwordConfirm = $null
+                    $quotedPassword = $null
+                }
+                continue
+            }
+            if ($request.HttpMethod -eq "DELETE" -and $path -eq "/api/player-admin") {
+                Assert-HostControlAdministrator -Session $session
+                $body = Get-RequestBody $request
+                $profile = Get-ServerProfile -Id ([string]$body.serverId)
+                $steamId = ([string]$body.steamId).Trim()
+                if ([string]$body.confirm -cne "DELETE_PLAYER_DATA") { throw "删除玩家数据需要专用确认标记。" }
+                if ([string]$body.confirmSteamId -cne $steamId) { throw "确认 SteamID 与目标不一致，已取消删除。" }
+                $serverState = Get-ServerState -Profile $profile
+                if ($serverState.alive) { throw "服务器仍在运行。必须先安全停服，确认 Java 已退出后才能删除玩家数据。" }
+                $activeOperation = Get-ActiveLifecycleOperation -Profile $profile
+                if ($activeOperation) { throw "服务器正在执行生命周期任务，完成后才能删除玩家数据。" }
+                $snapshot = Invoke-PZPlayerDataManager -Profile $profile -Mode "inspect" -SteamId $steamId
+                $deletable = @($snapshot.accounts).Count -gt 0 -or @($snapshot.characters).Count -gt 0 -or [bool]$snapshot.allowed
+                if (-not $deletable) { throw "SteamID $steamId 没有可删除的账号、角色或允许列表数据。" }
+                $backupPath = Backup-PZPlayerDatabases -Profile $profile -SteamId $steamId -Snapshot $snapshot
+                $result = Invoke-PZPlayerDataManager -Profile $profile -Mode "delete" -SteamId $steamId
+                $summary = "删除 SteamID $steamId：账号 $([int]$result.deletedAccounts)，角色 $([int]$result.deletedCharacters)，允许列表 $([int]$result.deletedAllowedEntries)"
+                Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "player-data-delete" -Detail "server=$($profile.id) steamId=$steamId accounts=$($result.deletedAccounts) characters=$($result.deletedCharacters) allowed=$($result.deletedAllowedEntries) backup=$backupPath requestedBy=$($session.user.username) banPreserved=$($result.banPreserved)" -Result "ok"
+                [void](Add-ExecutionHistoryRecord -ServerId ([string]$profile.id) -Category "command" -Action "player-data-delete" -Source "web" -Summary $summary -Status "success" -Message "玩家账号和角色数据已删除；封禁记录与审计日志保留。" -Detail "备份目录：$backupPath")
+                Write-JsonResponse $context 200 @{ ok = $true; message = "$summary。"; steamId = $steamId; deletedAccounts = [int]$result.deletedAccounts; deletedCharacters = [int]$result.deletedCharacters; deletedAllowedEntries = [int]$result.deletedAllowedEntries; banPreserved = [bool]$result.banPreserved; backupPath = $backupPath }
+                continue
+            }
             if ($request.HttpMethod -eq "GET" -and $path -eq "/api/players/export") {
                 $profile = Get-ServerProfile -Id ([string]$request.QueryString["serverId"])
                 $directory = Get-PlayerDirectory -Profile $profile
@@ -4721,6 +4906,7 @@ try {
             if ($request.HttpMethod -eq "POST" -and $path -eq "/api/command") {
                 $body = Get-RequestBody $request
                 $profile = Get-ServerProfile -Id ([string]$body.serverId)
+                if ([string]$body.action -eq "user-account") { Assert-HostControlAdministrator -Session $session }
                 $clientRequestId = ([string]$body.submissionId).ToLowerInvariant()
                 if (-not [string]::IsNullOrWhiteSpace($clientRequestId) -and $clientRequestId -notmatch '^[a-f0-9]{32}$') { throw "命令提交 ID 无效。" }
                 if ([string]$body.action -eq 'additem' -and -not [string]::IsNullOrWhiteSpace($clientRequestId)) {
@@ -4764,10 +4950,11 @@ try {
                 for ($index = 0; $index -lt $queued.Count; $index += 1) {
                     $requestId = [string]$queued[$index].id
                     $requestIds += $requestId
+                    $trackedCommand = if ([string]$body.action -eq "user-account" -and -not [string]::IsNullOrWhiteSpace([string]$body.password)) { "[redacted]" } else { [string]$commands[$index] }
                     $commandRequests[$requestId] = [pscustomobject]@{
                         serverId = [string]$profile.id
                         action = [string]$body.action
-                        command = [string]$commands[$index]
+                        command = $trackedCommand
                         queuedAt = [string]$queued[$index].createdAt
                         logCursor = $logCursor
                     }
@@ -4810,7 +4997,8 @@ try {
                     -Source "web" -Summary $historySummary -Status $(if ($notificationWarnings.Count) { "warning" } else { "queued" }) -Message $message `
                     -RequestIds $itemRequestIds -AuxiliaryRequestIds $notificationRequestIds -NoticeId $noticeId -Detail $(if ($itemNotification -and $itemNotification.message) { [string]$itemNotification.message } else { "" }) `
                     -ClientRequestId $clientRequestId)
-                Write-JsonResponse $context 202 @{ ok = $true; message = $message; submissionId = $clientRequestId; requestId = [string]$itemRequestIds[0]; requestIds = $itemRequestIds; itemRequestIds = $itemRequestIds; notificationRequestIds = $notificationRequestIds; allRequestIds = $allRequestIds; noticeId = $noticeId; notificationChannel = $itemNotificationChannel; notificationWarnings = $notificationWarnings; expectedNoticeClients = $(if ($itemNotification) { [int]$itemNotification.expectedClients } else { 0 }); command = [string]$commands[0]; parts = $commands.Count; targetCount = $targetCount }
+                $responseCommand = if ([string]$body.action -eq "user-account" -and -not [string]::IsNullOrWhiteSpace([string]$body.password)) { "[redacted]" } else { [string]$commands[0] }
+                Write-JsonResponse $context 202 @{ ok = $true; message = $message; submissionId = $clientRequestId; requestId = [string]$itemRequestIds[0]; requestIds = $itemRequestIds; itemRequestIds = $itemRequestIds; notificationRequestIds = $notificationRequestIds; allRequestIds = $allRequestIds; noticeId = $noticeId; notificationChannel = $itemNotificationChannel; notificationWarnings = $notificationWarnings; expectedNoticeClients = $(if ($itemNotification) { [int]$itemNotification.expectedClients } else { 0 }); command = $responseCommand; parts = $commands.Count; targetCount = $targetCount }
                 continue
             }
             if ($request.HttpMethod -eq "POST" -and $path -eq "/api/server/start") {

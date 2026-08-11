@@ -1,6 +1,6 @@
 ﻿param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "dist-public"),
-    [string]$Version = "0.8.0",
+    [string]$Version = "0.9.0",
     [string]$PackageName
 )
 
@@ -135,6 +135,7 @@ $rootFiles = @(
     "Initialize-PortablePanel.ps1",
     "Build-PZServerKnowledgeBase.ps1",
     "Build-PZItemIndex.js",
+    "Manage-PZPlayerData.js",
     "Build-PublicRelease.ps1",
     "Read-PZPlayers.js",
     "一键启动Web面板.bat",
@@ -146,7 +147,10 @@ $rootFiles = @(
     "AI配置说明.txt",
     "PZAI-Mod执行器改写SOP.md",
     "Test-ControlFeatures.ps1",
+    "Test-AIKnowledgeBuilder.ps1",
+    "Test-AIKnowledgeBuildPipeline.ps1",
     "Test-ItemGrantCommandResults.ps1",
+    "Test-PZPlayerDataManager.js",
     "CHANGELOG.md",
     "SECURITY.md",
     "panel-config.json",
