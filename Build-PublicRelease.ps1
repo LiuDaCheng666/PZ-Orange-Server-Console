@@ -150,6 +150,7 @@ $rootFiles = @(
     "Test-AIKnowledgeBuilder.ps1",
     "Test-AIKnowledgeBuildPipeline.ps1",
     "Test-ItemGrantCommandResults.ps1",
+    "Test-PlayerDataPermissions.ps1",
     "Test-PZPlayerDataManager.js",
     "CHANGELOG.md",
     "SECURITY.md",

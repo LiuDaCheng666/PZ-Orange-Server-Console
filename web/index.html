@@ -368,6 +368,7 @@
               <label>显示名称<input name="displayName" maxlength="64" required></label>
               <label class="wide">密码<input name="password" type="password" minlength="10" maxlength="128" autocomplete="new-password" placeholder="编辑时留空表示不修改"></label>
               <label>允许登录<select name="enabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
+              <label>玩家档案管理<select name="canManagePlayerData"><option value="false">不允许</option><option value="true">允许查询、改密和停服删除</option></select></label>
             </div>
             <div class="profile-actions"><button class="primary-button" type="submit"><i data-lucide="save"></i>保存用户</button><button class="danger-button" id="deleteUser" type="button"><i data-lucide="user-x"></i>删除用户</button></div>
           </form>

@@ -462,7 +462,7 @@ async function command(body){
   const serverId=selectedId,title=commandActionLabels[body.action]||'服务器命令',showResult=body.action!=='worldgen',serial=showResult?++commandResultSerial:commandResultSerial,submissionId=body.action==='additem'?createSubmissionId():'';
   if(showResult)renderCommandResult('queued',`${title}正在提交`,'正在写入受控命令队列','等待面板接收命令...');
   try{
-    const data=await api('/api/command',{method:'POST',body:JSON.stringify({...body,serverId,submissionId}),timeoutMs:body.action==='additem'?5000:15000});toast(data.message);setTimeout(pollLog,700);if(body.action==='players'||body.action==='access')setTimeout(refreshPlayers,1200);
+    const data=await api('/api/command',{method:'POST',body:JSON.stringify({...body,serverId,submissionId}),timeoutMs:15000});toast(data.message);setTimeout(pollLog,700);if(body.action==='players'||body.action==='access')setTimeout(refreshPlayers,1200);
     if(showResult&&body.action==='additem'&&data.requestIds?.length){renderCommandResult('delivered','物品发放已进入服务器队列',`面板已接收 · 目标 ${Number(data.targetCount||data.requestIds.length)} 人`,'正在等待游戏服务器逐名返回发放结果...');followItemGrantResults(serverId,data,serial)}
     else if(showResult&&body.action==='broadcast'&&data.requestIds?.length)followBroadcastResults(serverId,data.requestIds,serial);else if(showResult&&data.requestId)followCommandResult(serverId,data.requestId,title,serial);return data
   }catch(error){
@@ -486,7 +486,12 @@ function renderPlayers(){
   const header='<div class="player-table-head"><span>玩家</span><span>状态</span><span>SteamID</span><span>权限</span><span>最近连接</span></div>';
   const rows=list=>list.map(player=>`<button type="button" class="player-table-row ${player.online?'online':''}" data-player-name="${escapeHtml(player.username)}" data-steam-id="${escapeHtml(player.steamId||'')}"><strong>${escapeHtml(player.username)}</strong><span><i></i>${player.online?'在线':'离线'}</span><code>${escapeHtml(player.steamId||'未记录')}</code><b class="role-badge ${escapeHtml(player.role)}">${escapeHtml(roleLabels[player.role]||player.role)}</b><time>${escapeHtml(player.lastConnection||'--')}</time></button>`).join('');
   table.innerHTML=`<section class="player-group"><div class="player-group-title"><strong>在线玩家</strong><span>${onlineKnown?`${online.length} 人`:'未知'}</span></div>${online.length?header+rows(online):`<p class="empty-state compact">${onlineKnown?'当前没有在线玩家。':'当前日志无法确认在线玩家。'}</p>`}</section><details class="player-history"><summary><span>历史玩家</span><b>${history.length} 人</b></summary>${history.length?header+rows(history):'<p class="empty-state compact">没有其他历史玩家。</p>'}</details>`;
-  table.querySelectorAll('[data-player-name]').forEach(row=>row.onclick=()=>{document.querySelector('#accessForm input[name="username"]').value=row.dataset.playerName;const steamInput=document.querySelector('#steamForm input[name="steamId"]');if(steamInput&&row.dataset.steamId)steamInput.value=row.dataset.steamId;if(row.dataset.steamId){document.querySelector('#playerAdminLookupForm input[name="steamId"]').value=row.dataset.steamId;queryPlayerAdmin(row.dataset.steamId)}});
+  table.querySelectorAll('[data-player-name]').forEach(row=>row.onclick=()=>{document.querySelector('#accessForm input[name="username"]').value=row.dataset.playerName;const steamInput=document.querySelector('#steamForm input[name="steamId"]');if(steamInput&&row.dataset.steamId)steamInput.value=row.dataset.steamId;if(row.dataset.steamId&&canManagePlayerData()){document.querySelector('#playerAdminLookupForm input[name="steamId"]').value=row.dataset.steamId;queryPlayerAdmin(row.dataset.steamId)}});
+}
+const canManagePlayerData=()=>Boolean(authSession?.user?.canManagePlayerData);
+function updatePlayerAdminAccess(){
+  const panel=document.querySelector('#playerDataAdmin');panel.hidden=!canManagePlayerData();
+  if(panel.hidden){playerAdminSerial+=1;playerAdminBusy=false;playerAdminSnapshot=null;document.querySelector('#playerAdminLookupForm').reset();renderPlayerAdmin()}
 }
 function renderPlayerAdmin(data=playerAdminSnapshot){
   const result=document.querySelector('#playerAdminResult'),state=document.querySelector('#playerAdminState'),message=document.querySelector('#playerAdminMessage');
@@ -870,6 +875,7 @@ function enterApp(session){
   authSession=session;csrfToken=session.csrf||'';authScreen.hidden=true;authError.textContent='';
   document.querySelectorAll('.local-only').forEach(item=>item.hidden=!session.local);
   document.querySelector('#signedUser').textContent=session.user?.displayName||session.user?.username||'';
+  updatePlayerAdminAccess();
   if(!appStarted){appStarted=true;showView(initialView);refreshStatus().then(()=>{pollLog();pollChat();refreshItemStatus();refreshNoticeStatus(true)});statusTimer=setInterval(refreshStatus,5000);logTimer=setInterval(()=>{pollLog();pollChat();if(activeView==='chat')refreshNoticeStatus()},1500);systemTimer=setInterval(pollSystem,5000)}
   else refreshStatus();
   lucide.createIcons();
@@ -890,19 +896,19 @@ document.querySelector('#logoutBtn').onclick=async()=>{try{await api('/api/auth/
 
 const userForm=document.querySelector('#userForm');
 function fillUserForm(user=null){
-  userForm.reset();userForm.elements.id.value=user?.id||'';userForm.elements.username.value=user?.username||'';userForm.elements.displayName.value=user?.displayName||'';userForm.elements.enabled.value=String(user?.enabled!==false);
-  const protectedAdmin=user?.username?.toLowerCase()==='admin';userForm.elements.username.readOnly=protectedAdmin;userForm.elements.enabled.disabled=protectedAdmin;
+  userForm.reset();userForm.elements.id.value=user?.id||'';userForm.elements.username.value=user?.username||'';userForm.elements.displayName.value=user?.displayName||'';userForm.elements.enabled.value=String(user?.enabled!==false);userForm.elements.canManagePlayerData.value=String(user?.canManagePlayerData===true);
+  const protectedAdmin=user?.username?.toLowerCase()==='admin';userForm.elements.username.readOnly=protectedAdmin;userForm.elements.enabled.disabled=protectedAdmin;userForm.elements.canManagePlayerData.disabled=protectedAdmin;
   userForm.elements.password.required=!user;document.querySelector('#userFormTitle').textContent=user?`编辑 ${user.username}`:'添加用户';document.querySelector('#userModeBadge').textContent=protectedAdmin?'受保护':user?'编辑':'新用户';document.querySelector('#deleteUser').disabled=!user||protectedAdmin;
 }
 function renderUsers(){
   const list=document.querySelector('#userList');
-  list.innerHTML=userDirectory.map(user=>`<button type="button" class="user-list-item ${userForm.elements.id.value===user.id?'selected':''}" data-user-id="${escapeHtml(user.id)}"><span class="server-icon test"><i data-lucide="user-round"></i></span><span><strong>${escapeHtml(user.displayName)}</strong><small>${escapeHtml(user.username)}</small></span><b class="badge ${user.enabled?'running':'stopped'}">${user.enabled?'启用':'禁用'}</b></button>`).join('')||'<p class="empty-state">暂无用户。</p>';
+  list.innerHTML=userDirectory.map(user=>`<button type="button" class="user-list-item ${userForm.elements.id.value===user.id?'selected':''}" data-user-id="${escapeHtml(user.id)}"><span class="server-icon test"><i data-lucide="user-round"></i></span><span><strong>${escapeHtml(user.displayName)}</strong><small>${escapeHtml(user.username)} · ${user.canManagePlayerData?'允许玩家档案管理':'基础控制'}</small></span><b class="badge ${user.enabled?'running':'stopped'}">${user.enabled?'启用':'禁用'}</b></button>`).join('')||'<p class="empty-state">暂无用户。</p>';
   list.querySelectorAll('[data-user-id]').forEach(button=>button.onclick=()=>{fillUserForm(userDirectory.find(user=>user.id===button.dataset.userId));renderUsers()});lucide.createIcons();
 }
 async function refreshUsers(){try{const result=await api('/api/users');userDirectory=result.users;const selected=userDirectory.find(user=>user.id===userForm.elements.id.value);if(selected)fillUserForm(selected);renderUsers()}catch(error){document.querySelector('#userList').innerHTML=`<p class="empty-state error-text">${escapeHtml(error.message)}</p>`}}
 document.querySelector('#newUser').onclick=()=>{fillUserForm();renderUsers()};
 userForm.onsubmit=async event=>{
-  event.preventDefault();const data=formData(userForm),editing=Boolean(data.id),protectedAdmin=data.username?.toLowerCase()==='admin',payload={id:data.id,username:data.username,displayName:data.displayName,password:data.password,enabled:protectedAdmin||data.enabled==='true'};
+  event.preventDefault();const data=formData(userForm),editing=Boolean(data.id),protectedAdmin=data.username?.toLowerCase()==='admin',payload={id:data.id,username:data.username,displayName:data.displayName,password:data.password,enabled:protectedAdmin||data.enabled==='true',canManagePlayerData:protectedAdmin||data.canManagePlayerData==='true'};
   try{const result=await api('/api/users',{method:editing?'PUT':'POST',body:JSON.stringify(payload)});toast(result.message);fillUserForm(result.user);await refreshUsers()}catch(error){toast(error.message,true)}
 };
 document.querySelector('#deleteUser').onclick=async()=>{

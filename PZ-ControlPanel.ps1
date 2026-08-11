@@ -232,7 +232,7 @@ function Assert-PanelPassword {
 }
 
 function New-PanelUser {
-    param([string]$Username, [string]$DisplayName, [string]$Password, [bool]$Enabled = $true)
+    param([string]$Username, [string]$DisplayName, [string]$Password, [bool]$Enabled = $true, [bool]$CanManagePlayerData = $false)
     $salt = [byte[]]::new(32)
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
     try { $rng.GetBytes($salt) } finally { $rng.Dispose() }
@@ -245,6 +245,7 @@ function New-PanelUser {
         passwordHash = [Convert]::ToBase64String((Get-PasswordHash -Password (Assert-PanelPassword $Password) -Salt $salt -Iterations $passwordIterations))
         iterations = $passwordIterations
         enabled = $Enabled
+        canManagePlayerData = $CanManagePlayerData
         createdAt = $now
         updatedAt = $now
         sessionVersion = 1
@@ -337,6 +338,7 @@ function Get-PublicUser {
         username = [string]$User.username
         displayName = [string]$User.displayName
         enabled = [bool]$User.enabled
+        canManagePlayerData = [bool]([string]$User.username -ieq "admin" -or ($User.PSObject.Properties["canManagePlayerData"] -and [bool]$User.canManagePlayerData))
         createdAt = [string]$User.createdAt
         updatedAt = [string]$User.updatedAt
     }
@@ -352,6 +354,20 @@ function Assert-HostControlAdministrator {
     param($Session)
     if (-not $Session -or [string]$Session.user.username -ine "admin") {
         throw "只有 Web 保留管理员账号 admin 可以执行此管理操作。"
+    }
+}
+
+function Test-PlayerDataPermission {
+    param($Session)
+    if (-not $Session -or -not $Session.user) { return $false }
+    if ([string]$Session.user.username -ieq "admin") { return $true }
+    return [bool]($Session.user.PSObject.Properties["canManagePlayerData"] -and [bool]$Session.user.canManagePlayerData)
+}
+
+function Assert-PlayerDataPermission {
+    param($Session)
+    if (-not (Test-PlayerDataPermission -Session $Session)) {
+        throw "当前 Web 账号没有玩家档案管理权限。请由 admin 在本机的 Web 用户页面授权。"
     }
 }
 
@@ -2760,22 +2776,60 @@ function Get-NoticeReceiptPayload {
 }
 
 function Get-LogPayload {
-    param($Profile, [long]$After)
+    param(
+        $Profile,
+        [long]$After,
+        [switch]$PreserveFromCursor,
+        [int]$MaxBytes = 262144
+    )
     $logPath = [string]$Profile.consoleLog
-    if ([string]::IsNullOrWhiteSpace($logPath) -or -not (Test-Path -LiteralPath $logPath)) { return @{ text = ""; cursor = 0; reset = $true } }
+    if ([string]::IsNullOrWhiteSpace($logPath) -or -not (Test-Path -LiteralPath $logPath)) { return @{ text = ""; cursor = 0; reset = $true; hasMore = $false; length = 0 } }
     $item = Get-Item -LiteralPath $logPath
+    $MaxBytes = [math]::Max(4096, [math]::Min(16777216, $MaxBytes))
+    if ($PreserveFromCursor) {
+        if ($After -lt 0 -or $After -gt $item.Length) {
+            return @{ text = ""; cursor = $item.Length; reset = $true; hasMore = $false; length = $item.Length }
+        }
+        if ($After -eq $item.Length) {
+            return @{ text = ""; cursor = $item.Length; reset = $false; hasMore = $false; length = $item.Length }
+        }
+        $readLength = [int][math]::Min([long]$MaxBytes, [long]($item.Length - $After))
+        $stream = [IO.File]::Open($logPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        try {
+            [void]$stream.Seek($After, [IO.SeekOrigin]::Begin)
+            $bytes = [byte[]]::new($readLength)
+            $offset = 0
+            while ($offset -lt $readLength) {
+                $count = $stream.Read($bytes, $offset, $readLength - $offset)
+                if ($count -le 0) { break }
+                $offset += $count
+            }
+            if (($After + $offset) -lt $item.Length) {
+                for ($boundary = $offset - 1; $boundary -ge 0; $boundary -= 1) {
+                    if ($bytes[$boundary] -eq 10) {
+                        $offset = $boundary + 1
+                        break
+                    }
+                }
+            }
+            $text = $utf8.GetString($bytes, 0, $offset)
+        }
+        finally { $stream.Dispose() }
+        $cursor = $After + $offset
+        return @{ text = $text; cursor = $cursor; reset = $false; hasMore = ($cursor -lt $item.Length); length = $item.Length }
+    }
     if ($After -le 0 -or $After -gt $item.Length) {
         $text = Read-Utf8Tail -Path $logPath
         $lines = $text -split "`r?`n"
         if ($lines.Length -gt 350) { $text = $lines[($lines.Length - 350)..($lines.Length - 1)] -join "`n" }
-        return @{ text = $text; cursor = $item.Length; reset = $true }
+        return @{ text = $text; cursor = $item.Length; reset = $true; hasMore = $false; length = $item.Length }
     }
-    if ($After -eq $item.Length) { return @{ text = ""; cursor = $item.Length; reset = $false } }
+    if ($After -eq $item.Length) { return @{ text = ""; cursor = $item.Length; reset = $false; hasMore = $false; length = $item.Length } }
     if (($item.Length - $After) -gt 262144) {
-        return @{ text = (Read-Utf8Tail -Path $logPath); cursor = $item.Length; reset = $true }
+        return @{ text = (Read-Utf8Tail -Path $logPath); cursor = $item.Length; reset = $true; hasMore = $false; length = $item.Length }
     }
     $readLength = [int][math]::Min([long]262144, [long]($item.Length - $After))
-    if ($readLength -le 0) { return @{ text = ""; cursor = $item.Length; reset = $false } }
+    if ($readLength -le 0) { return @{ text = ""; cursor = $item.Length; reset = $false; hasMore = $false; length = $item.Length } }
     $stream = [IO.File]::Open($logPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
     try {
         [void]$stream.Seek($After, [IO.SeekOrigin]::Begin)
@@ -2789,7 +2843,7 @@ function Get-LogPayload {
         $text = $utf8.GetString($bytes, 0, $offset)
     }
     finally { $stream.Dispose() }
-    return @{ text = $text; cursor = $item.Length; reset = $false }
+    return @{ text = $text; cursor = $item.Length; reset = $false; hasMore = $false; length = $item.Length }
 }
 
 function Get-LatestChatLog {
@@ -2872,31 +2926,50 @@ function Get-AddItemCommandParts {
     }
 }
 
-function Get-AddItemOutcomeMap {
-    param([object[]]$Entries, [string[]]$Lines)
+function New-AddItemOutcomeState {
+    param([object[]]$Entries, [long]$Cursor = 0)
 
-    $outcomes = @{}
-    $definitions = @{}
-    $waitingByCommand = @{}
-    $pending = [Collections.Generic.List[string]]::new()
+    $state = [pscustomobject]@{
+        definitions = @{}
+        waitingByCommand = @{}
+        pending = [Collections.Generic.List[string]]::new()
+        outcomes = @{}
+        carry = ""
+        cursor = $Cursor
+        hasMore = $false
+    }
     foreach ($entry in @($Entries)) {
         $id = [string]$entry.id
         $command = [string]$entry.command
         $parts = Get-AddItemCommandParts -Command $command
         if (-not $parts -or [string]::IsNullOrWhiteSpace($id)) { continue }
-        $definitions[$id] = [pscustomobject]@{ id = $id; command = $command; username = [string]$parts.username; item = [string]$parts.item }
-        if (-not $waitingByCommand.ContainsKey($command)) { $waitingByCommand[$command] = [Collections.Generic.Queue[string]]::new() }
-        $waitingByCommand[$command].Enqueue($id)
+        $state.definitions[$id] = [pscustomobject]@{ id = $id; command = $command; username = [string]$parts.username; item = [string]$parts.item }
+        if (-not $state.waitingByCommand.ContainsKey($command)) { $state.waitingByCommand[$command] = [Collections.Generic.Queue[string]]::new() }
+        $state.waitingByCommand[$command].Enqueue($id)
     }
+    return $state
+}
+
+function Update-AddItemOutcomeState {
+    param($State, [string]$Text, [bool]$CompleteChunk = $true)
+
+    $combined = [string]$State.carry + $Text
+    $lines = @($combined -split "`r?`n")
+    if (-not $CompleteChunk -and $lines.Count -gt 0) {
+        $State.carry = [string]$lines[$lines.Count - 1]
+        if ($lines.Count -eq 1) { $lines = @() }
+        else { $lines = @($lines[0..($lines.Count - 2)]) }
+    }
+    else { $State.carry = "" }
 
     foreach ($line in @($Lines)) {
         $enteredMatch = [regex]::Match([string]$line, 'command entered via server console.*:\s*"(?<entered>.*)"\s*$')
         if ($enteredMatch.Success) {
             $entered = $enteredMatch.Groups['entered'].Value
-            if ($waitingByCommand.ContainsKey($entered) -and $waitingByCommand[$entered].Count -gt 0) {
-                $id = $waitingByCommand[$entered].Dequeue()
-                $pending.Add($id)
-                $outcomes[$id] = [pscustomobject]@{ status = 'pending'; resultCode = 'item-command-entered'; message = '游戏服务器已接收物品命令，正在等待发放结果。'; commandLine = [string]$line; resultLine = $null }
+            if ($State.waitingByCommand.ContainsKey($entered) -and $State.waitingByCommand[$entered].Count -gt 0) {
+                $id = $State.waitingByCommand[$entered].Dequeue()
+                $State.pending.Add($id)
+                $State.outcomes[$id] = [pscustomobject]@{ status = 'pending'; resultCode = 'item-command-entered'; message = '游戏服务器已接收物品命令，正在等待发放结果。'; commandLine = [string]$line; resultLine = $null }
             }
             continue
         }
@@ -2904,18 +2977,18 @@ function Get-AddItemOutcomeMap {
         $successMatch = [regex]::Match([string]$line, 'Item\s+(?<item>.+?)\s+Added in\s+(?<username>.+)''s inventory\.\s*$')
         if ($successMatch.Success) {
             $matchedIndex = -1
-            for ($index = 0; $index -lt $pending.Count; $index += 1) {
-                $definition = $definitions[$pending[$index]]
+            for ($index = 0; $index -lt $State.pending.Count; $index += 1) {
+                $definition = $State.definitions[$State.pending[$index]]
                 if ([string]$definition.item -ieq $successMatch.Groups['item'].Value -and [string]$definition.username -ieq $successMatch.Groups['username'].Value) {
                     $matchedIndex = $index
                     break
                 }
             }
             if ($matchedIndex -ge 0) {
-                $id = $pending[$matchedIndex]
-                $pending.RemoveAt($matchedIndex)
-                $previous = $outcomes[$id]
-                $outcomes[$id] = [pscustomobject]@{ status = 'success'; resultCode = 'item-added'; message = "已确认向 $($definitions[$id].username) 发放 $($definitions[$id].item)。"; commandLine = $previous.commandLine; resultLine = [string]$line }
+                $id = $State.pending[$matchedIndex]
+                $State.pending.RemoveAt($matchedIndex)
+                $previous = $State.outcomes[$id]
+                $State.outcomes[$id] = [pscustomobject]@{ status = 'success'; resultCode = 'item-added'; message = "已确认向 $($State.definitions[$id].username) 发放 $($State.definitions[$id].item)。"; commandLine = $previous.commandLine; resultLine = [string]$line }
             }
             continue
         }
@@ -2930,14 +3003,77 @@ function Get-AddItemOutcomeMap {
             $failureCode = 'item-not-found'
             $failureMessage = '游戏服务器返回：找不到该物品，物品未发放。'
         }
-        if ($failureCode -and $pending.Count -gt 0) {
-            $id = $pending[0]
-            $pending.RemoveAt(0)
-            $previous = $outcomes[$id]
-            $outcomes[$id] = [pscustomobject]@{ status = 'failed'; resultCode = $failureCode; message = "$($definitions[$id].username)：$failureMessage"; commandLine = $previous.commandLine; resultLine = [string]$line }
+        if ($failureCode -and $State.pending.Count -gt 0) {
+            $id = $State.pending[0]
+            $State.pending.RemoveAt(0)
+            $previous = $State.outcomes[$id]
+            $State.outcomes[$id] = [pscustomobject]@{ status = 'failed'; resultCode = $failureCode; message = "$($State.definitions[$id].username)：$failureMessage"; commandLine = $previous.commandLine; resultLine = [string]$line }
         }
     }
-    return $outcomes
+    return $State
+}
+
+function Get-AddItemOutcomeMap {
+    param([object[]]$Entries, [string[]]$Lines)
+
+    $state = New-AddItemOutcomeState -Entries $Entries
+    [void](Update-AddItemOutcomeState -State $state -Text (@($Lines) -join "`n") -CompleteChunk $true)
+    return $state.outcomes
+}
+
+function Invoke-AddItemLogScan {
+    param($Profile, [object[]]$Entries, [int]$MaxSegments = 4, [int]$SegmentBytes = 4194304)
+
+    $entriesToScan = @($Entries | Where-Object {
+        $tracked = $commandRequests[[string]$_.id]
+        $tracked -and -not ($tracked.PSObject.Properties['itemOutcome'] -and $tracked.itemOutcome)
+    })
+    if ($entriesToScan.Count -eq 0) {
+        $cached = @{}
+        foreach ($entry in @($Entries)) {
+            $tracked = $commandRequests[[string]$entry.id]
+            if ($tracked -and $tracked.PSObject.Properties['itemOutcome'] -and $tracked.itemOutcome) { $cached[[string]$entry.id] = $tracked.itemOutcome }
+        }
+        return [pscustomobject]@{ outcomes = $cached; hasMore = $false; cursor = 0L; reads = 0 }
+    }
+
+    $state = $null
+    foreach ($entry in $entriesToScan) {
+        $tracked = $commandRequests[[string]$entry.id]
+        if ($tracked.PSObject.Properties['itemScanState'] -and $tracked.itemScanState) { $state = $tracked.itemScanState; break }
+    }
+    if (-not $state) {
+        $startCursor = [long](($entriesToScan | ForEach-Object { [long]$commandRequests[[string]$_.id].logCursor } | Measure-Object -Minimum).Minimum)
+        $state = New-AddItemOutcomeState -Entries $entriesToScan -Cursor $startCursor
+        foreach ($entry in $entriesToScan) {
+            $tracked = $commandRequests[[string]$entry.id]
+            $tracked | Add-Member -NotePropertyName itemScanState -NotePropertyValue $state -Force
+        }
+    }
+
+    $reads = 0
+    do {
+        $payload = Get-LogPayload -Profile $Profile -After ([long]$state.cursor) -PreserveFromCursor -MaxBytes $SegmentBytes
+        $reads += 1
+        if ($payload.reset) {
+            $state.cursor = [long]$payload.cursor
+            $state.hasMore = $false
+            $state.carry = ""
+            break
+        }
+        [void](Update-AddItemOutcomeState -State $state -Text ([string]$payload.text) -CompleteChunk (-not [bool]$payload.hasMore))
+        $state.cursor = [long]$payload.cursor
+        $state.hasMore = [bool]$payload.hasMore
+        $terminalCount = @($state.outcomes.Values | Where-Object { [string]$_.status -in @('success', 'failed') }).Count
+    } while ($state.hasMore -and $reads -lt $MaxSegments -and $terminalCount -lt $state.definitions.Count)
+
+    foreach ($id in @($state.outcomes.Keys)) {
+        $outcome = $state.outcomes[$id]
+        if ([string]$outcome.status -notin @('success', 'failed')) { continue }
+        $tracked = $commandRequests[[string]$id]
+        if ($tracked) { $tracked | Add-Member -NotePropertyName itemOutcome -NotePropertyValue $outcome -Force }
+    }
+    return [pscustomobject]@{ outcomes = $state.outcomes; hasMore = [bool]$state.hasMore; cursor = [long]$state.cursor; reads = $reads }
 }
 
 function Get-CommandResultPayload {
@@ -2945,7 +3081,8 @@ function Get-CommandResultPayload {
         $Profile,
         [string]$Id,
         [AllowNull()]$SharedLogPayload = $null,
-        [AllowNull()][Collections.IDictionary]$AddItemOutcomes = $null
+        [AllowNull()][Collections.IDictionary]$AddItemOutcomes = $null,
+        [bool]$ScanHasMore = $false
     )
     if ($Id -notmatch '^[a-f0-9]{32}$') { throw "命令回执 ID 无效。" }
     $tracked = $commandRequests[$Id]
@@ -2969,7 +3106,12 @@ function Get-CommandResultPayload {
     $isModUpdateCheck = $tracked -and [string]$tracked.action -eq "check-mod-updates"
     $isAddItem = ($tracked -and [string]$tracked.action -eq "additem") -or [bool](Get-AddItemCommandParts -Command $command)
     $logPayload = $null
-    if ($tracked -and $Profile.consoleLog -and (Test-Path -LiteralPath ([string]$Profile.consoleLog))) {
+    if ($isAddItem -and $tracked -and $null -eq $AddItemOutcomes -and $Profile.consoleLog -and (Test-Path -LiteralPath ([string]$Profile.consoleLog))) {
+        $scan = Invoke-AddItemLogScan -Profile $Profile -Entries @([pscustomobject]@{ id = $Id; command = $command })
+        $AddItemOutcomes = $scan.outcomes
+        $ScanHasMore = [bool]$scan.hasMore
+    }
+    elseif (-not $isAddItem -and $tracked -and $Profile.consoleLog -and (Test-Path -LiteralPath ([string]$Profile.consoleLog))) {
         $logPayload = if ($null -ne $SharedLogPayload) { $SharedLogPayload } else { Get-LogPayload -Profile $Profile -After ([long]$tracked.logCursor) }
         $afterCommand = $false
         foreach ($line in @([string]$logPayload.text -split "`r?`n")) {
@@ -2998,11 +3140,14 @@ function Get-CommandResultPayload {
 
     $elapsed = if ($tracked) { ((Get-Date) - [datetime]$tracked.queuedAt).TotalSeconds } else { 999 }
     $addItemOutcome = $null
-    if ($isAddItem -and $logPayload) {
-        if ($AddItemOutcomes -and $AddItemOutcomes.Contains($Id)) {
+    if ($isAddItem) {
+        if ($tracked -and $tracked.PSObject.Properties['itemOutcome'] -and $tracked.itemOutcome) {
+            $addItemOutcome = $tracked.itemOutcome
+        }
+        elseif ($AddItemOutcomes -and $AddItemOutcomes.Contains($Id)) {
             $addItemOutcome = $AddItemOutcomes[$Id]
         }
-        else {
+        elseif ($logPayload) {
             $singleMap = Get-AddItemOutcomeMap -Entries @([pscustomobject]@{ id = $Id; command = $command }) -Lines @([string]$logPayload.text -split "`r?`n")
             if ($singleMap.ContainsKey($Id)) { $addItemOutcome = $singleMap[$Id] }
         }
@@ -3052,7 +3197,7 @@ function Get-CommandResultPayload {
     }
     $status = if ($failed) { "failed" } elseif ($responseSettled) { "response" } elseif ($receipt) { "delivered" } else { "queued" }
     $noOutputWaitSeconds = if ($tracked -and [string]$tracked.action -eq "check-mod-updates") { 300 } else { 12 }
-    $done = $failed -or $responseSettled -or ($receipt -and $elapsed -ge $noOutputWaitSeconds)
+    $done = $failed -or $responseSettled -or ($receipt -and $elapsed -ge $noOutputWaitSeconds -and -not ($isAddItem -and $ScanHasMore))
     $gameStatus = if (-not $isAddItem) { $null } elseif ($addItemOutcome -and [string]$addItemOutcome.status -in @('success', 'failed')) { [string]$addItemOutcome.status } elseif ($done) { 'unconfirmed' } elseif ($receipt) { 'pending' } else { 'queued' }
     if ($isAddItem -and $gameStatus -eq 'unconfirmed') {
         $resultCode = 'item-result-unconfirmed'
@@ -3088,16 +3233,18 @@ function Get-CommandResultsPayload {
     }
 
     $sharedLogs = @{}
-    $addItemMaps = @{}
+    $addItemScans = @{}
     foreach ($group in @($uniqueIds | ForEach-Object {
         $tracked = $commandRequests[[string]$_]
         if ($tracked) { [pscustomobject]@{ id = [string]$_; cursor = [long]$tracked.logCursor; action = [string]$tracked.action; command = [string]$tracked.command } }
     } | Group-Object cursor)) {
         $cursorKey = [string]$group.Name
-        $sharedLogs[$cursorKey] = Get-LogPayload -Profile $Profile -After ([long]$group.Name)
         $itemEntries = @($group.Group | Where-Object { [string]$_.action -eq 'additem' })
         if ($itemEntries.Count -gt 0) {
-            $addItemMaps[$cursorKey] = Get-AddItemOutcomeMap -Entries $itemEntries -Lines @([string]$sharedLogs[$cursorKey].text -split "`r?`n")
+            $addItemScans[$cursorKey] = Invoke-AddItemLogScan -Profile $Profile -Entries $itemEntries
+        }
+        if (@($group.Group | Where-Object { [string]$_.action -ne 'additem' }).Count -gt 0) {
+            $sharedLogs[$cursorKey] = Get-LogPayload -Profile $Profile -After ([long]$group.Name)
         }
     }
 
@@ -3106,8 +3253,9 @@ function Get-CommandResultsPayload {
         $tracked = $commandRequests[[string]$id]
         $cursorKey = if ($tracked) { [string][long]$tracked.logCursor } else { $null }
         $sharedLog = if ($cursorKey -and $sharedLogs.ContainsKey($cursorKey)) { $sharedLogs[$cursorKey] } else { $null }
-        $outcomeMap = if ($cursorKey -and $addItemMaps.ContainsKey($cursorKey)) { $addItemMaps[$cursorKey] } else { $null }
-        $results += Get-CommandResultPayload -Profile $Profile -Id ([string]$id) -SharedLogPayload $sharedLog -AddItemOutcomes $outcomeMap
+        $itemScan = if ($cursorKey -and $addItemScans.ContainsKey($cursorKey)) { $addItemScans[$cursorKey] } else { $null }
+        $outcomeMap = if ($itemScan) { $itemScan.outcomes } else { $null }
+        $results += Get-CommandResultPayload -Profile $Profile -Id ([string]$id) -SharedLogPayload $sharedLog -AddItemOutcomes $outcomeMap -ScanHasMore ([bool]($itemScan -and $itemScan.hasMore))
     }
     return [ordered]@{ ok = $true; serverId = [string]$Profile.id; count = $results.Count; results = @($results) }
 }
@@ -4040,13 +4188,15 @@ try {
                     $username = Assert-LoginName ([string]$body.username)
                     if ($username -ieq "admin") { throw "admin 是系统保留管理员账号。" }
                     if ($users | Where-Object { [string]$_.username -ieq $username }) { throw "登录名已存在。" }
-                    $user = New-PanelUser -Username $username -DisplayName ([string]$body.displayName) -Password ([string]$body.password) -Enabled $true
+                    Assert-HostControlAdministrator -Session $session
+                    $user = New-PanelUser -Username $username -DisplayName ([string]$body.displayName) -Password ([string]$body.password) -Enabled $true -CanManagePlayerData ([bool]$body.canManagePlayerData)
                     Save-Users -Users (@($users) + @($user))
                     Add-Audit -Remote "local" -Action "user-create" -Detail "username=$username" -Result "ok"
                     Write-JsonResponse $context 201 @{ ok = $true; message = "用户已创建。"; user = Get-PublicUser $user }
                     continue
                 }
                 if ($request.HttpMethod -eq "PUT" -and $path -eq "/api/users") {
+                    Assert-HostControlAdministrator -Session $session
                     $body = Get-RequestBody $request
                     $users = @(Read-Users)
                     $user = $users | Where-Object { [string]$_.id -ceq [string]$body.id } | Select-Object -First 1
@@ -4064,6 +4214,9 @@ try {
                     $user.username = $username
                     $user.displayName = Assert-SimpleText -Value ([string]$body.displayName) -Name "显示名称" -MaxLength 64
                     $user.enabled = $enabled
+                    $canManagePlayerData = $isAdmin -or [bool]$body.canManagePlayerData
+                    if ($user.PSObject.Properties["canManagePlayerData"]) { $user.canManagePlayerData = $canManagePlayerData }
+                    else { $user | Add-Member -NotePropertyName "canManagePlayerData" -NotePropertyValue $canManagePlayerData }
                     if (-not [string]::IsNullOrWhiteSpace([string]$body.password)) {
                         $password = Assert-PanelPassword ([string]$body.password)
                         $salt = [byte[]]::new(32)
@@ -4082,6 +4235,7 @@ try {
                     continue
                 }
                 if ($request.HttpMethod -eq "DELETE" -and $path -eq "/api/users") {
+                    Assert-HostControlAdministrator -Session $session
                     $body = Get-RequestBody $request
                     if ([string]$body.confirm -cne "DELETE_USER") { throw "删除用户需要二次确认。" }
                     $users = @(Read-Users)
@@ -4675,7 +4829,7 @@ try {
                 continue
             }
             if ($request.HttpMethod -eq "GET" -and $path -eq "/api/player-admin") {
-                Assert-HostControlAdministrator -Session $session
+                Assert-PlayerDataPermission -Session $session
                 $profile = Get-ServerProfile -Id ([string]$request.QueryString["serverId"])
                 $steamId = ([string]$request.QueryString["steamId"]).Trim()
                 $snapshot = Invoke-PZPlayerDataManager -Profile $profile -Mode "inspect" -SteamId $steamId
@@ -4715,7 +4869,7 @@ try {
                 continue
             }
             if ($request.HttpMethod -eq "POST" -and $path -eq "/api/player-admin/password") {
-                Assert-HostControlAdministrator -Session $session
+                Assert-PlayerDataPermission -Session $session
                 $body = Get-RequestBody $request
                 $profile = Get-ServerProfile -Id ([string]$body.serverId)
                 $steamId = ([string]$body.steamId).Trim()
@@ -4750,7 +4904,7 @@ try {
                 continue
             }
             if ($request.HttpMethod -eq "DELETE" -and $path -eq "/api/player-admin") {
-                Assert-HostControlAdministrator -Session $session
+                Assert-PlayerDataPermission -Session $session
                 $body = Get-RequestBody $request
                 $profile = Get-ServerProfile -Id ([string]$body.serverId)
                 $steamId = ([string]$body.steamId).Trim()
@@ -4906,7 +5060,7 @@ try {
             if ($request.HttpMethod -eq "POST" -and $path -eq "/api/command") {
                 $body = Get-RequestBody $request
                 $profile = Get-ServerProfile -Id ([string]$body.serverId)
-                if ([string]$body.action -eq "user-account") { Assert-HostControlAdministrator -Session $session }
+                if ([string]$body.action -eq "user-account") { Assert-PlayerDataPermission -Session $session }
                 $clientRequestId = ([string]$body.submissionId).ToLowerInvariant()
                 if (-not [string]::IsNullOrWhiteSpace($clientRequestId) -and $clientRequestId -notmatch '^[a-f0-9]{32}$') { throw "命令提交 ID 无效。" }
                 if ([string]$body.action -eq 'additem' -and -not [string]::IsNullOrWhiteSpace($clientRequestId)) {
