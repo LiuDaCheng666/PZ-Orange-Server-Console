@@ -422,15 +422,16 @@ async function followItemGrantResults(serverId,submission,serial){
   const itemIds=[...new Set((submission.itemRequestIds||submission.requestIds||[]).filter(Boolean))],notificationIds=[...new Set((submission.notificationRequestIds||[]).filter(Boolean))],allIds=[...new Set([...itemIds,...notificationIds])],count=Number(submission.targetCount||itemIds.length),noticeId=submission.noticeId||'',submissionId=submission.submissionId||'',initialWarnings=[...(submission.notificationWarnings||[])];
   for(let attempt=0;attempt<55;attempt+=1){
     await sleep(attempt?1000:450);if(serial!==commandResultSerial||serverId!==selectedId)return;
-    try{
-      const [batch,persisted]=await Promise.all([
-        api(`/api/command/results?serverId=${encodeURIComponent(serverId)}&ids=${encodeURIComponent(allIds.join(','))}`),
-        submissionId?api(`/api/command/submission?serverId=${encodeURIComponent(serverId)}&id=${encodeURIComponent(submissionId)}`,{timeoutMs:3000}).catch(()=>null):Promise.resolve(null),
-      ]),results=batch.results||[];if(serial!==commandResultSerial||serverId!==selectedId)return;
+    if(submissionId){
+      const persisted=await api(`/api/command/submission?serverId=${encodeURIComponent(serverId)}&id=${encodeURIComponent(submissionId)}`,{timeoutMs:10000}).catch(()=>null);
+      if(serial!==commandResultSerial||serverId!==selectedId)return;
       if(renderPersistedItemGrantResult(persisted,count))return;
+    }
+    try{
+      const batch=await api(`/api/command/results?serverId=${encodeURIComponent(serverId)}&ids=${encodeURIComponent(allIds.join(','))}`,{timeoutMs:15000}),results=batch.results||[];if(serial!==commandResultSerial||serverId!==selectedId)return;
       const byId=new Map(allIds.map((id,index)=>[id,results[index]])),itemResults=itemIds.map(id=>byId.get(id)),notificationResults=notificationIds.map(id=>byId.get(id));
       const itemConfirmed=itemResults.filter(data=>data?.gameStatus==='success'||data?.resultCode==='item-added'),itemFailed=itemResults.filter(data=>data?.gameStatus==='failed'||data?.status==='failed'||data?.receipt?.status==='failed'),itemUnconfirmed=itemResults.filter(data=>data?.gameStatus==='unconfirmed'),itemDelivered=itemResults.filter(data=>data?.gameStatus==='pending'||(!data?.gameStatus&&data?.receipt?.status==='completed')),itemQueued=itemResults.filter(data=>!data?.receipt&&!['success','failed','unconfirmed','pending'].includes(data?.gameStatus)),notificationFailed=notificationResults.filter(data=>data?.status==='failed'||data?.receipt?.status==='failed'),notificationCompleted=notificationResults.filter(data=>data?.receipt?.status==='completed');
-      let popup=null;if(noticeId)popup=await api(`/api/notices/receipt?serverId=${encodeURIComponent(serverId)}&id=${encodeURIComponent(noticeId)}`);if(serial!==commandResultSerial||serverId!==selectedId)return;
+      let popup=null;if(noticeId)popup=await api(`/api/notices/receipt?serverId=${encodeURIComponent(serverId)}&id=${encodeURIComponent(noticeId)}`).catch(()=>null);if(serial!==commandResultSerial||serverId!==selectedId)return;
       const popupExpected=Number(popup?.expectedClients??submission.expectedNoticeClients??0),popupAcknowledged=Number(popup?.acknowledgedClients||0),popupDelivered=['broadcast','directed'].includes(popup?.status),itemsFinished=itemConfirmed.length+itemFailed.length+itemUnconfirmed.length===itemIds.length,warnings=[...initialWarnings];
       if(notificationFailed.length)warnings.push(`文字广播有 ${notificationFailed.length} 段发送失败。`);if(popup?.status==='rejected')warnings.push(`Mod 弹窗被拒绝：${popup.error||'格式无效'}`);
       if(itemsFinished){
@@ -443,7 +444,10 @@ async function followItemGrantResults(serverId,submission,serial){
         const state=itemFailed.length?'error':warnings.length?'warning':'success',title=itemFailed.length?'部分玩家物品发放失败':itemUnconfirmed.length?'物品命令已送达，部分结果待确认':'物品发放已由游戏服务器确认';renderCommandResult(state,title,`确认 ${itemConfirmed.length} · 失败 ${itemFailed.length} · 待确认 ${itemUnconfirmed.length} · 共 ${count} 人`,parts.join('\n'));return
       }
       const progress=[`游戏确认 ${itemConfirmed.length}/${count}`,`已送达待结果 ${itemDelivered.length}`,`排队 ${itemQueued.length}`];if(itemFailed.length)progress.push(`失败 ${itemFailed.length}`);if(notificationIds.length)progress.push(`文字广播 ${notificationCompleted.length}/${notificationIds.length}`);if(noticeId)progress.push(popupDelivered?`弹窗已发出 ${popupAcknowledged}/${popupExpected}`:'弹窗等待 Mod');renderCommandResult(itemConfirmed.length||itemDelivered.length?'delivered':'queued',itemConfirmed.length?'正在确认剩余玩家的发放结果':itemDelivered.length?'物品命令已送达，等待游戏结果':'物品发放正在排队',`${progress.join(' · ')} · 已等待 ${attempt+1} 秒`,'面板正在按玩家和物品精确核对游戏日志；附加通知不会阻塞物品完成状态。');
-    }catch(error){renderCommandResult('error','批量物品发放结果读取失败','无法继续查询各玩家的命令状态',error.message);return}
+    }catch(error){
+      if(attempt>=54){renderCommandResult('warning','物品发放结果查询暂时中断',`共 ${count} 名玩家 · 后台任务仍可继续记录最终结果`,`${error.message}\n请在执行历史中核对“游戏确认”数量，避免重复发放。`);return}
+      renderCommandResult('delivered','物品命令已提交，正在恢复结果查询',`共 ${count} 名玩家 · 第 ${attempt+1} 次查询暂未返回`,'面板会优先从持久化执行历史确认最终结果，请不要重复发放。');
+    }
   }
   renderCommandResult('warning','物品发放结果等待超时',`共 ${count} 名玩家 · 状态尚未全部确认`,'命令可能已送达。为避免重复发放，请先在执行历史中核对“游戏确认”数量。');
 }
@@ -462,7 +466,7 @@ async function command(body){
   const serverId=selectedId,title=commandActionLabels[body.action]||'服务器命令',showResult=body.action!=='worldgen',serial=showResult?++commandResultSerial:commandResultSerial,submissionId=body.action==='additem'?createSubmissionId():'';
   if(showResult)renderCommandResult('queued',`${title}正在提交`,'正在写入受控命令队列','等待面板接收命令...');
   try{
-    const data=await api('/api/command',{method:'POST',body:JSON.stringify({...body,serverId,submissionId}),timeoutMs:15000});toast(data.message);setTimeout(pollLog,700);if(body.action==='players'||body.action==='access')setTimeout(refreshPlayers,1200);
+    const data=await api('/api/command',{method:'POST',body:JSON.stringify({...body,serverId,submissionId}),timeoutMs:15000});if(body.action==='additem'&&!data.submissionId)data.submissionId=submissionId;toast(data.message);setTimeout(pollLog,700);if(body.action==='players'||body.action==='access')setTimeout(refreshPlayers,1200);
     if(showResult&&body.action==='additem'&&data.requestIds?.length){renderCommandResult('delivered','物品发放已进入服务器队列',`面板已接收 · 目标 ${Number(data.targetCount||data.requestIds.length)} 人`,'正在等待游戏服务器逐名返回发放结果...');followItemGrantResults(serverId,data,serial)}
     else if(showResult&&body.action==='broadcast'&&data.requestIds?.length)followBroadcastResults(serverId,data.requestIds,serial);else if(showResult&&data.requestId)followCommandResult(serverId,data.requestId,title,serial);return data
   }catch(error){
