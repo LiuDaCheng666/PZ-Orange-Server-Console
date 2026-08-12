@@ -147,6 +147,7 @@ $rootFiles = @(
     "AI配置说明.txt",
     "PZAI-Mod执行器改写SOP.md",
     "Test-ControlFeatures.ps1",
+    "Test-HostControl.ps1",
     "Test-AIKnowledgeBuilder.ps1",
     "Test-AIKnowledgeBuildPipeline.ps1",
     "Test-ItemGrantCommandResults.ps1",

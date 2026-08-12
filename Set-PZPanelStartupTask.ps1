@@ -10,6 +10,11 @@ $runnerPath = Join-Path $PSScriptRoot "Run-PZPanelAtStartup.ps1"
 function Get-TaskPayload {
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     $info = if ($task) { Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue } else { $null }
+    $lastTaskResult = $null
+    if ($info) {
+        $rawTaskResult = [uint64]$info.LastTaskResult
+        if ($rawTaskResult -ne [uint32]::MaxValue) { $lastTaskResult = [int64]$rawTaskResult }
+    }
     return [pscustomobject][ordered]@{
         taskName = $taskName
         enabled = [bool]($task -and $task.Settings.Enabled)
@@ -17,7 +22,7 @@ function Get-TaskPayload {
         userId = if ($task) { [string]$task.Principal.UserId } else { $null }
         logonType = if ($task) { [string]$task.Principal.LogonType } else { $null }
         lastRunTime = if ($info -and $info.LastRunTime.Year -gt 2000) { $info.LastRunTime.ToString("o") } else { $null }
-        lastTaskResult = if ($info) { [int]$info.LastTaskResult } else { $null }
+        lastTaskResult = $lastTaskResult
         nextRunTime = if ($info -and $info.NextRunTime.Year -gt 2000) { $info.NextRunTime.ToString("o") } else { $null }
     }
 }
@@ -40,4 +45,3 @@ elseif ($Mode -eq "Disable") {
 }
 
 Get-TaskPayload
-

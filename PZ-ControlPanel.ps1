@@ -375,6 +375,11 @@ function Get-HostControlStatus {
     param($Session)
     $task = Get-ScheduledTask -TaskName $hostStartupTaskName -ErrorAction SilentlyContinue
     $taskInfo = if ($task) { Get-ScheduledTaskInfo -TaskName $hostStartupTaskName -ErrorAction SilentlyContinue } else { $null }
+    $lastTaskResult = $null
+    if ($taskInfo) {
+        $rawTaskResult = [uint64]$taskInfo.LastTaskResult
+        if ($rawTaskResult -ne [uint32]::MaxValue) { $lastTaskResult = [int64]$rawTaskResult }
+    }
     $winlogon = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -ErrorAction SilentlyContinue
     $states = if ($statusCache -and $statusCache.servers) {
         @($statusCache.servers)
@@ -403,7 +408,7 @@ function Get-HostControlStatus {
             userId = if ($task) { [string]$task.Principal.UserId } else { $null }
             logonType = if ($task) { [string]$task.Principal.LogonType } else { $null }
             lastRunTime = if ($taskInfo -and $taskInfo.LastRunTime.Year -gt 2000) { $taskInfo.LastRunTime.ToString("o") } else { $null }
-            lastTaskResult = if ($taskInfo) { [int]$taskInfo.LastTaskResult } else { $null }
+            lastTaskResult = $lastTaskResult
         }
         autoLogon = [ordered]@{
             enabled = [string]$winlogon.AutoAdminLogon -eq "1"
