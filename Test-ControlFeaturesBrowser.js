@@ -5,7 +5,7 @@ const { chromium } = require('playwright-core');
 
 const webRoot = path.join(__dirname, 'web');
 const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-const requests = { policy: null, schedule: null, runNow: null, itemGrant: null, itemResultQueries: 0, aiRuntime: null };
+const requests = { policy: null, schedule: null, runNow: null, itemGrant: null, itemResultQueries: 0, itemSubmissionQueries: 0, aiRuntime: null };
 
 const profile = {
   id: 'mock', name: '测试服务器', kind: 'test', alive: true, status: 'running', writable: true,
@@ -61,6 +61,7 @@ async function handleApi(request, response, url) {
   if (url.pathname === '/api/notices/status') return sendJson(response, 200, { ok: true, serverId: 'mock', channel: { usable: true, v3Compatible: true, heartbeatAgeSeconds: 1 } });
   if (url.pathname === '/api/notices/receipt') return sendJson(response, 200, { ok: true, status: 'broadcast', expectedClients: 2, acknowledgedClients: 2, acknowledgedPlayers: ['Alice', '玩家乙'] });
   if (url.pathname === '/api/command/submission') {
+    requests.itemSubmissionQueries += 1;
     const submissionId = url.searchParams.get('id');
     if (requests.itemGrant?.submissionId === submissionId) return sendJson(response, 200, { ok: true, found: true, recovered: true, submissionId, action: 'additem', status: 'success', resultCode: 'completed', resultMessage: '物品发放进度：游戏确认成功 1/1，明确失败 0，待确认 0，排队 0。', requestId: 'item-request-1', requestIds: ['item-request-1'], itemRequestIds: ['item-request-1'], notificationRequestIds: ['broadcast-request-1'], noticeId: 'notice-test', targetCount: 1 });
     return sendJson(response, 200, { ok: true, found: false, submissionId });
@@ -80,6 +81,7 @@ async function handleApi(request, response, url) {
         requestIds: ['item-request-1'], itemRequestIds: ['item-request-1'], notificationRequestIds: ['broadcast-request-1'],
         allRequestIds: ['item-request-1', 'broadcast-request-1'], noticeId: 'notice-test', notificationChannel: body.notificationChannel,
         notificationWarnings: [], expectedNoticeClients: 2, targetCount: body.usernames.length,
+        immediateItemResult: { settled: true, submission: { ok: true, found: true, submissionId: body.submissionId, action: 'additem', status: 'success', resultCode: 'completed', resultMessage: '物品发放进度：游戏确认成功 1/1，明确失败 0，待确认 0，排队 0。', targetCount: body.usernames.length } },
       });
     }
     return sendJson(response, 202, { ok: true, message: 'Command queued.', requestId: 'command-request-1', requestIds: ['command-request-1'] });
@@ -291,7 +293,7 @@ async function layout(page, selectors) {
     if (!requests.schedule || requests.schedule.channel !== 'both' || requests.schedule.intervalMinutes !== 60 || requests.schedule.duration !== 120) process.exitCode = 4;
     if (!requests.runNow || requests.runNow.id !== 'schedule-1' || history.length !== 2) process.exitCode = 5;
     if (!requests.itemGrant || requests.itemGrant.notificationChannel !== 'both' || requests.itemGrant.notificationDuration !== 25 || requests.itemGrant.usernames[0] !== 'Alice' || requests.itemGrant.count !== 2 || !/^[a-f0-9]{32}$/.test(requests.itemGrant.submissionId)) process.exitCode = 7;
-    if (requests.itemResultQueries !== 0) process.exitCode = 10;
+    if (requests.itemResultQueries !== 0 || requests.itemSubmissionQueries !== 0) process.exitCode = 10;
     if (!mobileAccess.aiVisible || !mobileAccess.usersHidden || mobileAccess.activeView !== 'view-ai') process.exitCode = 8;
     if (!requests.aiRuntime || requests.aiRuntime.action !== 'restart') process.exitCode = 9;
     for (const state of [aiLayout, itemGrantLayout, chatLayout, historyLayout, mobileChatLayout, mobileItemGrantLayout, mobileAiLayout, mobileHistoryLayout]) {

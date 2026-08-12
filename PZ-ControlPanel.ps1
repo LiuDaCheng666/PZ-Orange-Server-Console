@@ -3296,6 +3296,33 @@ function Get-CommandSubmissionPayload {
     }
 }
 
+function Wait-ItemGrantSubmissionResult {
+    param($Profile, [string]$SubmissionId, [string[]]$RequestIds, [int]$TimeoutMilliseconds = 5000)
+
+    $deadline = (Get-Date).AddMilliseconds([math]::Max(250, [math]::Min(10000, $TimeoutMilliseconds)))
+    do {
+        Start-Sleep -Milliseconds 100
+        try {
+            $batch = Get-CommandResultsPayload -Profile $Profile -Ids $RequestIds
+            $results = @($batch.results)
+            $terminal = $results.Count -eq $RequestIds.Count -and @($results | Where-Object {
+                -not [bool]$_.done -or [string]$_.gameStatus -notin @('success', 'failed', 'unconfirmed')
+            }).Count -eq 0
+            if ($terminal) {
+                Invoke-ExecutionHistoryTick
+                return [ordered]@{
+                    settled = $true
+                    submission = Get-CommandSubmissionPayload -Profile $Profile -Id $SubmissionId
+                    results = $results
+                }
+            }
+        }
+        catch { }
+    } while ((Get-Date) -lt $deadline)
+
+    return [ordered]@{ settled = $false; submission = $null; results = @() }
+}
+
 function Send-MaintenanceAnnouncement {
     param($Profile, [string]$Title, [string]$Message)
     $serverState = Get-ServerState -Profile $Profile
@@ -5156,8 +5183,13 @@ try {
                     -Source "web" -Summary $historySummary -Status $(if ($notificationWarnings.Count) { "warning" } else { "queued" }) -Message $message `
                     -RequestIds $itemRequestIds -AuxiliaryRequestIds $notificationRequestIds -NoticeId $noticeId -Detail $(if ($itemNotification -and $itemNotification.message) { [string]$itemNotification.message } else { "" }) `
                     -ClientRequestId $clientRequestId)
+                $immediateItemResult = $null
+                if ($addItemBatch -and -not [string]::IsNullOrWhiteSpace($clientRequestId)) {
+                    $immediateItemResult = Wait-ItemGrantSubmissionResult -Profile $profile -SubmissionId $clientRequestId -RequestIds $itemRequestIds -TimeoutMilliseconds 5000
+                }
                 $responseCommand = if ([string]$body.action -eq "user-account" -and -not [string]::IsNullOrWhiteSpace([string]$body.password)) { "[redacted]" } else { [string]$commands[0] }
-                Write-JsonResponse $context 202 @{ ok = $true; message = $message; submissionId = $clientRequestId; requestId = [string]$itemRequestIds[0]; requestIds = $itemRequestIds; itemRequestIds = $itemRequestIds; notificationRequestIds = $notificationRequestIds; allRequestIds = $allRequestIds; noticeId = $noticeId; notificationChannel = $itemNotificationChannel; notificationWarnings = $notificationWarnings; expectedNoticeClients = $(if ($itemNotification) { [int]$itemNotification.expectedClients } else { 0 }); command = $responseCommand; parts = $commands.Count; targetCount = $targetCount }
+                $publicRequestIds = if ($immediateItemResult -and $immediateItemResult.settled -and $targetCount -eq 1) { @() } else { $itemRequestIds }
+                Write-JsonResponse $context 202 @{ ok = $true; message = $message; submissionId = $clientRequestId; requestId = [string]$itemRequestIds[0]; requestIds = $publicRequestIds; itemRequestIds = $itemRequestIds; notificationRequestIds = $notificationRequestIds; allRequestIds = $allRequestIds; noticeId = $noticeId; notificationChannel = $itemNotificationChannel; notificationWarnings = $notificationWarnings; expectedNoticeClients = $(if ($itemNotification) { [int]$itemNotification.expectedClients } else { 0 }); command = $responseCommand; parts = $commands.Count; targetCount = $targetCount; immediateItemResult = $immediateItemResult }
                 continue
             }
             if ($request.HttpMethod -eq "POST" -and $path -eq "/api/server/start") {

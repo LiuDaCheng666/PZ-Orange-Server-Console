@@ -23,7 +23,7 @@ function Import-PanelFunction {
     Set-Item -LiteralPath "Function:\script:$Name" -Value $functionAst.Body.GetScriptBlock()
 }
 
-foreach ($name in @('Get-LogPayload', 'Get-AddItemCommandParts', 'New-AddItemOutcomeState', 'Update-AddItemOutcomeState', 'Get-AddItemOutcomeMap', 'Invoke-AddItemLogScan', 'Get-CommandResultPayload', 'Get-CommandResultsPayload', 'Get-CommandSubmissionPayload')) {
+foreach ($name in @('Get-LogPayload', 'Get-AddItemCommandParts', 'New-AddItemOutcomeState', 'Update-AddItemOutcomeState', 'Get-AddItemOutcomeMap', 'Invoke-AddItemLogScan', 'Get-CommandResultPayload', 'Get-CommandResultsPayload', 'Get-CommandSubmissionPayload', 'Wait-ItemGrantSubmissionResult')) {
     Import-PanelFunction -Name $name
 }
 $actualGetLogPayload = ${function:Get-LogPayload}
@@ -191,6 +191,18 @@ try {
         throw 'The recoverable command submission payload did not preserve its item request IDs.'
     }
 
+    Set-Item -LiteralPath Function:\script:Get-CommandResultsPayload -Value {
+        return [ordered]@{ ok = $true; results = @([ordered]@{ done = $true; gameStatus = 'success'; resultCode = 'item-added' }) }
+    }
+    Set-Item -LiteralPath Function:\script:Invoke-ExecutionHistoryTick -Value { }
+    Set-Item -LiteralPath Function:\script:Get-CommandSubmissionPayload -Value {
+        return [ordered]@{ ok = $true; found = $true; status = 'success'; resultCode = 'completed'; resultMessage = 'confirmed'; targetCount = 1 }
+    }
+    $immediate = Wait-ItemGrantSubmissionResult -Profile $profile -SubmissionId $submissionId -RequestIds @('abc00000000000000000000000000001') -TimeoutMilliseconds 500
+    if (-not $immediate.settled -or [string]$immediate.submission.status -ne 'success' -or [string]$immediate.results[0].gameStatus -ne 'success') {
+        throw 'The command POST immediate item result did not include the terminal game result and persisted submission.'
+    }
+
     [pscustomobject]@{
         ok = $true
         targets = $batch.results.Count
@@ -200,6 +212,7 @@ try {
         realLogBytes = ([IO.FileInfo]$realLogPath).Length
         realLogReads = $realReads
         segmentedDuplicateResults = 2
+        immediatePostResult = [string]$immediate.submission.status
         maxOutputLines = (@($batch.results | ForEach-Object { @($_.output).Count } | Measure-Object -Maximum).Maximum)
         missingResultStatus = $unconfirmed.gameStatus
     } | ConvertTo-Json

@@ -467,7 +467,8 @@ async function command(body){
   if(showResult)renderCommandResult('queued',`${title}正在提交`,'正在写入受控命令队列','等待面板接收命令...');
   try{
     const data=await api('/api/command',{method:'POST',body:JSON.stringify({...body,serverId,submissionId}),timeoutMs:15000});if(body.action==='additem'&&!data.submissionId)data.submissionId=submissionId;toast(data.message);setTimeout(pollLog,700);if(body.action==='players'||body.action==='access')setTimeout(refreshPlayers,1200);
-    if(showResult&&body.action==='additem'&&data.requestIds?.length){renderCommandResult('delivered','物品发放已进入服务器队列',`面板已接收 · 目标 ${Number(data.targetCount||data.requestIds.length)} 人`,'正在等待游戏服务器逐名返回发放结果...');followItemGrantResults(serverId,data,serial)}
+    if(showResult&&body.action==='additem'&&renderPersistedItemGrantResult(data.immediateItemResult?.submission,Number(data.targetCount||data.itemRequestIds?.length||1)))return data;
+    if(showResult&&body.action==='additem'&&data.itemRequestIds?.length){renderCommandResult('delivered','物品发放已进入服务器队列',`面板已接收 · 目标 ${Number(data.targetCount||data.itemRequestIds.length)} 人`,'正在等待游戏服务器逐名返回发放结果...');followItemGrantResults(serverId,data,serial)}
     else if(showResult&&body.action==='broadcast'&&data.requestIds?.length)followBroadcastResults(serverId,data.requestIds,serial);else if(showResult&&data.requestId)followCommandResult(serverId,data.requestId,title,serial);return data
   }catch(error){
     if(body.action==='additem'&&submissionId){
