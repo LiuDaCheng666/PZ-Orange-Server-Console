@@ -26,6 +26,7 @@ function Import-PanelFunction {
 }
 
 foreach ($name in @(
+    "Assert-SimpleText", "Quote-PZ", "Resolve-Command",
     "Read-AIOperationPolicies", "Save-AIOperationPolicies",
     "Read-BroadcastSchedules", "Save-BroadcastSchedules", "Get-BroadcastSchedulesPayload",
     "Read-ExecutionHistory", "Save-ExecutionHistory", "Add-ExecutionHistoryRecord", "Get-ExecutionHistoryPayload",
@@ -39,6 +40,14 @@ function Queue-Command { throw "Mock command channel unavailable." }
 
 try {
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+    $revokeCommand = Resolve-Command -Body ([pscustomobject]@{ action = "access"; username = "Alice"; level = "user" })
+    $legacyRevokeCommand = Resolve-Command -Body ([pscustomobject]@{ action = "access"; username = "Alice"; level = "none" })
+    if ($revokeCommand -cne 'setaccesslevel "Alice" "user"' -or $legacyRevokeCommand -cne $revokeCommand) {
+        throw "Access-level revoke did not map to the PZ user role."
+    }
+    $unsupportedRoleRejected = $false
+    try { [void](Resolve-Command -Body ([pscustomobject]@{ action = "access"; username = "Alice"; level = "overseer" })) } catch { $unsupportedRoleRejected = $true }
+    if (-not $unsupportedRoleRejected) { throw "Unsupported PZ access level was accepted." }
     $now = (Get-Date).ToString("o")
     $script:aiOperationPolicies = @([pscustomobject][ordered]@{
         id = "policy1"; serverId = "mock"; username = "Alice"; steamId = "76561198000000001"
@@ -126,6 +135,7 @@ try {
         historyPages = $firstPage.totalPages
         filteredHistoryRecords = $queryPage.total
         staggeredBroadcasts = $schedulerDispatches.Count
+        revokeCommand = $revokeCommand
     } | ConvertTo-Json
 }
 finally {

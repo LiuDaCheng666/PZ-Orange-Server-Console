@@ -180,6 +180,24 @@ try {
         throw 'An additem receipt recovered after a panel restart was not marked unconfirmed.'
     }
 
+    $accessId = 'ac000000000000000000000000000000'
+    $accessCommand = 'setaccesslevel "Alice" "none"'
+    $commandRequests[$accessId] = [pscustomobject]@{
+        serverId = 'mock'; action = 'access'; command = $accessCommand
+        queuedAt = (Get-Date).AddSeconds(-2).ToString('o'); logCursor = 123L
+    }
+    [IO.File]::WriteAllText((Join-Path $receiptRoot "$accessId.json"), ([ordered]@{
+        id = $accessId; command = $accessCommand; status = 'completed'; confirmation = 'stdin-flushed'
+    } | ConvertTo-Json), $utf8)
+    $fixtureLogPayload = @{
+        text = "LOG : General > command entered via server console (System.in): `"$accessCommand`"`nLOG : General > Access Level '' unknown, list of access level: banned, user, priority, observer, gm, moderator, admin"
+        cursor = 1000100L; reset = $false
+    }
+    $accessFailure = Get-CommandResultPayload -Profile $profile -Id $accessId -SharedLogPayload $fixtureLogPayload
+    if (-not $accessFailure.done -or $accessFailure.status -ne 'failed' -or $accessFailure.resultCode -ne 'access-level-rejected') {
+        throw 'A rejected access-level command was reported as successful.'
+    }
+
     $submissionId = 'abc00000000000000000000000000000'
     $executionHistory = @([pscustomobject]@{
         id = 'history-1'; serverId = 'mock'; clientRequestId = $submissionId; action = 'additem'; status = 'success'
@@ -215,6 +233,7 @@ try {
         immediatePostResult = [string]$immediate.submission.status
         maxOutputLines = (@($batch.results | ForEach-Object { @($_.output).Count } | Measure-Object -Maximum).Maximum)
         missingResultStatus = $unconfirmed.gameStatus
+        accessFailureStatus = $accessFailure.status
     } | ConvertTo-Json
 }
 finally {

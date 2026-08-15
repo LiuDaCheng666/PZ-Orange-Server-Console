@@ -5,7 +5,7 @@ const { chromium } = require('playwright-core');
 
 const webRoot = path.join(__dirname, 'web');
 const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-const requests = { policy: null, schedule: null, runNow: null, itemGrant: null, itemResultQueries: 0, itemSubmissionQueries: 0, aiRuntime: null };
+const requests = { policy: null, schedule: null, runNow: null, itemGrant: null, access: null, itemResultQueries: 0, itemSubmissionQueries: 0, aiRuntime: null };
 
 const profile = {
   id: 'mock', name: '测试服务器', kind: 'test', alive: true, status: 'running', writable: true,
@@ -73,6 +73,7 @@ async function handleApi(request, response, url) {
   if (url.pathname === '/api/command/result') return sendJson(response, 200, { ok: true, status: 'delivered', done: true, receipt: { status: 'completed' }, output: [] });
   if (url.pathname === '/api/command' && request.method === 'POST') {
     const body = await readBody(request);
+    if (body.action === 'access') requests.access = body;
     if (body.action === 'additem') {
       requests.itemGrant = body;
       await new Promise(resolve => setTimeout(resolve, 5500));
@@ -216,6 +217,9 @@ async function layout(page, selectors) {
 
     await desktop.click('.nav-item[data-view="players"]');
     await desktop.waitForFunction(() => document.querySelectorAll('#grantForm .online-player-select option').length === 3);
+    await desktop.fill('#accessForm input[name="username"]', 'Alice');
+    await desktop.click('#accessForm button[data-access="user"]');
+    await desktop.waitForFunction(() => document.querySelector('#commandResultTitle').textContent.includes('修改访问级别'));
     await desktop.selectOption('#grantForm .online-player-select', 'Alice');
     await desktop.fill('#grantForm input[name="count"]', '2');
     await desktop.selectOption('#grantForm select[name="notificationChannel"]', 'both');
@@ -291,6 +295,7 @@ async function layout(page, selectors) {
     if (errors.length) process.exitCode = 2;
     if (!requests.policy || requests.policy.serverId !== 'mock' || requests.policy.username !== 'Alice' || requests.policy.steamId !== '76561198000000001' || requests.policy.trustedAll || requests.policy.allowedOperations.length !== 2) process.exitCode = 3;
     if (!requests.schedule || requests.schedule.channel !== 'both' || requests.schedule.intervalMinutes !== 60 || requests.schedule.duration !== 120) process.exitCode = 4;
+    if (!requests.access || requests.access.action !== 'access' || requests.access.username !== 'Alice' || requests.access.level !== 'user') process.exitCode = 13;
     if (!requests.runNow || requests.runNow.id !== 'schedule-1' || history.length !== 2) process.exitCode = 5;
     if (!requests.itemGrant || requests.itemGrant.notificationChannel !== 'both' || requests.itemGrant.notificationDuration !== 25 || requests.itemGrant.usernames[0] !== 'Alice' || requests.itemGrant.count !== 2 || !/^[a-f0-9]{32}$/.test(requests.itemGrant.submissionId)) process.exitCode = 7;
     if (requests.itemResultQueries !== 0 || requests.itemSubmissionQueries !== 0) process.exitCode = 10;

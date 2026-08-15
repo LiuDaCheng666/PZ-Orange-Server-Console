@@ -2348,7 +2348,8 @@ function Resolve-Command {
         "access" {
             $user = Quote-PZ -Value ([string]$Body.username) -Name "用户名"
             $level = [string]$Body.level
-            if ($level -notin @("admin", "moderator", "overseer", "gm", "observer", "none")) { throw "无效权限等级。" }
+            if ($level -eq "none") { $level = "user" }
+            if ($level -notin @("admin", "moderator", "gm", "observer", "user")) { throw "无效权限等级。" }
             return "setaccesslevel $user `"$level`""
         }
         "kick" {
@@ -3219,7 +3220,9 @@ function Get-CommandResultPayload {
             $output = @($addItemOutcome.commandLine, $addItemOutcome.resultLine | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
         }
     }
-    $failed = ($receipt -and [string]$receipt.status -eq "failed") -or ($addItemOutcome -and [string]$addItemOutcome.status -eq 'failed')
+    $isAccessLevelCommand = ($tracked -and [string]$tracked.action -eq "access") -or $command -match '^setaccesslevel\s'
+    $accessLevelFailure = $isAccessLevelCommand -and @($output | Where-Object { $_ -match "Access Level .* unknown|No such user|User .+ not found" }).Count -gt 0
+    $failed = ($receipt -and [string]$receipt.status -eq "failed") -or ($addItemOutcome -and [string]$addItemOutcome.status -eq 'failed') -or $accessLevelFailure
     $hasServerOutput = $output.Count -gt 1
     $resultCode = $null
     $resultMessage = $null
@@ -3240,6 +3243,10 @@ function Get-CommandResultPayload {
             $resultCode = "mods-checking"
             $resultMessage = "服务器仍在检查 Mod 更新，请继续等待最终结果。"
         }
+    }
+    elseif ($accessLevelFailure) {
+        $resultCode = "access-level-rejected"
+        $resultMessage = "游戏服务器拒绝了访问级别修改，请核对玩家账号和权限等级。"
     }
     if ($tracked -and $hasServerOutput) {
         if (-not $tracked.PSObject.Properties["lastOutputCount"]) {
