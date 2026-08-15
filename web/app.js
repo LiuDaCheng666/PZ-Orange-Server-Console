@@ -188,10 +188,11 @@ function renderPicker(){
 function renderCurrentServer(){
   const server=currentServer();
   if(!server)return;
+  const servers=lastStatus?.servers||[],runningServers=servers.filter(item=>item.alive),pendingOnlineServers=runningServers.filter(item=>!item.onlineKnown),knownOnlineTotal=runningServers.filter(item=>item.onlineKnown).reduce((total,item)=>total+(Number(item.onlineCount)||0),0),currentOnline=server.alive?(server.onlineKnown?Number(server.onlineCount)||0:'同步中'):0;
   const jvm=server.jvmMemory||{},memoryText=value=>value==null?'--':`${(Number(value)/1073741824).toFixed(1)} GB`;
   document.querySelector('#targetEyebrow').textContent=`当前目标 · ${server.name}`;
-  document.querySelector('#onlineCount').textContent=server.onlineCount??'--';
-  document.querySelector('#playerLimit').textContent=`上限 ${server.maxPlayers||'--'}`;
+  document.querySelector('#onlineCount').textContent=pendingOnlineServers.length?(knownOnlineTotal?`≥ ${knownOnlineTotal}`:'同步中'):knownOnlineTotal;
+  document.querySelector('#playerLimit').textContent=`当前服 ${currentOnline} / ${server.maxPlayers||'--'} · ${runningServers.length}/${servers.length}服运行${pendingOnlineServers.length?` · ${pendingOnlineServers.length}服待同步`:''}`;
   document.querySelector('#memoryUsage').textContent=server.alive?`${(server.memoryMB/1024).toFixed(1)} GB`:'--';
   document.querySelector('#memoryPeak').textContent=server.alive?`Windows 工作集 · 峰值 ${(server.memoryPeakMB/1024).toFixed(1)} GB`:'Windows 工作集峰值 --';
   document.querySelector('#jvmHeapUsage').textContent=jvm.available?memoryText(jvm.currentUsedBytes):'--';

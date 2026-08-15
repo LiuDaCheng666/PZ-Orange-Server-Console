@@ -8,6 +8,7 @@ const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.
 const requests = { startup: null, autoLogon: 0, restart: null, cancel: null };
 let allServersStopped = false;
 let restartPending = false;
+let server2OnlineKnown = true;
 
 function sendJson(response, status, body) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -26,7 +27,7 @@ function readBody(request) {
 
 async function handleApi(request, response, url) {
   if (url.pathname === '/api/auth/session') return sendJson(response, 200, { ok: true, authenticated: true, local: true, csrf: 'test', user: { username: 'admin', displayName: '管理员' } });
-  if (url.pathname === '/api/status') return sendJson(response, 200, { ok: true, defaultServer: 'production', serverTime: new Date().toISOString(), servers: [{ id: 'production', name: '正式服', kind: 'production', alive: !allServersStopped, status: allServersStopped ? 'stopped' : 'running', writable: true, javaPid: allServersStopped ? null : 816, ports: allServersStopped ? [] : [16261], onlineKnown: true, onlineCount: 0, maxPlayers: 100, canStart: allServersStopped, canStop: !allServersStopped, canRestart: !allServersStopped, jvmMemory: { available: false } }, { id: 'server2', name: '2服', kind: 'production', alive: !allServersStopped, status: allServersStopped ? 'stopped' : 'running', writable: true, javaPid: allServersStopped ? null : 817, ports: allServersStopped ? [] : [17271], onlineKnown: true, onlineCount: 0, maxPlayers: 100, canStart: allServersStopped, canStop: !allServersStopped, canRestart: !allServersStopped, jvmMemory: { available: false } }] });
+  if (url.pathname === '/api/status') return sendJson(response, 200, { ok: true, defaultServer: 'production', serverTime: new Date().toISOString(), servers: [{ id: 'production', name: '正式服', kind: 'production', alive: !allServersStopped, status: allServersStopped ? 'stopped' : 'running', writable: true, javaPid: allServersStopped ? null : 816, ports: allServersStopped ? [] : [16261], onlineKnown: true, onlineCount: 2, maxPlayers: 100, canStart: allServersStopped, canStop: !allServersStopped, canRestart: !allServersStopped, jvmMemory: { available: false } }, { id: 'server2', name: '2服', kind: 'production', alive: !allServersStopped, status: allServersStopped ? 'stopped' : 'running', writable: true, javaPid: allServersStopped ? null : 817, ports: allServersStopped ? [] : [17271], onlineKnown: server2OnlineKnown, onlineCount: server2OnlineKnown ? 3 : 0, maxPlayers: 100, canStart: allServersStopped, canStop: !allServersStopped, canRestart: !allServersStopped, jvmMemory: { available: false } }] });
   if (url.pathname === '/api/system') return sendJson(response, 200, {
     ok: true, sampledAt: new Date().toISOString(),
     host: { cpuName: 'Test CPU', physicalCores: 16, logicalProcessors: 32, cpuPercent: 12.5, memoryTotalBytes: 137438953472, memoryUsedBytes: 68719476736, memoryAvailableBytes: 68719476736, uptimeSeconds: 3600 },
@@ -91,6 +92,14 @@ async function assertLayout(page) {
     await desktop.addInitScript(() => { window.confirm = () => true; window.prompt = () => '重启物理机'; });
     await desktop.goto(`http://127.0.0.1:${port}/?view=system&server=production`, { waitUntil: 'domcontentloaded' });
     await desktop.waitForSelector('#authScreen', { state: 'hidden' });
+    await desktop.waitForFunction(() => document.querySelector('#onlineCount').textContent === '5');
+    if (!(await desktop.locator('#playerLimit').textContent()).includes('当前服 2 / 100 · 2/2服运行')) throw new Error('Current server online detail is missing from the aggregate metric.');
+    server2OnlineKnown = false;
+    await desktop.evaluate(() => refreshStatus());
+    await desktop.waitForFunction(() => document.querySelector('#onlineCount').textContent === '≥ 2' && document.querySelector('#playerLimit').textContent.includes('1服待同步'));
+    server2OnlineKnown = true;
+    await desktop.evaluate(() => refreshStatus());
+    await desktop.waitForFunction(() => document.querySelector('#onlineCount').textContent === '5');
     await desktop.waitForFunction(() => document.querySelector('#hostStartupDetail').textContent.includes('登录前启动'));
     await desktop.waitForFunction(() => document.querySelectorAll('.cpu-core-tile').length === 32 && document.querySelectorAll('.cpu-core-tile.allowed').length === 16);
     if (!(await desktop.locator('#cpuCoreScope').textContent()).includes('PID 816')) throw new Error('Selected server CPU affinity scope is missing.');
