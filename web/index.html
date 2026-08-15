@@ -277,11 +277,17 @@
           <p class="host-control-note">开机任务使用当前 Windows 管理员身份和最高权限，在登录桌面前恢复 Web。自动进入桌面由微软 Sysinternals Autologon 在本机配置，Windows 密码不会经过面板。</p>
         </section>
         <section class="system-section"><div class="section-heading"><div><p class="eyebrow">进程</p><h2>面板与游戏服务器</h2></div></div><div class="system-table" id="systemProcesses"><p class="empty-state compact">正在读取进程信息...</p></div></section>
+        <section class="system-section cpu-core-section" aria-labelledby="cpuCoreTitle">
+          <div class="section-heading"><div><p class="eyebrow">逻辑处理器</p><h2 id="cpuCoreTitle">逐核占用与服务器调度范围</h2></div><span class="badge neutral" id="cpuCoreScope">正在读取</span></div>
+          <div class="cpu-server-legend" id="cpuServerLegend"><p class="empty-state compact">正在匹配服务器进程...</p></div>
+          <div class="cpu-core-grid" id="cpuCoreGrid"><p class="empty-state compact">正在读取逐核占用...</p></div>
+          <div class="cpu-core-legend"><span><i class="allowed"></i>所选服务器允许调度</span><span><i class="outside"></i>不在亲和性范围</span><small>核内服务器标签表示对应 Java 允许被调度到该核；百分比是主机总占用，不是单个 Java 的独占值。</small></div>
+        </section>
         <div class="system-columns">
           <section class="system-section"><div class="section-heading"><div><p class="eyebrow">存储</p><h2>本机磁盘</h2></div></div><div class="resource-list" id="systemDisks"></div></section>
           <section class="system-section"><div class="section-heading"><div><p class="eyebrow">网络</p><h2>活动网卡</h2></div></div><div class="resource-list" id="systemNetwork"></div></section>
         </div>
-        <p class="monitor-note">CPU、磁盘和网络数据每 5 秒采样一次，仅打开本页时轮询。“允许逻辑处理器”表示进程亲和性范围，不代表进程此刻正在某个核心执行。</p>
+        <p class="monitor-note">CPU、磁盘和网络数据每 5 秒采样一次，仅打开本页时轮询。“允许逻辑处理器”表示进程亲和性范围；Windows 会在这个范围内动态调度线程，不代表进程固定运行在某一个核心。</p>
       </section>
 
       <section class="view" id="view-maintenance">
@@ -342,6 +348,7 @@
               <label class="wide">数据目录<input name="dataRoot" maxlength="260" placeholder="D:\PZData" required></label>
               <label class="wide">Java 路径<input name="javaPath" maxlength="300" placeholder="D:\PZ Server\jre64\bin\java.exe" required></label>
               <label class="wide queue-field">原启动脚本（可选）<input name="sourceStartScript" maxlength="300" placeholder="留空自动扫描运行目录中的 StartServer64.bat"></label>
+              <label class="wide queue-field">流式防护参数（留空禁用）<input name="streamingStabilityOptions" maxlength="500" spellcheck="false" autocomplete="off" placeholder="objectModData=true,maxPending=256,..."></label>
               <label class="wide">控制台日志<input name="consoleLog" maxlength="300" placeholder="D:\PZData\server-console.txt" required></label>
               <label>UDP 端口<input name="ports" maxlength="40" placeholder="16261,16262" required></label>
               <label>玩家上限<input name="maxPlayers" type="number" min="1" max="1000" value="32" required></label>

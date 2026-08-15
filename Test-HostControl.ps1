@@ -46,6 +46,10 @@ if ($panel -notmatch '\[uint32\]::MaxValue' -or
 if ($javascript -notmatch "typed!=='重启物理机'" -or $javascript -notmatch 'RESTART_PHYSICAL_HOST') {
     throw "The browser does not require typed physical-host confirmation."
 }
+if ($panel -notmatch 'Win32_PerfFormattedData_PerfOS_Processor' -or $panel -notmatch 'logicalProcessors = \$logicalProcessorLoads' -or
+        $html -notmatch 'id="cpuCoreGrid"' -or $javascript -notmatch 'cpu-core-tile') {
+    throw "Per-logical-processor monitoring is incomplete."
+}
 if ($autoLogon -notmatch 'https://live\.sysinternals\.com/Autologon64\.exe' -or
         $autoLogon -match 'DefaultPassword|password\s*=|ConvertFrom-SecureString') {
     throw "Autologon configuration must use the official local tool without Web password storage."

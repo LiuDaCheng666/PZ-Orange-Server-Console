@@ -12,6 +12,8 @@ $profile = Get-Content -LiteralPath $ProfilePath -Raw -Encoding UTF8 | ConvertFr
 $startedAt = Get-Date
 $process = $null
 $adminPassword = $null
+$desiredPriorityClass = [Diagnostics.ProcessPriorityClass]::AboveNormal
+$appliedPriorityClass = $null
 if ([bool]$profile.showConsole) {
     try { $Host.UI.RawUI.WindowTitle = "PZ Server - $([string]$profile.serverName)" } catch { }
 }
@@ -51,6 +53,7 @@ function Write-State {
         updatedAt = (Get-Date).ToString("o")
         managed = $true
         protocolVersion = 2
+        priorityClass = $appliedPriorityClass
     }
     if ($Extra) {
         foreach ($property in $Extra.PSObject.Properties) { $state[$property.Name] = $property.Value }
@@ -94,8 +97,37 @@ function Quote-WindowsArgument {
     return '"' + ([regex]::Replace($Value, '(\\+)$', '$1$1')) + '"'
 }
 
-New-Item -ItemType Directory -Path ([string]$profile.queueDir) -Force | Out-Null
+function Get-JvmGcLogPathArgument {
+    param([string]$Arguments)
+    if ([string]::IsNullOrWhiteSpace($Arguments)) { return $null }
+    $decorators = 'none|time|utctime|uptime|timemillis|uptimemillis|timenanos|uptimenanos|hostname|pid|tid|level|tags|filecount|filesize'
+    $pattern = '(?i)-Xlog:\S*?file=(?:"(?<quotedPath>[^"]+)"|(?<rawPath>[A-Za-z]:[/\\][^\s:"]+|\\\\[^\s:"]+|/[^\s:"]+|[^\s:"]+))(?=:(?:' + $decorators + ')(?:[=,:]|\s|$)|\s|$)'
+    $match = [regex]::Match($Arguments, $pattern)
+    if (-not $match.Success) { return $null }
+    if ($match.Groups['quotedPath'].Success) { return [string]$match.Groups['quotedPath'].Value }
+    return [string]$match.Groups['rawPath'].Value
+}
+
+New-Item -ItemType Directory -Path ([string]$profile.dataRoot), ([string]$profile.queueDir) -Force | Out-Null
 if ($profile.receiptDir) { New-Item -ItemType Directory -Path ([string]$profile.receiptDir) -Force | Out-Null }
+$gcLogArgument = Get-JvmGcLogPathArgument -Arguments ([string]$profile.arguments)
+if (-not [string]::IsNullOrWhiteSpace($gcLogArgument)) {
+    $gcLogPath = if ([IO.Path]::IsPathRooted($gcLogArgument)) {
+        [IO.Path]::GetFullPath($gcLogArgument)
+    } else {
+        [IO.Path]::GetFullPath((Join-Path ([string]$profile.workingDirectory) $gcLogArgument))
+    }
+    $gcLogDirectory = Split-Path -Parent $gcLogPath
+    if (-not [string]::IsNullOrWhiteSpace($gcLogDirectory)) {
+        New-Item -ItemType Directory -Path $gcLogDirectory -Force | Out-Null
+    }
+}
+$hostProcess = [Diagnostics.Process]::GetCurrentProcess()
+$hostProcess.PriorityClass = $desiredPriorityClass
+$hostProcess.Refresh()
+if ($hostProcess.PriorityClass -ne $desiredPriorityClass) {
+    throw "Failed to set the managed host process priority to AboveNormal."
+}
 $existing = Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue | Where-Object {
     Test-ProcessMatchesProfile -Candidate $_
 } | Select-Object -First 1
@@ -152,6 +184,12 @@ $process.StartInfo = $startInfo
 Write-State -Status "starting" -Process $null -Extra $null
 try {
     if (-not $process.Start()) { throw "Failed to start the Java process." }
+    $process.PriorityClass = $desiredPriorityClass
+    $process.Refresh()
+    if ($process.PriorityClass -ne $desiredPriorityClass) {
+        throw "Failed to set the Java process priority to AboveNormal."
+    }
+    $appliedPriorityClass = [string]$process.PriorityClass
     $adminPassword = $null
     Write-State -Status "starting" -Process $process -Extra $null
     $runningWritten = $false
@@ -197,12 +235,19 @@ try {
         }
         Start-Sleep -Milliseconds 400
     }
-    Write-State -Status "stopped" -Process $process -Extra ([pscustomobject]@{
-        exitCode = $process.ExitCode
+    $exitCode = [int]$process.ExitCode
+    $exitStatus = if ($exitCode -eq 0) { "stopped" } else { "failed" }
+    $exitExtra = [ordered]@{
+        exitCode = $exitCode
         finishedAt = (Get-Date).ToString("o")
-    })
+    }
+    if ($exitCode -ne 0) { $exitExtra.failure = "Java process exited with code $exitCode." }
+    Write-State -Status $exitStatus -Process $process -Extra ([pscustomobject]$exitExtra)
 }
 catch {
+    if ($process -and -not $process.HasExited) {
+        try { $process.Kill() } catch { }
+    }
     Write-State -Status "failed" -Process $process -Extra ([pscustomobject]@{ failure = $_.Exception.Message })
     throw
 }

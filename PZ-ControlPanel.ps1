@@ -975,6 +975,22 @@ function Enable-JvmGcTelemetry {
     return [regex]::Replace($Arguments, '(?i)\s+(?=zombie\.network\.GameServer(?:\s|$))', " $logging ", 1)
 }
 
+function Set-StreamingStabilityAgentArguments {
+    param([string]$Arguments, $Profile)
+    if ([string]::IsNullOrWhiteSpace($Arguments)) { throw "Java 启动参数为空。" }
+
+    $agentPattern = '(?i)(?:^|\s)-javaagent:server-patches[/\\]PZServerStreamingStability-agent\.jar(?:=[^\s"]+)?'
+    $result = ([regex]::Replace($Arguments, $agentPattern, ' ') -replace '\s+', ' ').Trim()
+    $options = ([string]$Profile.streamingStabilityOptions).Trim()
+    if ([string]::IsNullOrWhiteSpace($options)) { return $result }
+    if ($result -notmatch '(?i)(?:^|\s)zombie\.network\.GameServer(?:\s|$)') {
+        throw "Java 启动参数中缺少 zombie.network.GameServer。"
+    }
+
+    $agent = "-javaagent:server-patches/PZServerStreamingStability-agent.jar=$options"
+    return [regex]::Replace($result, '(?i)(?=zombie\.network\.GameServer(?:\s|$))', "$agent ")
+}
+
 function Set-ManagedProfileIdentityArguments {
     param([string]$Arguments, $Profile)
     if ([string]::IsNullOrWhiteSpace($Arguments)) { throw "Java 启动参数为空。" }
@@ -1009,6 +1025,7 @@ function Ensure-ManagedProfile {
     $arguments = Get-ManagedLaunchArguments -Profile $Profile
     $arguments = Set-ManagedProfileIdentityArguments -Arguments $arguments -Profile $Profile
     $arguments = Enable-JvmGcTelemetry -Arguments $arguments
+    $arguments = Set-StreamingStabilityAgentArguments -Arguments $arguments -Profile $Profile
     $managedConfig = [ordered]@{
         id = [string]$Profile.id
         serverName = [string]$Profile.serverName
@@ -1079,6 +1096,11 @@ function ConvertTo-ServerProfile {
     $startScript = Normalize-AbsolutePath -Value $InputProfile.startScript -Name "启动脚本"
     $stopScript = Normalize-AbsolutePath -Value $InputProfile.stopScript -Name "停止脚本"
     $sourceStartScript = Normalize-AbsolutePath -Value $InputProfile.sourceStartScript -Name "原启动脚本"
+    $streamingStabilityOptions = ([string]$InputProfile.streamingStabilityOptions).Trim()
+    if ($streamingStabilityOptions.Length -gt 500 -or
+        ($streamingStabilityOptions -and $streamingStabilityOptions -notmatch '^[A-Za-z][A-Za-z0-9]*(?:=[A-Za-z0-9.-]+)?(?:,[A-Za-z][A-Za-z0-9]*(?:=[A-Za-z0-9.-]+)?)*$')) {
+        throw "流式防护参数格式无效，只能填写逗号分隔的 key=value。"
+    }
     if ($channel -eq "queue" -and ([string]::IsNullOrWhiteSpace($queueDir) -or [string]::IsNullOrWhiteSpace($statePath) -or
         [string]::IsNullOrWhiteSpace($startScript) -or [string]::IsNullOrWhiteSpace($stopScript))) {
         $managedPaths = Get-ManagedProfilePaths -Id $id
@@ -1108,6 +1130,7 @@ function ConvertTo-ServerProfile {
         startScript = $startScript
         stopScript = $stopScript
         sourceStartScript = $sourceStartScript
+        streamingStabilityOptions = $streamingStabilityOptions
         ports = $ports
         lanAddress = $lanAddress
         maxPlayers = $maxPlayers
@@ -1764,6 +1787,34 @@ function Get-ProcessorAffinityList {
     catch { return @() }
 }
 
+function Get-LogicalProcessorLoads {
+    param([int]$LogicalProcessorCount)
+
+    $samplesByIndex = @{}
+    try {
+        foreach ($sample in @(Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -OperationTimeoutSec 3 -ErrorAction Stop)) {
+            $index = 0
+            if (-not [int]::TryParse([string]$sample.Name, [ref]$index) -or $index -lt 0 -or $index -ge $LogicalProcessorCount) { continue }
+            $samplesByIndex[$index] = [pscustomobject]@{
+                usagePercent = [math]::Min(100, [math]::Max(0, [double]$sample.PercentProcessorTime))
+                userPercent = [math]::Min(100, [math]::Max(0, [double]$sample.PercentUserTime))
+                privilegedPercent = [math]::Min(100, [math]::Max(0, [double]$sample.PercentPrivilegedTime))
+            }
+        }
+    }
+    catch { }
+
+    return @(for ($index = 0; $index -lt $LogicalProcessorCount; $index++) {
+        $sample = $samplesByIndex[$index]
+        [ordered]@{
+            index = $index
+            usagePercent = if ($sample) { [math]::Round([double]$sample.usagePercent, 1) } else { 0 }
+            userPercent = if ($sample) { [math]::Round([double]$sample.userPercent, 1) } else { 0 }
+            privilegedPercent = if ($sample) { [math]::Round([double]$sample.privilegedPercent, 1) } else { 0 }
+        }
+    })
+}
+
 function Get-SystemMetricsPayload {
     $now = Get-Date
     if ($systemMetricsCache -and ($now - $systemMetricsCacheAt).TotalSeconds -lt 5) { return $systemMetricsCache }
@@ -1784,6 +1835,7 @@ function Get-SystemMetricsPayload {
     $operatingSystem = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 3
     $processorLoads = @(Get-CimInstance Win32_Processor -OperationTimeoutSec 3 | ForEach-Object { [double]$_.LoadPercentage })
     $cpuPercent = if ($processorLoads.Count) { [math]::Round((($processorLoads | Measure-Object -Average).Average), 1) } else { 0 }
+    $logicalProcessorLoads = @(Get-LogicalProcessorLoads -LogicalProcessorCount $systemStaticCache.logicalProcessors)
     $memoryAvailable = [int64]$operatingSystem.FreePhysicalMemory * 1KB
 
     $disks = @()
@@ -1870,6 +1922,7 @@ function Get-SystemMetricsPayload {
         disks = $disks
         network = $network
         processes = $processes
+        logicalProcessors = $logicalProcessorLoads
         pollSeconds = 5
     }
     $script:systemMetricsCacheAt = $now
@@ -1887,6 +1940,18 @@ function Convert-JvmSizeToBytes {
         default { 1 }
     }
     return [int64]$matches.number * [int64]$multiplier
+}
+
+function Get-JvmGcLogPathArgument {
+    param([string]$Arguments)
+    if ([string]::IsNullOrWhiteSpace($Arguments)) { return $null }
+
+    $decorators = 'none|time|utctime|uptime|timemillis|uptimemillis|timenanos|uptimenanos|hostname|pid|tid|level|tags|filecount|filesize'
+    $pattern = '(?i)-Xlog:\S*?file=(?:"(?<quotedPath>[^"]+)"|(?<rawPath>[A-Za-z]:[/\\][^\s:"]+|\\\\[^\s:"]+|/[^\s:"]+|[^\s:"]+))(?=:(?:' + $decorators + ')(?:[=,:]|\s|$)|\s|$)'
+    $match = [regex]::Match($Arguments, $pattern)
+    if (-not $match.Success) { return $null }
+    if ($match.Groups['quotedPath'].Success) { return [string]$match.Groups['quotedPath'].Value }
+    return [string]$match.Groups['rawPath'].Value
 }
 
 function Get-JvmMemoryMetrics {
@@ -1912,13 +1977,7 @@ function Get-JvmMemoryMetrics {
         $maxBytes = Convert-JvmSizeToBytes -Value $matches.size
     }
 
-    $relativeLogPath = $null
-    if ($arguments -match '(?i)-Xlog:[^\s]*file=(?<path>[^:\s]+)') {
-        $relativeLogPath = [string]$matches.path
-    }
-    elseif ($arguments -match '(?i)-Xlog:[^\s]*file="(?<path>[^"]+)"') {
-        $relativeLogPath = [string]$matches.path
-    }
+    $relativeLogPath = Get-JvmGcLogPathArgument -Arguments $arguments
     if ([string]::IsNullOrWhiteSpace($relativeLogPath)) {
         return [ordered]@{
             available = $false
@@ -4491,6 +4550,10 @@ try {
                             if ([string]::IsNullOrWhiteSpace([string]$body.profile.$field)) { $body.profile | Add-Member -NotePropertyName $field -NotePropertyValue $existing.$field -Force }
                         }
                     }
+                    if ($mode -eq "update" -and $existing -and
+                        $body.profile.PSObject.Properties.Name -notcontains "streamingStabilityOptions") {
+                        $body.profile | Add-Member -NotePropertyName streamingStabilityOptions -NotePropertyValue $existing.streamingStabilityOptions -Force
+                    }
                     $profile = ConvertTo-ServerProfile -InputProfile $body.profile
                     if ($mode -eq "create" -and $existing) { throw "服务器 ID 已存在。" }
                     if ($mode -eq "update" -and -not $existing) { throw "要编辑的服务器配置不存在。" }
@@ -5234,7 +5297,8 @@ try {
                     $adminPasswordConfirm = $null
                 }
                 $managedPaths = Get-ManagedProfilePaths -Id ([string]$profile.id)
-                $launchDeadline = (Get-Date).AddSeconds(5)
+                $launchDeadline = (Get-Date).AddSeconds(8)
+                $launchRunningSince = $null
                 do {
                     Start-Sleep -Milliseconds 200
                     $launchState = $null
@@ -5242,12 +5306,23 @@ try {
                         try { $launchState = Get-Content -LiteralPath $managedPaths.statePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
                     }
                     $stateIsCurrent = $launchState -and $launchState.updatedAt -and ([datetime]$launchState.updatedAt) -ge $launchStartedAt.AddSeconds(-1)
-                    if ($stateIsCurrent -and [string]$launchState.status -in @("starting", "running")) { break }
+                    if ($stateIsCurrent -and [string]$launchState.status -eq "running") {
+                        if (-not $launchRunningSince) { $launchRunningSince = Get-Date }
+                        if (((Get-Date) - $launchRunningSince).TotalSeconds -ge 2) { break }
+                    }
+                    else { $launchRunningSince = $null }
+                    if ($stateIsCurrent -and [string]$launchState.status -in @("failed", "stopped")) {
+                        $failure = if ($launchState.failure) { [string]$launchState.failure } elseif ($null -ne $launchState.exitCode) { "Java 进程已退出，退出码 $($launchState.exitCode)。" } else { "Java 进程在进入运行状态前退出。" }
+                        throw "服务器启动失败：$failure"
+                    }
                     if ($launchProcess.HasExited) {
                         $failure = if ($stateIsCurrent -and $launchState.failure) { [string]$launchState.failure } else { "启动脚本已退出，退出码 $($launchProcess.ExitCode)。" }
                         throw "服务器启动失败：$failure"
                     }
                 } while ((Get-Date) -lt $launchDeadline)
+                if (-not $launchRunningSince -or ((Get-Date) - $launchRunningSince).TotalSeconds -lt 2) {
+                    throw "服务器启动失败：Java 未在 8 秒内进入稳定运行状态。"
+                }
                 $script:statusCache = $null
                 $script:statusCacheAt = [datetime]::MinValue
                 $script:pzProcessInfoCacheAt = [datetime]::MinValue
