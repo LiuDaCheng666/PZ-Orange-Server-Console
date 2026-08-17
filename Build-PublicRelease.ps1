@@ -1,6 +1,6 @@
 ﻿param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "dist-public"),
-    [string]$Version = "0.9.0",
+    [string]$Version = "0.9.1",
     [string]$PackageName
 )
 
@@ -157,6 +157,8 @@ $rootFiles = @(
     "Test-AIKnowledgeBuilder.ps1",
     "Test-AIKnowledgeBuildPipeline.ps1",
     "Test-ItemGrantCommandResults.ps1",
+    "Test-ProfileGameSettingsSync.ps1",
+    "Test-MaintenanceBrowser.js",
     "Test-PlayerDataPermissions.ps1",
     "Test-PZPlayerDataManager.js",
     "CHANGELOG.md",

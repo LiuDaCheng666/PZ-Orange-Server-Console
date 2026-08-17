@@ -43,6 +43,7 @@
         <button class="nav-item" data-view="profiles"><i data-lucide="server-cog"></i><span>服务器配置</span></button>
         <button class="nav-item" data-view="ai"><i data-lucide="bot"></i><span>AI 助手</span></button>
         <button class="nav-item local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>Web 用户</span></button>
+        <button class="nav-item" data-view="map-reset"><i data-lucide="map-pinned"></i><span>地图刷新</span></button>
         <button class="nav-item" data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
       </nav>
       <div class="sidebar-foot"><span id="connectionDot" class="status-dot"></span><span id="connectionText">正在连接</span></div>
@@ -290,8 +291,56 @@
         <p class="monitor-note">CPU、磁盘和网络数据每 5 秒采样一次，仅打开本页时轮询。“允许逻辑处理器”表示进程亲和性范围；Windows 会在这个范围内动态调度线程，不代表进程固定运行在某一个核心。</p>
       </section>
 
+      <section class="view" id="view-map-reset">
+        <div class="section-heading page-heading"><div><p class="eyebrow">B42 选择性区块刷新</p><h2>地图刷新与保护区域</h2></div><span class="badge neutral" id="mapResetStateBadge">尚未审计</span></div>
+        <div class="map-reset-alert" id="mapResetAlert" data-state="neutral"><i data-lucide="shield-check"></i><div><strong id="mapResetAlertTitle">只读工具已就绪</strong><p id="mapResetAlertText">审计不会修改存档。正式执行只会移动未保护区块到隔离目录。</p></div></div>
+
+        <form class="map-reset-config" id="mapResetConfigForm">
+          <div class="section-heading"><div><p class="eyebrow">保护规则</p><h2>自动保护范围</h2></div><button class="primary-button map-reset-admin" type="submit"><i data-lucide="save"></i>保存配置</button></div>
+          <div class="map-reset-margin-grid">
+            <label>安全屋外扩（区块）<input name="safehouseMarginChunks" type="number" min="0" max="64" step="1" value="2" required><small>每个区块为 8×8 格。默认外扩 2 区块。</small></label>
+            <label>存活人物外扩（区块）<input name="playerMarginChunks" type="number" min="0" max="64" step="1" value="8" required><small>默认外扩 8 区块，降低上线位置出现黑边的风险。</small></label>
+          </div>
+          <div class="map-reset-area-head"><div><strong>手动保护区域</strong><span>坐标和宽高单位均为游戏格；边距单位为区块。</span></div><button class="secondary-button map-reset-admin" id="addMapResetArea" type="button"><i data-lucide="plus"></i>添加区域</button></div>
+          <div class="map-reset-area-table" id="mapResetAreaTable"><p class="empty-state compact">没有手动保护区域。</p></div>
+        </form>
+
+        <section class="map-reset-results" aria-labelledby="mapResetResultTitle">
+          <div class="section-heading"><div><p class="eyebrow">最近结果</p><h2 id="mapResetResultTitle">只读审计</h2></div><button class="secondary-button map-reset-admin" id="runMapResetAudit" type="button"><i data-lucide="scan-search"></i>运行只读审计</button></div>
+          <dl class="map-reset-stats">
+            <div><dt>原版安全屋</dt><dd id="mapResetSafehouses">--</dd></div>
+            <div><dt>存活角色</dt><dd id="mapResetPlayers">--</dd></div>
+            <div><dt>保护区块</dt><dd id="mapResetProtected">--</dd></div>
+            <div><dt>拟刷新区块</dt><dd id="mapResetChunks">--</dd></div>
+            <div><dt>拟隔离容量</dt><dd id="mapResetBytes">--</dd></div>
+            <div><dt>车辆记录</dt><dd id="mapResetVehicles">--</dd></div>
+          </dl>
+          <div class="map-reset-paths"><span>存档</span><code id="mapResetSaveRoot">--</code><span>报告</span><code id="mapResetReportPath">--</code><span>隔离</span><code id="mapResetQuarantinePath">尚未执行</code></div>
+          <pre class="map-reset-error" id="mapResetError" hidden></pre>
+        </section>
+
+        <section class="map-reset-apply">
+          <div><p class="eyebrow">不可在线执行</p><h2>正式刷新未保护区块</h2><p>必须先保存并停止所选服务器。执行后区块文件进入隔离目录，不会自动重启服务器。</p></div>
+          <label>输入 serverName 确认<input id="mapResetConfirmation" autocomplete="off" spellcheck="false" placeholder="等待读取 serverName"></label>
+          <button class="danger-button map-reset-admin" id="applyMapReset" type="button" disabled><i data-lucide="archive-restore"></i>执行并隔离区块</button>
+        </section>
+      </section>
+
       <section class="view" id="view-maintenance">
         <div class="section-heading page-heading"><div><p class="eyebrow">受控维护</p><h2>服务器生命周期</h2></div></div>
+        <section class="maintenance-schedule save-backup-plan" aria-labelledby="saveBackupPlanTitle">
+          <div class="section-heading"><div><p class="eyebrow">Project Zomboid 原生任务</p><h2 id="saveBackupPlanTitle">自动保存与备份计划</h2></div><span class="badge neutral" id="saveBackupPlanBadge">正在读取</span></div>
+          <form id="saveBackupPlanForm">
+            <label class="toggle-field"><input name="autoSaveEnabled" type="checkbox"><span>启用自动保存</span></label>
+            <label>保存间隔（分钟）<input name="saveIntervalMinutes" type="number" min="1" max="1440" step="1" value="10" required></label>
+            <label class="toggle-field"><input name="autoBackupEnabled" type="checkbox"><span>启用自动备份</span></label>
+            <label>备份间隔（分钟）<input name="backupIntervalMinutes" type="number" min="15" max="1500" step="1" value="60" required></label>
+            <label>保留备份（份）<input name="backupCount" type="number" min="1" max="300" step="1" value="3" required></label>
+            <div class="schedule-actions"><button class="primary-button" type="submit"><i data-lucide="save"></i>保存设置</button></div>
+          </form>
+          <dl class="maintenance-schedule-stats"><div><dt>最新定时备份</dt><dd id="saveBackupLatest">--</dd></div><div><dt>现有备份</dt><dd id="saveBackupFiles">--</dd></div><div><dt>占用空间</dt><dd id="saveBackupSize">--</dd></div><div><dt>预计下次备份</dt><dd id="saveBackupNext">--</dd></div></dl>
+          <p class="maintenance-result" id="saveBackupPlanResult" aria-live="polite">自动保存写入当前世界；自动备份由游戏服务器生成 ZIP 并按保留数量轮换。</p>
+        </section>
         <section class="maintenance-schedule" aria-labelledby="maintenanceScheduleTitle">
           <div class="section-heading"><div><p class="eyebrow">自动维护检查</p><h2 id="maintenanceScheduleTitle">Mod 更新计划</h2></div><span class="badge neutral" id="maintenanceScheduleBadge">未启用</span></div>
           <form id="maintenanceScheduleForm">
@@ -480,7 +529,7 @@
   </div>
 
   <nav class="mobile-nav">
-    <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
+    <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="map-reset"><i data-lucide="map-pinned"></i><span>刷新</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
   </nav>
   <dialog class="admin-setup-dialog" id="adminSetupDialog">
     <form id="adminSetupForm">

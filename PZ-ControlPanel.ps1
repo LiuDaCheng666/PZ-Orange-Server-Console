@@ -23,6 +23,9 @@ $playerDbReaderPath = Join-Path $root "Read-PZPlayers.js"
 $playerDataManagerPath = Join-Path $root "Manage-PZPlayerData.js"
 $itemIndexRoot = Join-Path $root "item-index"
 $itemIndexBuilderPath = Join-Path $root "Build-PZItemIndex.js"
+$mapResetRoot = Join-Path $root "map-reset"
+$mapResetToolPath = Join-Path $root "tools\PZSelectiveWorldReset\pz_selective_world_reset.py"
+$mapResetRunnerPath = Join-Path $root "tools\PZSelectiveWorldReset\Invoke-PZSelectiveWorldReset.ps1"
 $aiBridgeModulePath = Join-Path $root "PZ-AIBridge.ps1"
 $aiKnowledgeRoot = Join-Path $root "服务器信息库"
 $hostStartupTaskScript = Join-Path $root "Set-PZPanelStartupTask.ps1"
@@ -74,6 +77,23 @@ function Find-NodeRuntime {
 }
 
 $nodeRuntimePath = Find-NodeRuntime
+
+function Find-PythonRuntime {
+    $candidates = @(
+        (Join-Path $root "runtime\python\python.exe"),
+        (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    foreach ($name in @("python.exe", "py.exe")) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($command) { return $command.Source }
+    }
+    return $null
+}
+
+$pythonRuntimePath = Find-PythonRuntime
 
 if (-not (Test-Path -LiteralPath $profilesPath)) { throw "缺少服务器配置文件：$profilesPath" }
 $profileConfig = Get-Content -LiteralPath $profilesPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -1160,6 +1180,43 @@ function Get-TextFileEncoding {
     }
 }
 
+function Set-PZIniSettings {
+    param(
+        [string]$Path,
+        [Collections.IDictionary]$Settings
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{ updated = $false; path = $Path; reason = "missing"; backupPath = $null }
+    }
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $encoding = Get-TextFileEncoding -Bytes $bytes
+    $text = $encoding.GetString($bytes)
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+    $newline = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    foreach ($entry in $Settings.GetEnumerator()) {
+        $pattern = "(?m)^$([regex]::Escape([string]$entry.Key))=[^\r\n]*"
+        $value = "$($entry.Key)=$($entry.Value)"
+        if ([regex]::IsMatch($text, $pattern)) {
+            $text = [regex]::Replace($text, $pattern, $value)
+        }
+        else {
+            if ($text.Length -gt 0 -and -not $text.EndsWith("`n")) { $text += $newline }
+            $text += $value + $newline
+        }
+    }
+
+    $backupPath = "$Path.web-panel.bak"
+    Copy-Item -LiteralPath $Path -Destination $backupPath -Force
+    $tempPath = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($tempPath, $text, $encoding)
+        Move-Item -LiteralPath $tempPath -Destination $Path -Force
+    }
+    finally { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+    return [pscustomobject]@{ updated = $true; path = $Path; reason = $null; backupPath = $backupPath }
+}
+
 function Sync-PZProfileGameSettings {
     param($Profile)
     $iniPath = Join-Path (Join-Path ([string]$Profile.dataRoot) "Server") "$([string]$Profile.serverName).ini"
@@ -1176,32 +1233,7 @@ function Sync-PZProfileGameSettings {
         MaxPlayers = [int]$Profile.maxPlayers
     }
 
-    $bytes = [IO.File]::ReadAllBytes($iniPath)
-    $encoding = Get-TextFileEncoding -Bytes $bytes
-    $text = $encoding.GetString($bytes)
-    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
-    $newline = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
-    foreach ($entry in $settings.GetEnumerator()) {
-        $pattern = "(?m)^$([regex]::Escape([string]$entry.Key))=.*$"
-        $value = "$($entry.Key)=$($entry.Value)"
-        if ([regex]::IsMatch($text, $pattern)) {
-            $text = [regex]::Replace($text, $pattern, $value)
-        }
-        else {
-            if ($text.Length -gt 0 -and -not $text.EndsWith("`n")) { $text += $newline }
-            $text += $value + $newline
-        }
-    }
-
-    $backupPath = "$iniPath.web-panel.bak"
-    Copy-Item -LiteralPath $iniPath -Destination $backupPath -Force
-    $tempPath = "$iniPath.$([guid]::NewGuid().ToString('N')).tmp"
-    try {
-        [IO.File]::WriteAllText($tempPath, $text, $encoding)
-        Move-Item -LiteralPath $tempPath -Destination $iniPath -Force
-    }
-    finally { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
-    return [pscustomobject]@{ updated = $true; path = $iniPath; reason = $null }
+    return Set-PZIniSettings -Path $iniPath -Settings $settings
 }
 
 function Save-ServerProfiles {
@@ -2189,6 +2221,277 @@ function Get-ServerState {
         canRestart = [bool]($restartScriptReady -and $writable)
         note = $note
     }
+}
+
+function Get-MapResetPaths {
+    param($Profile)
+    $serverRoot = Join-Path $mapResetRoot ([string]$Profile.id)
+    return [pscustomobject]@{
+        root = $serverRoot
+        configPath = Join-Path $serverRoot "config.json"
+        statusPath = Join-Path $serverRoot "status.json"
+        lastAuditPath = Join-Path $serverRoot "last-audit.json"
+        operationsRoot = Join-Path $serverRoot "operations"
+    }
+}
+
+function Assert-MapResetInteger {
+    param([AllowNull()]$Value, [string]$Name, [int]$Minimum, [int]$Maximum)
+    $number = 0
+    if (-not [int]::TryParse([string]$Value, [ref]$number) -or $number -lt $Minimum -or $number -gt $Maximum) {
+        throw "$Name 必须是 $Minimum 至 $Maximum 的整数。"
+    }
+    return $number
+}
+
+function Get-DefaultMapResetConfig {
+    param($Profile)
+    return [pscustomobject][ordered]@{
+        version = 1
+        serverId = [string]$Profile.id
+        safehouseMarginChunks = 2
+        playerMarginChunks = 8
+        manualAreas = @()
+        updatedAt = $null
+    }
+}
+
+function Get-MapResetConfig {
+    param($Profile)
+    $paths = Get-MapResetPaths -Profile $Profile
+    if (-not (Test-Path -LiteralPath $paths.configPath -PathType Leaf)) {
+        return Get-DefaultMapResetConfig -Profile $Profile
+    }
+    try {
+        $config = Get-Content -LiteralPath $paths.configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$config.serverId -cne [string]$Profile.id) { throw "配置所属服务器不匹配。" }
+        return $config
+    }
+    catch { throw "地图刷新配置损坏：$($_.Exception.Message)" }
+}
+
+function ConvertTo-NormalizedMapResetConfig {
+    param($Profile, $Body)
+    $safehouseMargin = Assert-MapResetInteger -Value $Body.safehouseMarginChunks -Name "安全屋边距" -Minimum 0 -Maximum 64
+    $playerMargin = Assert-MapResetInteger -Value $Body.playerMarginChunks -Name "人物边距" -Minimum 0 -Maximum 64
+    $rawAreas = @($Body.manualAreas)
+    if ($rawAreas.Count -gt 500) { throw "手动保护区域最多允许 500 项。" }
+    $areas = @()
+    for ($index = 0; $index -lt $rawAreas.Count; $index++) {
+        $raw = $rawAreas[$index]
+        $areas += [pscustomobject][ordered]@{
+            name = Assert-SimpleText -Value ([string]$raw.name) -Name "第 $($index + 1) 个区域名称" -MaxLength 64
+            x = Assert-MapResetInteger -Value $raw.x -Name "第 $($index + 1) 个区域 X" -Minimum -1000000 -Maximum 1000000
+            y = Assert-MapResetInteger -Value $raw.y -Name "第 $($index + 1) 个区域 Y" -Minimum -1000000 -Maximum 1000000
+            w = Assert-MapResetInteger -Value $raw.w -Name "第 $($index + 1) 个区域宽度" -Minimum 1 -Maximum 100000
+            h = Assert-MapResetInteger -Value $raw.h -Name "第 $($index + 1) 个区域高度" -Minimum 1 -Maximum 100000
+            marginChunks = Assert-MapResetInteger -Value $raw.marginChunks -Name "第 $($index + 1) 个区域边距" -Minimum 0 -Maximum 64
+        }
+    }
+    return [pscustomobject][ordered]@{
+        version = 1
+        serverId = [string]$Profile.id
+        safehouseMarginChunks = $safehouseMargin
+        playerMarginChunks = $playerMargin
+        manualAreas = $areas
+        updatedAt = (Get-Date).ToString("o")
+    }
+}
+
+function Save-MapResetConfig {
+    param($Profile, $Config)
+    $paths = Get-MapResetPaths -Profile $Profile
+    New-Item -ItemType Directory -Path $paths.root -Force | Out-Null
+    $temporaryPath = "$($paths.configPath).$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($temporaryPath, ($Config | ConvertTo-Json -Depth 8), $utf8)
+        Move-Item -LiteralPath $temporaryPath -Destination $paths.configPath -Force
+    }
+    finally { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
+}
+
+function Get-MapResetConfigHash {
+    param($Config)
+    $relevant = [ordered]@{
+        version = 1
+        serverId = [string]$Config.serverId
+        safehouseMarginChunks = [int]$Config.safehouseMarginChunks
+        playerMarginChunks = [int]$Config.playerMarginChunks
+        manualAreas = @($Config.manualAreas | ForEach-Object {
+            [ordered]@{ name = [string]$_.name; x = [int]$_.x; y = [int]$_.y; w = [int]$_.w; h = [int]$_.h; marginChunks = [int]$_.marginChunks }
+        })
+    }
+    $bytes = $utf8.GetBytes(($relevant | ConvertTo-Json -Depth 8 -Compress))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+function Write-MapResetJson {
+    param([string]$Path, $Value)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 10), $utf8)
+}
+
+function Read-MapResetJson {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    try { return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { return $null }
+}
+
+function Complete-MapResetStatus {
+    param($Profile)
+    $paths = Get-MapResetPaths -Profile $Profile
+    $status = Read-MapResetJson -Path $paths.statusPath
+    if (-not $status) { return $null }
+    if ([string]$status.state -in @("running", "finalizing")) {
+        $process = if ($status.pid) { Get-Process -Id ([int]$status.pid) -ErrorAction SilentlyContinue } else { $null }
+        if ($process) { return $status }
+        $exitCodePath = Join-Path ([string]$status.operationRoot) "exit-code.txt"
+        if (-not (Test-Path -LiteralPath $exitCodePath -PathType Leaf)) {
+            $status.state = "finalizing"
+            return $status
+        }
+        $exitCode = 1
+        [void][int]::TryParse((Get-Content -LiteralPath $exitCodePath -Raw -Encoding UTF8).Trim(), [ref]$exitCode)
+        $reportDirectory = Get-ChildItem -LiteralPath ([string]$status.reportRoot) -Directory -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+        $summaryPath = if ($reportDirectory) { Join-Path $reportDirectory.FullName "summary.json" } else { $null }
+        $summary = if ($summaryPath) { Read-MapResetJson -Path $summaryPath } else { $null }
+        $status.finishedAt = (Get-Date).ToString("o")
+        $status.exitCode = $exitCode
+        $status.reportPath = if ($reportDirectory) { $reportDirectory.FullName } else { $null }
+        $status.summaryPath = $summaryPath
+        if ($exitCode -eq 0 -and $summary) {
+            $status.state = "completed"
+            $status.summary = $summary
+            if ([string]$status.mode -eq "audit") {
+                Write-MapResetJson -Path $paths.lastAuditPath -Value ([ordered]@{
+                    operationId = [string]$status.operationId
+                    configHash = [string]$status.configHash
+                    completedAt = [string]$status.finishedAt
+                    summaryPath = [string]$summaryPath
+                    reportPath = [string]$status.reportPath
+                })
+            }
+        }
+        else {
+            $status.state = "failed"
+            $errorText = if (Test-Path -LiteralPath ([string]$status.stderrPath) -PathType Leaf) {
+                (Get-Content -LiteralPath ([string]$status.stderrPath) -Raw -Encoding UTF8).Trim()
+            } else { "后台工具未生成错误详情。" }
+            if ([string]::IsNullOrWhiteSpace($errorText)) { $errorText = "后台工具执行失败，但没有输出错误详情。" }
+            if ($errorText.Length -gt 4000) { $errorText = $errorText.Substring($errorText.Length - 4000) }
+            $status.error = $errorText
+        }
+        Write-MapResetJson -Path $paths.statusPath -Value $status
+        $history = $executionHistory | Where-Object { [string]$_.clientRequestId -ceq "map-reset:$($status.operationId)" } | Select-Object -First 1
+        if ($history -and [string]$history.status -in @("queued", "running")) {
+            $historyStatus = if ([string]$status.state -eq "completed") { "success" } else { "failed" }
+            $operationLabel = if ([string]$status.mode -eq "audit") { "审计" } else { "执行" }
+            $historyMessage = if ([string]$status.state -eq "completed") { "地图刷新$operationLabel 已完成。" } else { [string]$status.error }
+            Set-ExecutionHistoryResult -Record $history -Status $historyStatus -ResultCode "map-reset-$($status.state)" -Message $historyMessage -Detail ([string]$status.reportPath)
+            Save-ExecutionHistory
+        }
+    }
+    return $status
+}
+
+function Get-MapResetPayload {
+    param($Profile, $Session)
+    $paths = Get-MapResetPaths -Profile $Profile
+    $config = Get-MapResetConfig -Profile $Profile
+    $status = Complete-MapResetStatus -Profile $Profile
+    $lastAudit = Read-MapResetJson -Path $paths.lastAuditPath
+    $lastAuditSummary = if ($lastAudit -and (Test-Path -LiteralPath ([string]$lastAudit.summaryPath) -PathType Leaf)) {
+        Read-MapResetJson -Path ([string]$lastAudit.summaryPath)
+    } else { $null }
+    $serverState = Get-ServerState -Profile $Profile
+    $configHash = Get-MapResetConfigHash -Config $config
+    return [ordered]@{
+        ok = $true
+        serverId = [string]$Profile.id
+        serverName = [string]$Profile.serverName
+        saveRoot = Join-Path ([string]$Profile.dataRoot) "Saves\Multiplayer\$($Profile.serverName)"
+        authorized = [bool]($Session -and [string]$Session.user.username -ieq "admin")
+        pythonAvailable = [bool]$pythonRuntimePath
+        toolAvailable = [bool]((Test-Path -LiteralPath $mapResetToolPath -PathType Leaf) -and (Test-Path -LiteralPath $mapResetRunnerPath -PathType Leaf))
+        serverAlive = [bool]$serverState.alive
+        lifecycleBusy = [bool](Get-ActiveLifecycleOperation -Profile $Profile)
+        config = $config
+        configHash = $configHash
+        status = $status
+        lastAudit = $lastAudit
+        lastAuditSummary = $lastAuditSummary
+        auditMatchesConfig = [bool]($lastAudit -and [string]$lastAudit.configHash -ceq $configHash -and (Test-Path -LiteralPath ([string]$lastAudit.summaryPath) -PathType Leaf))
+    }
+}
+
+function ConvertTo-MapResetProcessArgument {
+    param([string]$Value)
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+function Start-MapResetOperation {
+    param($Profile, $Config, [ValidateSet("audit", "apply")][string]$Mode, [string]$Confirmation)
+    if (-not $pythonRuntimePath) { throw "未找到 Python 运行环境，无法启动地图刷新工具。" }
+    if (-not (Test-Path -LiteralPath $mapResetToolPath -PathType Leaf) -or -not (Test-Path -LiteralPath $mapResetRunnerPath -PathType Leaf)) {
+        throw "控制台内置地图刷新工具不完整。"
+    }
+    $paths = Get-MapResetPaths -Profile $Profile
+    $current = Complete-MapResetStatus -Profile $Profile
+    if ($current -and [string]$current.state -in @("running", "finalizing")) { throw "当前已有地图刷新任务正在执行。" }
+    $saveRoot = Join-Path ([string]$Profile.dataRoot) "Saves\Multiplayer\$($Profile.serverName)"
+    if (-not (Test-Path -LiteralPath (Join-Path $saveRoot "map_meta.bin") -PathType Leaf)) { throw "没有找到 B42 存档：$saveRoot" }
+    $configHash = Get-MapResetConfigHash -Config $Config
+    if ($Mode -eq "apply") {
+        $serverState = Get-ServerState -Profile $Profile
+        if ($serverState.alive) { throw "正式执行前必须先保存并停止所选游戏服务器。" }
+        if (Get-ActiveLifecycleOperation -Profile $Profile) { throw "服务器生命周期操作仍在执行，请等待其结束。" }
+        if ($Confirmation -cne [string]$Profile.serverName) { throw "确认文字必须与 serverName 完全一致：$($Profile.serverName)" }
+        $lastAudit = Read-MapResetJson -Path $paths.lastAuditPath
+        if (-not $lastAudit -or [string]$lastAudit.configHash -cne $configHash -or -not (Test-Path -LiteralPath ([string]$lastAudit.summaryPath) -PathType Leaf)) {
+            throw "当前配置没有匹配的成功审计，请先保存配置并重新运行只读审计。"
+        }
+    }
+    New-Item -ItemType Directory -Path $paths.operationsRoot -Force | Out-Null
+    $operationId = [guid]::NewGuid().ToString("N")
+    $operationRoot = Join-Path $paths.operationsRoot $operationId
+    $reportRoot = Join-Path $operationRoot "reports"
+    New-Item -ItemType Directory -Path $reportRoot -Force | Out-Null
+    $manualAreasPath = Join-Path $operationRoot "manual-areas.json"
+    Write-MapResetJson -Path $manualAreasPath -Value ([ordered]@{ protectAreas = @($Config.manualAreas) })
+    Write-MapResetJson -Path (Join-Path $operationRoot "request.json") -Value ([ordered]@{
+        operationId = $operationId; mode = $Mode; configHash = $configHash; config = $Config; createdAt = (Get-Date).ToString("o")
+    })
+    $stdoutPath = Join-Path $operationRoot "stdout.log"
+    $stderrPath = Join-Path $operationRoot "stderr.log"
+    $runnerArguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (ConvertTo-MapResetProcessArgument $mapResetRunnerPath),
+        "-PythonPath", (ConvertTo-MapResetProcessArgument $pythonRuntimePath),
+        "-ToolPath", (ConvertTo-MapResetProcessArgument $mapResetToolPath),
+        "-SaveRoot", (ConvertTo-MapResetProcessArgument $saveRoot),
+        "-ServerName", (ConvertTo-MapResetProcessArgument ([string]$Profile.serverName)),
+        "-ManualAreas", (ConvertTo-MapResetProcessArgument $manualAreasPath),
+        "-SafehouseMargin", [string]$Config.safehouseMarginChunks,
+        "-PlayerMargin", [string]$Config.playerMarginChunks,
+        "-ReportRoot", (ConvertTo-MapResetProcessArgument $reportRoot),
+        "-Mode", $Mode
+    )
+    if ($Mode -eq "apply") { $runnerArguments += @("-Confirmation", (ConvertTo-MapResetProcessArgument $Confirmation)) }
+    $process = Start-Process -FilePath "powershell.exe" -ArgumentList ($runnerArguments -join " ") -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    $status = [pscustomobject][ordered]@{
+        operationId = $operationId; serverId = [string]$Profile.id; mode = $Mode; state = "running"; pid = $process.Id
+        configHash = $configHash; startedAt = (Get-Date).ToString("o"); finishedAt = $null; exitCode = $null
+        operationRoot = $operationRoot; reportRoot = $reportRoot; reportPath = $null; summaryPath = $null
+        stdoutPath = $stdoutPath; stderrPath = $stderrPath; summary = $null; error = $null
+    }
+    Write-MapResetJson -Path $paths.statusPath -Value $status
+    [void](Add-ExecutionHistoryRecord -ServerId ([string]$Profile.id) -Category "lifecycle" -Action "map-reset-$Mode" -Source "web" `
+        -Summary $(if ($Mode -eq "audit") { "选择性区块刷新只读审计" } else { "选择性区块刷新正式执行" }) -Status "running" `
+        -Message "后台任务已启动。" -ClientRequestId "map-reset:$operationId")
+    return $status
 }
 
 function Get-PlayerDirectory {
@@ -3547,6 +3850,137 @@ function Invoke-SteamCmdMetadataQuery {
     }
 }
 
+function Get-PZSaveBackupPayload {
+    param($Profile)
+    $iniPath = Join-Path (Join-Path ([string]$Profile.dataRoot) "Server") "$([string]$Profile.serverName).ini"
+    if (-not (Test-Path -LiteralPath $iniPath -PathType Leaf)) {
+        throw "找不到服务器 INI：$iniPath"
+    }
+
+    $settings = Read-PZIniSettings -Path $iniPath
+    $saveMinutes = 0
+    $backupMinutes = 0
+    $backupCount = 5
+    if ($settings.ContainsKey("SaveWorldEveryMinutes")) {
+        [void][int]::TryParse([string]$settings.SaveWorldEveryMinutes, [ref]$saveMinutes)
+    }
+    if ($settings.ContainsKey("BackupsPeriod")) {
+        [void][int]::TryParse([string]$settings.BackupsPeriod, [ref]$backupMinutes)
+    }
+    if ($settings.ContainsKey("BackupsCount")) {
+        [void][int]::TryParse([string]$settings.BackupsCount, [ref]$backupCount)
+    }
+    $saveMinutes = [math]::Max(0, $saveMinutes)
+    $backupMinutes = [math]::Max(0, $backupMinutes)
+    $backupCount = [math]::Max(1, [math]::Min(300, $backupCount))
+
+    $backupDirectory = Join-Path ([string]$Profile.dataRoot) "backups\period"
+    $backupFiles = @()
+    if (Test-Path -LiteralPath $backupDirectory -PathType Container) {
+        $backupFiles = @(Get-ChildItem -LiteralPath $backupDirectory -File -Filter "*.zip" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending)
+    }
+    $latest = $backupFiles | Select-Object -First 1
+    [long]$totalBytes = 0
+    foreach ($file in $backupFiles) { $totalBytes += [long]$file.Length }
+    $nextBackupAt = $null
+    if ($backupMinutes -gt 0 -and $latest) {
+        $nextBackupAt = $latest.LastWriteTime.AddMinutes($backupMinutes).ToString("o")
+    }
+
+    return [ordered]@{
+        ok = $true
+        serverId = [string]$Profile.id
+        iniPath = $iniPath
+        autoSaveEnabled = [bool]($saveMinutes -gt 0)
+        saveIntervalMinutes = if ($saveMinutes -gt 0) { $saveMinutes } else { 10 }
+        autoBackupEnabled = [bool]($backupMinutes -gt 0)
+        backupIntervalMinutes = if ($backupMinutes -gt 0) { $backupMinutes } else { 60 }
+        backupCount = $backupCount
+        backupDirectory = $backupDirectory
+        backupDirectoryExists = [bool](Test-Path -LiteralPath $backupDirectory -PathType Container)
+        backupFileCount = $backupFiles.Count
+        backupTotalBytes = $totalBytes
+        latestBackupAt = if ($latest) { $latest.LastWriteTime.ToString("o") } else { $null }
+        latestBackupBytes = if ($latest) { [long]$latest.Length } else { 0L }
+        latestBackupName = if ($latest) { [string]$latest.Name } else { $null }
+        nextBackupAt = $nextBackupAt
+    }
+}
+
+function Set-PZSaveBackupSettings {
+    param(
+        $Profile,
+        [bool]$AutoSaveEnabled,
+        [int]$SaveIntervalMinutes,
+        [bool]$AutoBackupEnabled,
+        [int]$BackupIntervalMinutes,
+        [int]$BackupCount,
+        [string]$Remote = "local"
+    )
+    if ($SaveIntervalMinutes -lt 1 -or $SaveIntervalMinutes -gt 1440) {
+        throw "自动保存间隔必须为 1 至 1440 分钟。"
+    }
+    if ($BackupIntervalMinutes -lt 15 -or $BackupIntervalMinutes -gt 1500) {
+        throw "自动备份间隔必须为 15 至 1500 分钟。"
+    }
+    if ($BackupCount -lt 1 -or $BackupCount -gt 300) {
+        throw "备份保留数量必须为 1 至 300 份。"
+    }
+
+    $saveValue = if ($AutoSaveEnabled) { $SaveIntervalMinutes } else { 0 }
+    $backupValue = if ($AutoBackupEnabled) { $BackupIntervalMinutes } else { 0 }
+    $iniPath = Join-Path (Join-Path ([string]$Profile.dataRoot) "Server") "$([string]$Profile.serverName).ini"
+    $settings = [ordered]@{
+        SaveWorldEveryMinutes = $saveValue
+        BackupsPeriod = $backupValue
+        BackupsCount = $BackupCount
+    }
+    $writeResult = Set-PZIniSettings -Path $iniPath -Settings $settings
+    if (-not $writeResult.updated) { throw "找不到服务器 INI：$iniPath" }
+
+    $requestIds = @()
+    $runtimeWarning = $null
+    $state = Get-ServerState -Profile $Profile
+    if ($state.alive -and $state.writable) {
+        $logCursor = 0L
+        if ($Profile.consoleLog -and (Test-Path -LiteralPath ([string]$Profile.consoleLog))) {
+            $logCursor = (Get-Item -LiteralPath ([string]$Profile.consoleLog)).Length
+        }
+        try {
+            foreach ($entry in $settings.GetEnumerator()) {
+                $command = "changeoption $($entry.Key) `"$($entry.Value)`""
+                $queued = Queue-Command -Profile $Profile -Command $command -RequireReceipt:$true
+                $requestId = [string]$queued.id
+                $requestIds += $requestId
+                $commandRequests[$requestId] = [pscustomobject]@{
+                    serverId = [string]$Profile.id
+                    action = "save-backup-settings"
+                    command = $command
+                    queuedAt = [string]$queued.createdAt
+                    logCursor = $logCursor
+                }
+            }
+        }
+        catch { $runtimeWarning = $_.Exception.Message }
+    }
+    elseif ($state.alive) {
+        $runtimeWarning = "服务器正在运行，但受控命令通道不可写；INI 已保存，将在下次启动时完整生效。"
+    }
+
+    $runtimeMessage = if ($requestIds.Count -gt 0 -and -not $runtimeWarning) {
+        "INI 已保存，在线热更新命令已提交。"
+    }
+    elseif ($runtimeWarning) { "INI 已保存。$runtimeWarning" }
+    else { "INI 已保存，将在下次启动时生效。" }
+    Add-Audit -Remote $Remote -Action "save-backup-settings" -Detail "server=$($Profile.id) autoSave=$AutoSaveEnabled saveMinutes=$saveValue autoBackup=$AutoBackupEnabled backupMinutes=$backupValue backupCount=$BackupCount requests=$($requestIds.Count)" -Result $(if ($runtimeWarning) { "warning" } else { "ok" })
+    [void](Add-ExecutionHistoryRecord -ServerId ([string]$Profile.id) -Category "command" -Action "save-backup-settings" -Source "web" `
+        -Summary "更新自动保存与备份计划" -Status $(if ($runtimeWarning) { "warning" } else { "success" }) `
+        -Message $runtimeMessage -RequestIds $requestIds -Detail "SaveWorldEveryMinutes=$saveValue`nBackupsPeriod=$backupValue`nBackupsCount=$BackupCount")
+
+    return (@{ message = $runtimeMessage; runtimeRequestIds = $requestIds; runtimeWarning = $runtimeWarning } + (Get-PZSaveBackupPayload -Profile $Profile))
+}
+
 function Get-PZProgramUpdateStatus {
     param($Profile, [switch]$QueryRemote)
     $steamCmdPath = Find-SteamCmdPath -Profile $Profile
@@ -4526,6 +4960,41 @@ try {
                 Write-JsonResponse $context 200 $statusCache
                 continue
             }
+            if ($request.HttpMethod -eq "GET" -and $path -in @("/api/map-reset/config", "/api/map-reset/status")) {
+                $profile = Get-ServerProfile -Id ([string]$request.QueryString["serverId"])
+                Write-JsonResponse $context 200 (Get-MapResetPayload -Profile $profile -Session $session)
+                continue
+            }
+            if ($request.HttpMethod -eq "PUT" -and $path -eq "/api/map-reset/config") {
+                Assert-HostControlAdministrator -Session $session
+                $body = Get-RequestBody $request
+                $profile = Get-ServerProfile -Id ([string]$body.serverId)
+                $current = Complete-MapResetStatus -Profile $profile
+                if ($current -and [string]$current.state -in @("running", "finalizing")) { throw "地图刷新任务执行期间不能修改保护配置。" }
+                $config = ConvertTo-NormalizedMapResetConfig -Profile $profile -Body $body
+                Save-MapResetConfig -Profile $profile -Config $config
+                Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "map-reset-config-save" `
+                    -Detail "server=$($profile.id) safehouseMargin=$($config.safehouseMarginChunks) playerMargin=$($config.playerMarginChunks) manualAreas=$(@($config.manualAreas).Count) requestedBy=$($session.user.username)" -Result "ok"
+                $payload = Get-MapResetPayload -Profile $profile -Session $session
+                $payload.message = "地图刷新保护配置已保存；修改后需要重新运行只读审计。"
+                Write-JsonResponse $context 200 $payload
+                continue
+            }
+            if ($request.HttpMethod -eq "POST" -and $path -in @("/api/map-reset/audit", "/api/map-reset/apply")) {
+                Assert-HostControlAdministrator -Session $session
+                $body = Get-RequestBody $request
+                $profile = Get-ServerProfile -Id ([string]$body.serverId)
+                $config = Get-MapResetConfig -Profile $profile
+                $mode = if ($path -eq "/api/map-reset/apply") { "apply" } else { "audit" }
+                $confirmation = if ($mode -eq "apply") { [string]$body.confirmation } else { "" }
+                $operation = Start-MapResetOperation -Profile $profile -Config $config -Mode $mode -Confirmation $confirmation
+                Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "map-reset-$mode" `
+                    -Detail "server=$($profile.id) operation=$($operation.operationId) configHash=$($operation.configHash) requestedBy=$($session.user.username)" -Result "queued"
+                $payload = Get-MapResetPayload -Profile $profile -Session $session
+                $payload.message = if ($mode -eq "audit") { "只读审计已在后台启动。" } else { "选择性区块刷新已在后台启动；完成后不会自动启动服务器。" }
+                Write-JsonResponse $context 202 $payload
+                continue
+            }
             if ($path -like "/api/profiles*") {
                 if (-not (Test-LocalRequest $request)) {
                     Write-JsonResponse $context 403 @{ ok = $false; error = "未启用访问令牌时，服务器配置只能在服务器本机编辑。" }
@@ -4730,6 +5199,11 @@ try {
                 Write-JsonResponse $context 200 (Get-CommandSubmissionPayload -Profile $profile -Id ([string]$request.QueryString["id"]))
                 continue
             }
+            if ($request.HttpMethod -eq "GET" -and $path -eq "/api/maintenance/save-backup") {
+                $profile = Get-ServerProfile -Id ([string]$request.QueryString["serverId"])
+                Write-JsonResponse $context 200 (Get-PZSaveBackupPayload -Profile $profile)
+                continue
+            }
             if ($request.HttpMethod -eq "GET" -and $path -eq "/api/maintenance/schedule") {
                 $profile = Get-ServerProfile -Id ([string]$request.QueryString["serverId"])
                 Write-JsonResponse $context 200 (Get-MaintenanceSchedulePayload -Profile $profile)
@@ -4820,6 +5294,19 @@ try {
                 if ($request.QueryString["page"]) { [void][int]::TryParse([string]$request.QueryString["page"], [ref]$page) }
                 if ($request.QueryString["pageSize"]) { [void][int]::TryParse([string]$request.QueryString["pageSize"], [ref]$pageSize) }
                 Write-JsonResponse $context 200 (Get-ExecutionHistoryPayload -ServerId $serverId -Category $category -Page $page -PageSize $pageSize)
+                continue
+            }
+            if ($request.HttpMethod -eq "PUT" -and $path -eq "/api/maintenance/save-backup") {
+                $body = Get-RequestBody $request
+                $profile = Get-ServerProfile -Id ([string]$body.serverId)
+                $payload = Set-PZSaveBackupSettings -Profile $profile `
+                    -AutoSaveEnabled ([bool]$body.autoSaveEnabled) `
+                    -SaveIntervalMinutes ([int]$body.saveIntervalMinutes) `
+                    -AutoBackupEnabled ([bool]$body.autoBackupEnabled) `
+                    -BackupIntervalMinutes ([int]$body.backupIntervalMinutes) `
+                    -BackupCount ([int]$body.backupCount) `
+                    -Remote $request.RemoteEndPoint.Address.ToString()
+                Write-JsonResponse $context 200 $payload
                 continue
             }
             if ($request.HttpMethod -eq "PUT" -and $path -eq "/api/maintenance/schedule") {
