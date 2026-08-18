@@ -2155,18 +2155,19 @@ function Get-ServerState {
         $onlineCount = $onlineNames.Count
         $onlineText = if ($onlineNames.Count) { $onlineNames -join "、" } else { "当前没有在线玩家" }
     }
-    $controllerAlive = $false
-    if ($process -and $state -and $state.hostPid -and [int]$state.javaPid -eq [int]$process.Id -and
-        [string]$state.status -in @("starting", "running", "stopping")) {
-        $hostProcess = Get-Process -Id ([int]$state.hostPid) -ErrorAction SilentlyContinue
-        $controllerAlive = [bool]$hostProcess
-    }
+    $hostProcess = if ($state -and $state.hostPid) { Get-Process -Id ([int]$state.hostPid) -ErrorAction SilentlyContinue } else { $null }
+    $startupInProgress = [bool]($hostProcess -and $state -and [string]$state.status -in @("waiting-startup-lock", "starting"))
+    $controllerAlive = [bool]($process -and $hostProcess -and $state -and [int]$state.javaPid -eq [int]$process.Id -and
+        [string]$state.status -in @("starting", "running", "stopping"))
     $writable = [bool]($process -and [string]$Profile.commandChannel -eq "queue" -and $controllerAlive)
     $note = if ([string]$Profile.commandChannel -eq "readonly") {
         "该配置档没有受控命令通道，只读监控。"
     }
     elseif ($writable) {
         "受控命令通道已连接，可以执行管理操作。"
+    }
+    elseif ($startupInProgress) {
+        if ([string]$state.status -eq "waiting-startup-lock") { "正在等待其他服务器完成 Steam 与 Workshop 初始化。" } else { "Java 已启动，正在等待服务器完成初始化。" }
     }
     elseif ($process -and (Test-IsManagedProfile -Profile $Profile)) {
         "自动托管配置已生成；当前实例仍由原方式启动，等待下次从面板启动后接管命令通道。"
@@ -2181,9 +2182,9 @@ function Get-ServerState {
     $managedPaths = Get-ManagedProfilePaths -Id ([string]$Profile.id)
     $restartScriptReady = [bool]((Test-IsManagedProfile -Profile $Profile) -and [int]$state.protocolVersion -ge 2 -and
         (Test-Path -LiteralPath $managedPaths.restartScript -PathType Leaf))
-    $canStart = [bool]($startScriptReady -and -not $process)
+    $canStart = [bool]($startScriptReady -and -not $process -and -not $startupInProgress)
     $adminSetupRequired = Test-PZAdminSetupRequired -Profile $Profile
-    $startReason = if ($process) { "服务器进程仍在运行。" } elseif (-not $Profile.startScript) { "未配置启动脚本。" } `
+    $startReason = if ($process) { "服务器进程仍在运行。" } elseif ($startupInProgress) { "服务器启动流程正在执行，不能重复启动。" } elseif (-not $Profile.startScript) { "未配置启动脚本。" } `
         elseif (-not $startScriptReady) { "启动脚本不存在：$($Profile.startScript)" } elseif ($adminSetupRequired) { "账号数据库不存在，启动时需要设置一次游戏内置 admin 密码。" } `
         else { "服务器已停止，可以从面板启动。" }
     $jvmMemory = Get-JvmMemoryMetrics -Profile $Profile -Process $process
@@ -2192,7 +2193,7 @@ function Get-ServerState {
         name = [string]$Profile.name
         kind = [string]$Profile.kind
         serverName = [string]$Profile.serverName
-        status = if ($process -and $state) { $state.status } elseif ($process) { "running" } else { "stopped" }
+        status = if ($process -and $state) { $state.status } elseif ($startupInProgress) { [string]$state.status } elseif ($process) { "running" } else { "stopped" }
         alive = [bool]$process
         javaPid = if ($process) { $process.Id } else { $null }
         memoryMB = if ($process) { [math]::Round($process.WorkingSet64 / 1MB) } else { 0 }
@@ -5793,6 +5794,7 @@ try {
                 $managedPaths = Get-ManagedProfilePaths -Id ([string]$profile.id)
                 $launchDeadline = (Get-Date).AddSeconds(8)
                 $launchRunningSince = $null
+                $launchAccepted = $false
                 do {
                     Start-Sleep -Milliseconds 200
                     $launchState = $null
@@ -5802,9 +5804,14 @@ try {
                     $stateIsCurrent = $launchState -and $launchState.updatedAt -and ([datetime]$launchState.updatedAt) -ge $launchStartedAt.AddSeconds(-1)
                     if ($stateIsCurrent -and [string]$launchState.status -eq "running") {
                         if (-not $launchRunningSince) { $launchRunningSince = Get-Date }
-                        if (((Get-Date) - $launchRunningSince).TotalSeconds -ge 2) { break }
+                        if (((Get-Date) - $launchRunningSince).TotalSeconds -ge 2) { $launchAccepted = $true; break }
                     }
-                    else { $launchRunningSince = $null }
+                    else {
+                        $launchRunningSince = $null
+                        if ($stateIsCurrent -and [string]$launchState.status -in @("waiting-startup-lock", "starting") -and -not $launchProcess.HasExited) {
+                            $launchAccepted = $true
+                        }
+                    }
                     if ($stateIsCurrent -and [string]$launchState.status -in @("failed", "stopped")) {
                         $failure = if ($launchState.failure) { [string]$launchState.failure } elseif ($null -ne $launchState.exitCode) { "Java 进程已退出，退出码 $($launchState.exitCode)。" } else { "Java 进程在进入运行状态前退出。" }
                         throw "服务器启动失败：$failure"
@@ -5814,8 +5821,8 @@ try {
                         throw "服务器启动失败：$failure"
                     }
                 } while ((Get-Date) -lt $launchDeadline)
-                if (-not $launchRunningSince -or ((Get-Date) - $launchRunningSince).TotalSeconds -lt 2) {
-                    throw "服务器启动失败：Java 未在 8 秒内进入稳定运行状态。"
+                if (-not $launchAccepted) {
+                    throw "服务器启动失败：托管启动器未在 8 秒内进入启动流程。"
                 }
                 $script:statusCache = $null
                 $script:statusCacheAt = [datetime]::MinValue

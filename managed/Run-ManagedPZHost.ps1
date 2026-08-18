@@ -12,6 +12,12 @@ $profile = Get-Content -LiteralPath $ProfilePath -Raw -Encoding UTF8 | ConvertFr
 $startedAt = Get-Date
 $process = $null
 $adminPassword = $null
+$startupLockStream = $null
+$startupLockPath = Join-Path $PSScriptRoot "startup.lock"
+$consoleLogPath = [string]$profile.consoleLog
+$consoleLogCursor = 0L
+$consoleLogCarry = ""
+$startupLogTail = ""
 $desiredPriorityClass = [Diagnostics.ProcessPriorityClass]::AboveNormal
 $appliedPriorityClass = $null
 if ([bool]$profile.showConsole) {
@@ -108,6 +114,40 @@ function Get-JvmGcLogPathArgument {
     return [string]$match.Groups['rawPath'].Value
 }
 
+function Get-ConsoleLogLength {
+    if ([string]::IsNullOrWhiteSpace($consoleLogPath) -or -not (Test-Path -LiteralPath $consoleLogPath -PathType Leaf)) { return 0L }
+    try { return [long](Get-Item -LiteralPath $consoleLogPath).Length }
+    catch { return 0L }
+}
+
+function Test-PZServerReady {
+    if ([string]::IsNullOrWhiteSpace($consoleLogPath) -or -not (Test-Path -LiteralPath $consoleLogPath -PathType Leaf)) { return $false }
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = [IO.File]::Open($consoleLogPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        if ($stream.Length -lt $script:consoleLogCursor) {
+            $script:consoleLogCursor = 0L
+            $script:consoleLogCarry = ""
+        }
+        if ($stream.Length -eq $script:consoleLogCursor) { return $false }
+        [void]$stream.Seek($script:consoleLogCursor, [IO.SeekOrigin]::Begin)
+        $reader = [IO.StreamReader]::new($stream, $utf8, $true, 4096, $true)
+        $text = $reader.ReadToEnd()
+        $script:consoleLogCursor = $stream.Length
+        $combined = $script:consoleLogCarry + $text
+        $script:startupLogTail = if ($combined.Length -gt 4096) { $combined.Substring($combined.Length - 4096) } else { $combined }
+        if ($combined -match '\*\*\* SERVER STARTED \*\*\*') { return $true }
+        $script:consoleLogCarry = if ($combined.Length -gt 256) { $combined.Substring($combined.Length - 256) } else { $combined }
+        return $false
+    }
+    catch { return $false }
+    finally {
+        if ($reader) { $reader.Dispose() }
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
 New-Item -ItemType Directory -Path ([string]$profile.dataRoot), ([string]$profile.queueDir) -Force | Out-Null
 if ($profile.receiptDir) { New-Item -ItemType Directory -Path ([string]$profile.receiptDir) -Force | Out-Null }
 $gcLogArgument = Get-JvmGcLogPathArgument -Arguments ([string]$profile.arguments)
@@ -135,6 +175,32 @@ if ($existing) { throw "The PZ Java process is already running (PID $($existing.
 
 Get-ChildItem -LiteralPath ([string]$profile.queueDir) -Filter "*.json" -File -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue
+
+Write-State -Status "waiting-startup-lock" -Process $null -Extra ([pscustomobject]@{
+    message = "Waiting for other PZ servers sharing this host to finish Steam and Workshop startup."
+})
+$startupLockDeadline = (Get-Date).AddMinutes(15)
+do {
+    try {
+        $startupLockStream = [IO.File]::Open($startupLockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    }
+    catch {
+        Start-Sleep -Milliseconds 500
+    }
+} while (-not $startupLockStream -and (Get-Date) -lt $startupLockDeadline)
+if (-not $startupLockStream) { throw "Timed out waiting for the shared PZ startup lock." }
+$existingAfterLock = Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='javaw.exe'" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue | Where-Object {
+    Test-ProcessMatchesProfile -Candidate $_
+} | Select-Object -First 1
+if ($existingAfterLock) {
+    $startupLockStream.Dispose()
+    $startupLockStream = $null
+    Write-State -Status "failed" -Process $null -Extra ([pscustomobject]@{ failure = "The PZ Java process is already running (PID $($existingAfterLock.ProcessId))." })
+    throw "The PZ Java process is already running (PID $($existingAfterLock.ProcessId))."
+}
+$consoleLogCursor = Get-ConsoleLogLength
+$consoleLogCarry = ""
+$startupLogTail = ""
 
 $startInfo = [Diagnostics.ProcessStartInfo]::new()
 $startInfo.FileName = [string]$profile.javaPath
@@ -193,13 +259,26 @@ try {
     $adminPassword = $null
     Write-State -Status "starting" -Process $process -Extra $null
     $runningWritten = $false
+    $readyDeadline = (Get-Date).AddMinutes(15)
     while (-not $process.HasExited) {
         if (-not $runningWritten) {
-            $runningWritten = $true
-            Write-State -Status "running" -Process $process -Extra $null
+            if (Test-PZServerReady) {
+                $runningWritten = $true
+                Write-State -Status "running" -Process $process -Extra ([pscustomobject]@{
+                    readyAt = (Get-Date).ToString("o")
+                    readiness = "server-console-marker"
+                })
+                $startupLockStream.Dispose()
+                $startupLockStream = $null
+            }
+            elseif ((Get-Date) -ge $readyDeadline) {
+                throw "PZ Java stayed alive but did not emit the server-ready marker within 15 minutes."
+            }
         }
-        $commands = @(Get-ChildItem -LiteralPath ([string]$profile.queueDir) -Filter "*.json" -File -ErrorAction SilentlyContinue |
-            Sort-Object CreationTimeUtc)
+        $commands = if ($runningWritten) {
+            @(Get-ChildItem -LiteralPath ([string]$profile.queueDir) -Filter "*.json" -File -ErrorAction SilentlyContinue |
+                Sort-Object CreationTimeUtc)
+        } else { @() }
         foreach ($commandFile in $commands) {
             try {
                 $request = Get-Content -LiteralPath $commandFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -236,12 +315,18 @@ try {
         Start-Sleep -Milliseconds 400
     }
     $exitCode = [int]$process.ExitCode
-    $exitStatus = if ($exitCode -eq 0) { "stopped" } else { "failed" }
+    $exitedBeforeReady = -not $runningWritten
+    $exitStatus = if ($exitCode -eq 0 -and -not $exitedBeforeReady) { "stopped" } else { "failed" }
     $exitExtra = [ordered]@{
         exitCode = $exitCode
         finishedAt = (Get-Date).ToString("o")
     }
-    if ($exitCode -ne 0) { $exitExtra.failure = "Java process exited with code $exitCode." }
+    if ($exitedBeforeReady) {
+        $logDetail = ($startupLogTail -replace "[\r\n]+", " | ").Trim()
+        if ($logDetail.Length -gt 2000) { $logDetail = $logDetail.Substring($logDetail.Length - 2000) }
+        $exitExtra.failure = "Java process exited before the PZ server-ready marker (exit code $exitCode). Startup log: $logDetail"
+    }
+    elseif ($exitCode -ne 0) { $exitExtra.failure = "Java process exited with code $exitCode." }
     Write-State -Status $exitStatus -Process $process -Extra ([pscustomobject]$exitExtra)
 }
 catch {
@@ -252,5 +337,6 @@ catch {
     throw
 }
 finally {
+    if ($startupLockStream) { $startupLockStream.Dispose() }
     if ($process) { $process.Dispose() }
 }

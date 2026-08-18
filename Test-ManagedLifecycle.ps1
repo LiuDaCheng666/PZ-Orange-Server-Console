@@ -40,11 +40,14 @@ $profilePath = Join-Path $PSScriptRoot "profile.json"
     $mockSource = @'
 param(
     [string]$RunMarker,
+    [string]$ConsoleLog,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$IgnoredArguments
 )
 $utf8 = [Text.UTF8Encoding]::new($false)
 [IO.File]::AppendAllText($RunMarker, "started $PID " + (Get-Date).ToString("o") + "`r`n", $utf8)
+Start-Sleep -Milliseconds 500
+[IO.File]::AppendAllText($ConsoleLog, "*** SERVER STARTED ****`r`n", $utf8)
 while ($true) {
     $command = [Console]::In.ReadLine()
     if ($null -eq $command) { Start-Sleep -Milliseconds 100; continue }
@@ -70,7 +73,7 @@ while ($true) {
         dataRoot = Join-Path $profileRoot "data"
         javaPath = $mockJavaPath
         workingDirectory = $profileRoot
-        arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$mockPath`" -RunMarker `"$runMarker`" zombie.network.GameServer -cachedir=`"$(Join-Path $profileRoot 'data')`" -servername=mock"
+        arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$mockPath`" -RunMarker `"$runMarker`" -ConsoleLog `"$(Join-Path $profileRoot 'mock-console.txt')`" zombie.network.GameServer -cachedir=`"$(Join-Path $profileRoot 'data')`" -servername=mock"
         queueDir = Join-Path $profileRoot "commands"
         receiptDir = Join-Path $profileRoot "receipts"
         statePath = Join-Path $profileRoot "state.json"

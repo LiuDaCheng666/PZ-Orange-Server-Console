@@ -332,7 +332,7 @@ try {
     $launchProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$startScript`"" -WindowStyle $windowStyle -PassThru
 
     Write-Operation -Status "running" -Stage "waiting-running" -Message "启动脚本已执行，正在等待新 Java 进入运行状态。"
-    $startDeadline = (Get-Date).AddMinutes(2)
+    $startDeadline = (Get-Date).AddMinutes(15)
     do {
         Start-Sleep -Milliseconds 500
         $state = Read-State
@@ -347,7 +347,7 @@ try {
             throw $failure
         }
     } while ((Get-Date) -lt $startDeadline)
-    throw "启动脚本已执行，但新 Java 进程未在 2 分钟内进入运行状态。"
+    throw "启动脚本已执行，但新 Java 进程未在 15 分钟内完成 Steam、Workshop 和网络初始化。"
 }
 catch {
     Write-Operation -Status "failed" -Stage "failed" -Message "服务器生命周期操作失败。" -ErrorMessage $_.Exception.Message
