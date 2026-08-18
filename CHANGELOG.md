@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.9.3
+
+- 修复玩家账号密码提交成功后，前端在异步请求返回时继续读取已失效的 `event.currentTarget`，导致页面误报 `Cannot read properties of null (reading 'elements')`；现在会正常提示成功并清空两次密码输入。
+- 敏感账号命令的托管回执从生成时即只保存 `[redacted]`；兼容当前已运行的旧托管进程，面板会在命令终态后立即脱敏回执。
+- Web 日志接口会遮蔽 PZ 原生日志中的 `setpassword`、带密码的 `adduser` 命令和密码哈希响应，避免密码通过日志页面或 API 暴露；本地原始游戏日志不修改。
+
 ## 0.9.2
 
 - 修复多服同步安全重启时共用 Steam Workshop 目录发生并发下载，导致某台服务器在关闭后因 Workshop `result=33` 退出的问题；同一面板主机的 PZ 启动现在全局排队，前一台完成 Steam、Workshop 与网络初始化后才启动下一台。

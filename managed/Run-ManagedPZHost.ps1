@@ -29,9 +29,13 @@ function Write-Receipt {
     if (-not $Request -or [string]::IsNullOrWhiteSpace([string]$Request.id) -or -not [bool]$Request.requireReceipt) { return }
     $receiptDir = if ($profile.receiptDir) { [string]$profile.receiptDir } else { Join-Path ([string]$profile.queueDir) "..\receipts" }
     New-Item -ItemType Directory -Path $receiptDir -Force | Out-Null
+    $receiptCommand = [string]$Request.command
+    $redactReceipt = [bool]$Request.redactReceipt -or $receiptCommand -match '(?i)^\s*setpassword(?:\s|$)' -or
+        $receiptCommand -match '(?i)^\s*adduser\s+"[^"]*"\s+"[^"]*"'
+    if ($redactReceipt) { $receiptCommand = "[redacted]" }
     $receipt = [ordered]@{
         id = [string]$Request.id
-        command = [string]$Request.command
+        command = $receiptCommand
         status = $Status
         hostPid = $PID
         updatedAt = (Get-Date).ToString("o")

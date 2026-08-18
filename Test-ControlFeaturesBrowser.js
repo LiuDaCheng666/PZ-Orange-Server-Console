@@ -5,7 +5,7 @@ const { chromium } = require('playwright-core');
 
 const webRoot = path.join(__dirname, 'web');
 const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-const requests = { policy: null, schedule: null, runNow: null, itemGrant: null, access: null, itemResultQueries: 0, itemSubmissionQueries: 0, aiRuntime: null };
+const requests = { policy: null, schedule: null, runNow: null, itemGrant: null, access: null, playerPassword: null, itemResultQueries: 0, itemSubmissionQueries: 0, aiRuntime: null };
 
 const profile = {
   id: 'mock', name: '测试服务器', kind: 'test', alive: true, status: 'running', writable: true,
@@ -52,7 +52,7 @@ const policyPayload = message => ({ ok: true, message: message || '执行器尚�
 const schedulePayload = message => ({ ok: true, serverId: 'mock', message, schedules });
 
 async function handleApi(request, response, url) {
-  if (url.pathname === '/api/auth/session') return sendJson(response, 200, { ok: true, authenticated: true, local: false, csrf: 'test', user: { username: 'admin', displayName: '管理员' } });
+  if (url.pathname === '/api/auth/session') return sendJson(response, 200, { ok: true, authenticated: true, local: false, csrf: 'test', user: { username: 'admin', displayName: '管理员', canManagePlayerData: true } });
   if (url.pathname === '/api/status') return sendJson(response, 200, { ok: true, defaultServer: 'mock', serverTime: new Date().toISOString(), servers: [profile] });
   if (url.pathname === '/api/log') return sendJson(response, 200, { ok: true, serverId: 'mock', cursor: 0, reset: false, text: '' });
   if (url.pathname === '/api/chat') return sendJson(response, 200, { ok: true, serverId: 'mock', cursor: 0, file: '', messages: [] });
@@ -60,6 +60,15 @@ async function handleApi(request, response, url) {
   if (url.pathname === '/api/items/status') return sendJson(response, 200, { ok: true, serverId: 'mock', ready: false, cacheAvailable: false, building: false });
   if (url.pathname === '/api/notices/status') return sendJson(response, 200, { ok: true, serverId: 'mock', channel: { usable: true, v3Compatible: true, heartbeatAgeSeconds: 1 } });
   if (url.pathname === '/api/notices/receipt') return sendJson(response, 200, { ok: true, status: 'broadcast', expectedClients: 2, acknowledgedClients: 2, acknowledgedPlayers: ['Alice', '玩家乙'] });
+  if (url.pathname === '/api/player-admin' && request.method === 'GET') return sendJson(response, 200, {
+    ok: true, serverId: 'mock', serverName: '测试服务器', steamId: '76561198000000001', found: true,
+    accounts: [{ username: 'Alice', displayName: 'Alice', lastConnection: new Date().toISOString(), steamId: '76561198000000001', ownerId: '', authType: 'Steam', role: 'user', online: true }],
+    characters: [], allowed: true, banned: false, serverRunning: true, lifecycleActive: false,
+  });
+  if (url.pathname === '/api/player-admin/password' && request.method === 'POST') {
+    requests.playerPassword = await readBody(request);
+    return sendJson(response, 202, { ok: true, message: `账号 ${requests.playerPassword.username} 的密码修改命令已提交。`, requestId: 'password-request-1', command: '[redacted]' });
+  }
   if (url.pathname === '/api/command/submission') {
     requests.itemSubmissionQueries += 1;
     const submissionId = url.searchParams.get('id');
@@ -217,6 +226,14 @@ async function layout(page, selectors) {
 
     await desktop.click('.nav-item[data-view="players"]');
     await desktop.waitForFunction(() => document.querySelectorAll('#grantForm .online-player-select option').length === 3);
+    await desktop.fill('#playerAdminLookupForm input[name="steamId"]', '76561198000000001');
+    await desktop.click('#playerAdminLookupForm button[type="submit"]');
+    await desktop.waitForFunction(() => document.querySelector('#playerAdminResult').hidden === false && document.querySelector('#playerPasswordForm select[name="username"]').value === 'Alice');
+    await desktop.fill('#playerPasswordForm input[name="password"]', 'new-test-password');
+    await desktop.fill('#playerPasswordForm input[name="passwordConfirm"]', 'new-test-password');
+    await desktop.click('#playerPasswordForm button[type="submit"]');
+    await desktop.waitForFunction(() => document.querySelector('#toast').textContent.includes('密码修改命令已提交'));
+    const passwordFieldsCleared = await desktop.evaluate(() => !document.querySelector('#playerPasswordForm input[name="password"]').value && !document.querySelector('#playerPasswordForm input[name="passwordConfirm"]').value);
     await desktop.fill('#accessForm input[name="username"]', 'Alice');
     await desktop.click('#accessForm button[data-access="user"]');
     await desktop.waitForFunction(() => document.querySelector('#commandResultTitle').textContent.includes('修改访问级别'));
@@ -296,6 +313,7 @@ async function layout(page, selectors) {
     if (!requests.policy || requests.policy.serverId !== 'mock' || requests.policy.username !== 'Alice' || requests.policy.steamId !== '76561198000000001' || requests.policy.trustedAll || requests.policy.allowedOperations.length !== 2) process.exitCode = 3;
     if (!requests.schedule || requests.schedule.channel !== 'both' || requests.schedule.intervalMinutes !== 60 || requests.schedule.duration !== 120) process.exitCode = 4;
     if (!requests.access || requests.access.action !== 'access' || requests.access.username !== 'Alice' || requests.access.level !== 'user') process.exitCode = 13;
+    if (!requests.playerPassword || requests.playerPassword.serverId !== 'mock' || requests.playerPassword.steamId !== '76561198000000001' || requests.playerPassword.username !== 'Alice' || requests.playerPassword.password !== 'new-test-password' || !passwordFieldsCleared) process.exitCode = 14;
     if (!requests.runNow || requests.runNow.id !== 'schedule-1' || history.length !== 2) process.exitCode = 5;
     if (!requests.itemGrant || requests.itemGrant.notificationChannel !== 'both' || requests.itemGrant.notificationDuration !== 25 || requests.itemGrant.usernames[0] !== 'Alice' || requests.itemGrant.count !== 2 || !/^[a-f0-9]{32}$/.test(requests.itemGrant.submissionId)) process.exitCode = 7;
     if (requests.itemResultQueries !== 0 || requests.itemSubmissionQueries !== 0) process.exitCode = 10;

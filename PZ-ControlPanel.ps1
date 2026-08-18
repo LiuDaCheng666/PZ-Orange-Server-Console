@@ -2587,7 +2587,7 @@ function Backup-PZPlayerDatabases {
 }
 
 function Queue-Command {
-    param($Profile, [string]$Command, [bool]$RequireReceipt = $false)
+    param($Profile, [string]$Command, [bool]$RequireReceipt = $false, [switch]$Sensitive)
     if ([string]$Profile.commandChannel -ne "queue" -or [string]::IsNullOrWhiteSpace([string]$Profile.queueDir)) {
         throw "服务器 $($Profile.name) 没有可写命令通道。"
     }
@@ -2601,10 +2601,38 @@ function Queue-Command {
         createdAt = (Get-Date).ToString("o")
         command = $Command
         requireReceipt = $RequireReceipt
+        redactReceipt = [bool]$Sensitive
     }
     $name = "{0}-{1}.json" -f $request.createdAt.Replace(':','').Replace('.',''), $request.id
     [IO.File]::WriteAllText((Join-Path $Profile.queueDir $name), ($request | ConvertTo-Json -Compress), $utf8)
     return [pscustomobject]$request
+}
+
+function Protect-SensitiveCommandReceipt {
+    param($Profile, [string]$Id, [int]$TimeoutMilliseconds = 3000)
+    if ($Id -notmatch '^[a-f0-9]{32}$') { return $false }
+    $path = Join-Path (Get-ManagedProfilePaths -Id ([string]$Profile.id)).receiptDir "$Id.json"
+    $deadline = (Get-Date).AddMilliseconds([math]::Max(0, $TimeoutMilliseconds))
+    do {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            try {
+                $receipt = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ([string]$receipt.status -in @("completed", "failed")) {
+                    if ($receipt.PSObject.Properties["command"]) { $receipt.command = "[redacted]" }
+                    $tempPath = "$path.$([guid]::NewGuid().ToString('N')).tmp"
+                    try {
+                        [IO.File]::WriteAllText($tempPath, ($receipt | ConvertTo-Json -Depth 6), $utf8)
+                        Move-Item -LiteralPath $tempPath -Destination $path -Force
+                    }
+                    finally { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+                    return $true
+                }
+            }
+            catch { }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    return $false
 }
 
 function Resolve-Command {
@@ -3144,6 +3172,14 @@ function Get-NoticeReceiptPayload {
     }
 }
 
+function Protect-PZLogText {
+    param([AllowNull()][string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return [string]$Text }
+    $protected = [regex]::Replace($Text, '(?im)(command entered via server console[^\r\n]*:\s*")setpassword[^\r\n]*', '$1setpassword [REDACTED]"')
+    $protected = [regex]::Replace($protected, '(?im)(command entered via server console[^\r\n]*:\s*")adduser\s+"[^"]*"\s+"[^"]*"[^\r\n]*', '$1adduser [REDACTED]"')
+    return [regex]::Replace($protected, '(?im)(Your new password is)\s+[^\r\n]+', '$1 [REDACTED].')
+}
+
 function Get-LogPayload {
     param(
         $Profile,
@@ -3185,17 +3221,17 @@ function Get-LogPayload {
         }
         finally { $stream.Dispose() }
         $cursor = $After + $offset
-        return @{ text = $text; cursor = $cursor; reset = $false; hasMore = ($cursor -lt $item.Length); length = $item.Length }
+        return @{ text = (Protect-PZLogText -Text $text); cursor = $cursor; reset = $false; hasMore = ($cursor -lt $item.Length); length = $item.Length }
     }
     if ($After -le 0 -or $After -gt $item.Length) {
         $text = Read-Utf8Tail -Path $logPath
         $lines = $text -split "`r?`n"
         if ($lines.Length -gt 350) { $text = $lines[($lines.Length - 350)..($lines.Length - 1)] -join "`n" }
-        return @{ text = $text; cursor = $item.Length; reset = $true; hasMore = $false; length = $item.Length }
+        return @{ text = (Protect-PZLogText -Text $text); cursor = $item.Length; reset = $true; hasMore = $false; length = $item.Length }
     }
     if ($After -eq $item.Length) { return @{ text = ""; cursor = $item.Length; reset = $false; hasMore = $false; length = $item.Length } }
     if (($item.Length - $After) -gt 262144) {
-        return @{ text = (Read-Utf8Tail -Path $logPath); cursor = $item.Length; reset = $true; hasMore = $false; length = $item.Length }
+        return @{ text = (Protect-PZLogText -Text (Read-Utf8Tail -Path $logPath)); cursor = $item.Length; reset = $true; hasMore = $false; length = $item.Length }
     }
     $readLength = [int][math]::Min([long]262144, [long]($item.Length - $After))
     if ($readLength -le 0) { return @{ text = ""; cursor = $item.Length; reset = $false; hasMore = $false; length = $item.Length } }
@@ -3212,7 +3248,7 @@ function Get-LogPayload {
         $text = $utf8.GetString($bytes, 0, $offset)
     }
     finally { $stream.Dispose() }
-    return @{ text = $text; cursor = $item.Length; reset = $false; hasMore = $false; length = $item.Length }
+    return @{ text = (Protect-PZLogText -Text $text); cursor = $item.Length; reset = $false; hasMore = $false; length = $item.Length }
 }
 
 function Get-LatestChatLog {
@@ -5473,7 +5509,7 @@ try {
                 $quotedUser = Quote-PZ -Value $username -Name "用户名"
                 $quotedPassword = Quote-PZ -Value $password -Name "用户密码" -MaxLength 128
                 try {
-                    $queued = Queue-Command -Profile $profile -Command "setpassword $quotedUser $quotedPassword" -RequireReceipt:$true
+                    $queued = Queue-Command -Profile $profile -Command "setpassword $quotedUser $quotedPassword" -RequireReceipt:$true -Sensitive
                     $requestId = [string]$queued.id
                     $commandRequests[$requestId] = [pscustomobject]@{
                         serverId = [string]$profile.id
@@ -5482,6 +5518,7 @@ try {
                         queuedAt = [string]$queued.createdAt
                         logCursor = 0L
                     }
+                    [void](Protect-SensitiveCommandReceipt -Profile $profile -Id $requestId)
                     Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "player-password" -Detail "server=$($profile.id) steamId=$steamId username=$username requestedBy=$($session.user.username)" -Result "queued"
                     [void](Add-ExecutionHistoryRecord -ServerId ([string]$profile.id) -Category "command" -Action "player-password" -Source "web" -Summary "修改玩家账号密码：$username" -Status "queued" -Message "密码修改命令已安全提交。" -RequestIds @($requestId))
                     Write-JsonResponse $context 202 @{ ok = $true; message = "账号 $username 的密码修改命令已提交。"; requestId = $requestId; command = "[redacted]" }
@@ -5687,8 +5724,9 @@ try {
                     $logCursor = (Get-Item -LiteralPath ([string]$profile.consoleLog)).Length
                 }
                 $queued = @()
+                $sensitiveUserAccount = [string]$body.action -eq "user-account" -and -not [string]::IsNullOrWhiteSpace([string]$body.password)
                 foreach ($command in $commands) {
-                    $queued += Queue-Command -Profile $profile -Command $command -RequireReceipt:$true
+                    $queued += Queue-Command -Profile $profile -Command $command -RequireReceipt:$true -Sensitive:$sensitiveUserAccount
                 }
                 $requestIds = @()
                 for ($index = 0; $index -lt $queued.Count; $index += 1) {
@@ -5702,6 +5740,9 @@ try {
                         queuedAt = [string]$queued[$index].createdAt
                         logCursor = $logCursor
                     }
+                }
+                if ($sensitiveUserAccount) {
+                    foreach ($requestId in $requestIds) { [void](Protect-SensitiveCommandReceipt -Profile $profile -Id $requestId) }
                 }
                 foreach ($key in @($commandRequests.Keys)) {
                     if (((Get-Date) - [datetime]$commandRequests[$key].queuedAt).TotalHours -gt 2) { $commandRequests.Remove($key) }

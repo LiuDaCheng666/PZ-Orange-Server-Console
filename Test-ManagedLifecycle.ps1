@@ -105,6 +105,26 @@ while ($true) {
     if ($firstJavaProcess.PriorityClass -ne [Diagnostics.ProcessPriorityClass]::AboveNormal) {
         throw "Managed startup did not apply the AboveNormal Java priority."
     }
+    $sensitiveRequestId = [guid]::NewGuid().ToString("N")
+    $sensitiveRequest = [ordered]@{
+        id = $sensitiveRequestId
+        createdAt = (Get-Date).ToString("o")
+        command = 'setpassword "Alice" "test-secret"'
+        requireReceipt = $true
+        redactReceipt = $true
+    }
+    [IO.File]::WriteAllText((Join-Path $profile.queueDir "$sensitiveRequestId.json"), ($sensitiveRequest | ConvertTo-Json -Compress), $utf8)
+    $sensitiveReceiptPath = Join-Path $profile.receiptDir "$sensitiveRequestId.json"
+    Wait-ForCondition -TimeoutSeconds 10 -Failure "Sensitive command receipt was not completed." -Condition {
+        if (-not (Test-Path -LiteralPath $sensitiveReceiptPath)) { return $false }
+        $receipt = Get-Content -LiteralPath $sensitiveReceiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return [string]$receipt.status -eq "completed"
+    }
+    $sensitiveReceipt = Get-Content -LiteralPath $sensitiveReceiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$sensitiveReceipt.command -cne "[redacted]") { throw "Sensitive command was persisted in a managed receipt." }
+    if (-not (Get-Content -LiteralPath $runMarker -Raw -Encoding UTF8).Contains('command setpassword "Alice" "test-secret"')) {
+        throw "Sensitive command was not delivered to the managed server."
+    }
     if ($ShowConsole) {
         Wait-ForCondition -TimeoutSeconds 10 -Failure "Managed host did not expose a visible console window." -Condition {
             $hostProcess = Get-Process -Id ([int]$firstState.hostPid) -ErrorAction SilentlyContinue
