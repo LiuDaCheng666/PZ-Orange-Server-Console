@@ -1,6 +1,6 @@
 ﻿param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "dist-public"),
-    [string]$Version = "0.9.3",
+    [string]$Version = "0.9.4",
     [string]$PackageName
 )
 
@@ -153,6 +153,7 @@ $rootFiles = @(
     "Test-InitialAdminStartup.ps1",
     "Test-ManagedLifecycle.ps1",
     "Test-ManagedStartupSerialization.ps1",
+    "Test-MaintenanceRestartState.ps1",
     "Test-JvmGcTelemetry.ps1",
     "Test-StockEventBridge.ps1",
     "Test-AIKnowledgeBuilder.ps1",

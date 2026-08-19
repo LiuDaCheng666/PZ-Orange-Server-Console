@@ -509,6 +509,7 @@ function New-DefaultMaintenanceSchedule {
         lastNotificationAt = $null
         lastAutoRestartAt = $null
         lastAutoRestartOperationId = $null
+        lastAutoRestartStatus = $null
     }
 }
 
@@ -521,7 +522,7 @@ function Read-MaintenanceSchedules {
             foreach ($property in $document.servers.PSObject.Properties) {
                 $saved = $property.Value
                 $schedule = New-DefaultMaintenanceSchedule -ServerId ([string]$property.Name)
-                foreach ($name in @("enabled", "intervalHours", "autoRestartOnUpdate", "restartStabilizationSeconds", "nextRunAt", "lastRunAt", "lastStatus", "lastResultCode", "lastMessage", "lastRequestId", "updateNotificationPending", "lastNotificationAt", "lastAutoRestartAt", "lastAutoRestartOperationId")) {
+                foreach ($name in @("enabled", "intervalHours", "autoRestartOnUpdate", "restartStabilizationSeconds", "nextRunAt", "lastRunAt", "lastStatus", "lastResultCode", "lastMessage", "lastRequestId", "updateNotificationPending", "lastNotificationAt", "lastAutoRestartAt", "lastAutoRestartOperationId", "lastAutoRestartStatus")) {
                     if ($saved.PSObject.Properties[$name]) { $schedule.$name = $saved.$name }
                 }
                 $schedule.enabled = [bool]$schedule.enabled
@@ -4056,6 +4057,7 @@ function Get-PZProgramUpdateStatus {
 function Get-MaintenanceSchedulePayload {
     param($Profile)
     $schedule = Get-MaintenanceSchedule -ServerId ([string]$Profile.id)
+    if (Sync-AutomaticModRestartState -Profile $Profile -Schedule $schedule) { Save-MaintenanceSchedules }
     $running = $false
     if ($schedule.lastRequestId) { $running = $maintenanceChecks.ContainsKey([string]$schedule.lastRequestId) }
     return [ordered]@{
@@ -4077,7 +4079,41 @@ function Get-MaintenanceSchedulePayload {
         lastNotificationAt = $schedule.lastNotificationAt
         lastAutoRestartAt = $schedule.lastAutoRestartAt
         lastAutoRestartOperationId = $schedule.lastAutoRestartOperationId
+        lastAutoRestartStatus = $schedule.lastAutoRestartStatus
     }
+}
+
+function Sync-AutomaticModRestartState {
+    param($Profile, $Schedule)
+    if (-not $Schedule -or [string]::IsNullOrWhiteSpace([string]$Schedule.lastAutoRestartOperationId)) { return $false }
+    $paths = Get-ManagedProfilePaths -Id ([string]$Profile.id)
+    if (-not (Test-Path -LiteralPath $paths.operationPath -PathType Leaf)) { return $false }
+    try { $operation = Get-Content -LiteralPath $paths.operationPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { return $false }
+    if ([string]$operation.id -cne [string]$Schedule.lastAutoRestartOperationId) { return $false }
+
+    $status = [string]$operation.status
+    $changed = [string]$Schedule.lastAutoRestartStatus -cne $status
+    if ($changed) { $Schedule.lastAutoRestartStatus = $status }
+    if ($status -notin @("completed", "failed")) { return $changed }
+
+    if ([bool]$Schedule.updateNotificationPending) {
+        $Schedule.updateNotificationPending = $false
+        $changed = $true
+    }
+    if ([string]$Schedule.lastStatus -eq "auto-restart-queued") {
+        if ($status -eq "completed") {
+            $Schedule.lastStatus = "auto-restart-completed"
+            $Schedule.lastMessage = "Mod 更新自动安全重启已完成；后续检测到新的 Mod 更新时可以再次自动重启。"
+        }
+        else {
+            $detail = if ($operation.error) { [string]$operation.error } elseif ($operation.message) { [string]$operation.message } else { "生命周期操作失败。" }
+            $Schedule.lastStatus = "auto-restart-failed"
+            $Schedule.lastMessage = "Mod 更新自动安全重启失败：$detail"
+        }
+        $changed = $true
+    }
+    return $changed
 }
 
 function Start-ScheduledModCheck {
@@ -4144,6 +4180,7 @@ function Start-AutomaticModRestart {
     $queuedAt = (Get-Date).ToString("o")
     $Schedule.lastAutoRestartAt = $queuedAt
     $Schedule.lastAutoRestartOperationId = $operationId
+    $Schedule.lastAutoRestartStatus = "queued"
     $Schedule.lastNotificationAt = $queuedAt
     $Schedule.updateNotificationPending = $true
     $script:statusCache = $null
@@ -4161,6 +4198,7 @@ function Complete-ScheduledModCheck {
     $check = $maintenanceChecks[$RequestId]
     $profile = Get-ServerProfile -Id ([string]$check.serverId)
     $schedule = Get-MaintenanceSchedule -ServerId ([string]$profile.id)
+    [void](Sync-AutomaticModRestartState -Profile $profile -Schedule $schedule)
     try { $result = Get-CommandResultPayload -Profile $profile -Id $RequestId }
     catch {
         $schedule.lastStatus = "failed"
