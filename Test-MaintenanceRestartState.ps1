@@ -29,6 +29,7 @@ try {
     $profile = [pscustomobject]@{ id = "mock" }
     $schedule = [pscustomobject]@{
         lastAutoRestartOperationId = "0123456789abcdef0123456789abcdef"
+        lastAutoRestartAt = (Get-Date).AddMinutes(-10).ToString("o")
         lastAutoRestartStatus = "queued"
         updateNotificationPending = $true
         lastStatus = "auto-restart-queued"
@@ -82,11 +83,26 @@ try {
         throw "A new update after a completed automatic restart did not queue another restart."
     }
 
+    $schedule.lastAutoRestartOperationId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    $schedule.lastAutoRestartAt = (Get-Date).AddMinutes(-5).ToString("o")
+    $schedule.lastAutoRestartStatus = "queued"
+    $schedule.updateNotificationPending = $true
+    $schedule.lastStatus = "update-required"
+    $operation.id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    $operation.action = "restart"
+    $operation.status = "completed"
+    $operation.startedAt = (Get-Date).AddMinutes(-2).ToString("o")
+    [IO.File]::WriteAllText($operationPath, ($operation | ConvertTo-Json), $utf8)
+    if (-not (Sync-AutomaticModRestartState -Profile $profile -Schedule $schedule) -or $schedule.updateNotificationPending) {
+        throw "A newer completed manual restart did not release the stale automatic update lock."
+    }
+
     [pscustomobject]@{
         ok = $true
         completedReleasesLock = $true
         runningKeepsLock = $true
         newUpdateQueuesRestart = $true
+        manualRestartReleasesStaleLock = $true
     } | ConvertTo-Json
 }
 finally {

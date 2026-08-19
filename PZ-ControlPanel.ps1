@@ -4090,7 +4090,22 @@ function Sync-AutomaticModRestartState {
     if (-not (Test-Path -LiteralPath $paths.operationPath -PathType Leaf)) { return $false }
     try { $operation = Get-Content -LiteralPath $paths.operationPath -Raw -Encoding UTF8 | ConvertFrom-Json }
     catch { return $false }
-    if ([string]$operation.id -cne [string]$Schedule.lastAutoRestartOperationId) { return $false }
+    if ([string]$operation.id -cne [string]$Schedule.lastAutoRestartOperationId) {
+        $replacementCompleted = [bool]$Schedule.updateNotificationPending -and [string]$operation.status -eq "completed" -and
+            [string]$operation.action -in @("restart", "update") -and $operation.startedAt -and $Schedule.lastAutoRestartAt
+        if ($replacementCompleted) {
+            try { $replacementCompleted = [datetime]$operation.startedAt -ge [datetime]$Schedule.lastAutoRestartAt }
+            catch { $replacementCompleted = $false }
+        }
+        if (-not $replacementCompleted) { return $false }
+        $Schedule.updateNotificationPending = $false
+        $Schedule.lastAutoRestartStatus = "completed"
+        if ([string]$Schedule.lastStatus -eq "auto-restart-queued") {
+            $Schedule.lastStatus = "auto-restart-completed"
+            $Schedule.lastMessage = "后续安全重启已完成，本轮 Mod 更新锁已释放；检测到新的 Mod 更新时可以再次自动重启。"
+        }
+        return $true
+    }
 
     $status = [string]$operation.status
     $changed = [string]$Schedule.lastAutoRestartStatus -cne $status

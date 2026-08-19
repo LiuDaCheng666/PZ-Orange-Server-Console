@@ -1,6 +1,6 @@
 ﻿param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "dist-public"),
-    [string]$Version = "0.9.4",
+    [string]$Version = "0.9.5",
     [string]$PackageName
 )
 
