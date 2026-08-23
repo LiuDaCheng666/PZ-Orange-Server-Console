@@ -5,7 +5,7 @@ const { chromium } = require('playwright-core');
 
 const webRoot = path.join(__dirname, 'web');
 const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-const requests = { policy: null, schedule: null, runNow: null, itemGrant: null, access: null, playerPassword: null, itemResultQueries: 0, itemSubmissionQueries: 0, aiRuntime: null };
+const requests = { policy: null, schedule: null, runNow: null, itemGrant: null, access: null, playerPassword: null, playerAudit: null, banSync: null, itemResultQueries: 0, itemSubmissionQueries: 0, aiRuntime: null };
 
 const profile = {
   id: 'mock', name: '测试服务器', kind: 'test', alive: true, status: 'running', writable: true,
@@ -69,6 +69,48 @@ async function handleApi(request, response, url) {
     requests.playerPassword = await readBody(request);
     return sendJson(response, 202, { ok: true, message: `账号 ${requests.playerPassword.username} 的密码修改命令已提交。`, requestId: 'password-request-1', command: '[redacted]' });
   }
+  if (url.pathname === '/api/server-patches' && request.method === 'GET') return sendJson(response, 200, {
+    ok: true, canManage: true,
+    patch: {
+      id: 'OrangeAntiCheat', name: 'OrangeAntiCheat 服务端命令防护', version: '2.0.0', protectedCommands: 13, enabled: true,
+      scopes: [{ runtimeRoot: 'D:\\PZ Test Server', target: 'D:\\PZ Test Server\\server-patches\\OrangeAntiCheat-agent.jar', installed: true, installedVersion: '2.0.0', pendingRestart: false, servers: [{ id: 'mock', name: '测试服务器', running: true, configured: true, active: true, activeVersion: '2.0.0' }] }],
+      sourceFiles: [{ path: 'patches/OrangeAntiCheat/manifest.json', present: true, sha256: 'a'.repeat(64) }],
+    },
+    components: [
+      { id: 'OrangeAntiCheat', name: '服务端危险命令鉴权', technicalName: 'OrangeAntiCheat', category: '安全鉴权', description: 'Java Agent 在 Lua 事件触发前拒绝普通玩家调用原版管理员或调试命令，不修改任何游戏 Lua 文件。', version: '2.0.0', compatibility: 'PZ 42.20.2（精确类哈希）', manageable: true, enabled: true, scopes: [{ runtimeRoot: 'D:\\PZ Test Server', filePath: 'D:\\PZ Test Server\\server-patches\\OrangeAntiCheat-agent.jar', filePresent: true, fileVersion: '2.0.0', buildTime: '2026-08-21 18:00', sha256: 'c'.repeat(64), pendingRestart: false, servers: [{ id: 'mock', name: '测试服务器', running: true, configured: true, active: true, activeVersion: '2.0.0', detail: 'Java Agent 已生效' }] }] },
+      { id: 'PZTimedActionIsolationFix', name: '多人长读条动作隔离', technicalName: 'PZTimedActionIsolationFix', category: '联机修复', description: '按玩家和动作实例精确停止制作、拆解、加油等动作，防止动作编号撞号误删其他玩家读条；这是一条故意较长的中文备注，用于验证表格会完整换行。', version: '', compatibility: 'PZ 42.20.x', manageable: false, enabled: true, scopes: [{ runtimeRoot: 'D:\\PZ Test Server', filePath: 'D:\\PZ Test Server\\server-patches\\PZTimedActionIsolationFix-agent.jar', filePresent: true, fileVersion: '', buildTime: '2026-08-20 11:50', sha256: 'b'.repeat(64), pendingRestart: false, servers: [{ id: 'mock', name: '测试服务器', running: true, configured: true, active: true, activeVersion: '', detail: '启动日志已确认 ACTIVE' }] }] },
+    ],
+  });
+  if (url.pathname === '/api/anticheat' && request.method === 'GET') return sendJson(response, 200, {
+    ok: true, serverId: 'mock', generatedAt: new Date().toISOString(), hours: 168, canBan: true,
+    patch: { installed: true, active: true, pendingRestart: false, version: '2.0.0' },
+    summary: { suspiciousPlayers: 2, criticalPlayers: 0, protectedCalls: 0, blockedCalls: 0, nativeSignals: 2, speedNoiseSignals: 1, checksumSignals: 0, bannedPlayers: 1 },
+    diagnostics: { filesScanned: 12, linesScanned: 3200 },
+    players: [
+      { steamId: '76561198000000001', usernames: ['Alice'], ips: ['127.0.0.1'], score: 8, severity: 'low', protectedCalls: 0, blockedCalls: 0, nativeSignals: 1, actionableNativeSignals: 1, speedSignals: 0, speedNoiseSignals: 0, speedNoiseOnly: false, checksumSignals: 0, peakCommandsPerMinute: 12, firstSeen: new Date(Date.now() - 3600000).toISOString(), lastSeen: new Date().toISOString(), reasons: [{ label: '原版反作弊信号', count: 1, severity: 'warning' }], topCommands: [{ command: 'player.onHealthCheatCurrentPlayer', count: 1194 }, { command: 'PhunSprinters.isSprinter', count: 744 }, { command: 'OrangeTradingMod.RequestDomainState', count: 429 }, { command: 'newmusic_device.request_registry_sync', count: 363 }, { command: 'PZWebNotices.ack', count: 184 }, { command: 'LS.ChangeCharacterMoodGroup', count: 152 }, { command: 'LS.SavePlayerData', count: 114 }, { command: 'SleepWithFriends.Sleep', count: 95 }], banned: false },
+      { steamId: '76561198000000003', usernames: ['LagPlayer'], ips: [], score: 0, severity: 'low', protectedCalls: 0, blockedCalls: 0, nativeSignals: 1, actionableNativeSignals: 0, speedSignals: 1, speedNoiseSignals: 1, speedNoiseOnly: true, checksumSignals: 0, peakCommandsPerMinute: 3, firstSeen: new Date(Date.now() - 7200000).toISOString(), lastSeen: new Date().toISOString(), reasons: [{ label: '速度信号（疑似网络波动）', count: 1, severity: 'low' }], topCommands: [], banned: false },
+      { steamId: '76561198000000004', usernames: ['BannedPlayer'], ips: [], score: 82, severity: 'critical', protectedCalls: 1, blockedCalls: 0, nativeSignals: 0, actionableNativeSignals: 0, speedSignals: 0, speedNoiseSignals: 0, speedNoiseOnly: false, checksumSignals: 0, peakCommandsPerMinute: 4, firstSeen: new Date(Date.now() - 7200000).toISOString(), lastSeen: new Date().toISOString(), reasons: [{ label: '未授权调试命令', count: 1, severity: 'critical' }], topCommands: [], banned: true, banReason: 'Confirmed exploit' },
+    ],
+    events: [
+      { time: new Date().toISOString(), severity: 'high', type: 'native-anticheat', code: 'Power', steamId: '76561198000000001', username: 'Alice', detail: 'PlayerPacketReliable: invalid mode；action=Log', sourceFile: 'Logs/example_DebugLog-server-with-a-deliberately-long-name.txt', lineNumber: 12 },
+      { time: new Date().toISOString(), severity: 'critical', type: 'protected-command', code: 'health-cheat', command: 'player.onHealthCheatCurrentPlayer', steamId: '76561198000000001', username: 'Alice', detail: '客户端调用了仅应由管理员或调试权限使用的原版命令。', coordinate: '10000,9000,0', sourceFile: 'Logs/example_cmd.txt', lineNumber: 14 },
+      { time: new Date().toISOString(), severity: 'low', type: 'native-anticheat', code: 'Speed', speed: 24, noiseLikely: true, steamId: '76561198000000003', username: 'LagPlayer', detail: 'speed=24 > limit=20', sourceFile: 'Logs/example_DebugLog-server.txt', lineNumber: 13 },
+    ],
+    banSummary: { count: 1, targets: [{ id: 'server2', name: '2服' }] },
+  });
+  if (url.pathname === '/api/anticheat/bans/sync' && request.method === 'POST') {
+    requests.banSync = await readBody(request);
+    return sendJson(response, 200, { ok: true, sourceServerId: 'mock', sourceCount: 1, added: 1, message: '封禁名单合并同步已提交，共补充 1 条。', results: [{ serverId: 'server2', name: '2服', status: 'queued', added: 1, mode: 'server-command', message: '1 条封禁已进入运行中服务器的命令队列。' }] });
+  }
+  if (url.pathname === '/api/anticheat/analyze-player' && request.method === 'POST') {
+    requests.playerAudit = await readBody(request);
+    return sendJson(response, 202, { ok: true, id: 'a'.repeat(32), status: 'analyzing', message: '只读证据包已构建，AI 正在分析。' });
+  }
+  if (url.pathname === '/api/anticheat/analyze-player' && request.method === 'GET') return sendJson(response, 200, {
+    ok: true, id: 'a'.repeat(32), status: 'completed', serverId: 'mock', steamId: '76561198000000001', username: 'Alice', hours: 168,
+    model: 'test-model', evidenceGeneratedAt: new Date().toISOString(), evidenceSummary: { filesScanned: 12, commands: 20, adminHits: 0, itemHits: 0, nativeAntiCheat: 1, blockedOrProtected: 0, economyAvailable: true, economyEvents: 42, balanceDiscontinuities: 0, lifestyleUnmatched: 0 },
+    report: { verdict: '需要观察', riskLevel: 'warning', confidence: 78, summary: '存在一条原版速度信号，但经济流水连续且 Lifestyle Add/Remove 已配对，当前不能据此认定作弊。', findings: [{ severity: 'warning', title: '原版速度信号需要复核', evidence: ['Logs/example_DebugLog-server.txt:12'], interpretation: '单一速度信号可能由网络或载具导致。' }, { severity: 'info', title: '经济流水连续', evidence: ['42 条流水，余额断点 0'], interpretation: '未发现无来源余额增长。' }], limitations: ['没有日志命中不等于绝对证明无作弊。'], recommendedActions: ['继续观察并人工核对同一时段连接质量。'] }, error: '',
+  });
   if (url.pathname === '/api/command/submission') {
     requests.itemSubmissionQueries += 1;
     const submissionId = url.searchParams.get('id');
@@ -224,6 +266,38 @@ async function layout(page, selectors) {
     await desktop.waitForFunction(() => document.querySelector('#aiPolicyList').textContent.includes('76561198000000001'));
     const aiLayout = await layout(desktop, ['#view-ai .page-heading', '#view-ai .heading-actions', '.ai-layout', '.ai-bridge-log', '.ai-policy-section', '#aiPolicyForm', '#aiPolicyList']);
 
+    await desktop.click('.nav-item[data-view="anticheat"]');
+    await desktop.waitForFunction(() => document.querySelectorAll('.anticheat-player-row').length === 2 && document.querySelector('.ban-state-badge')?.textContent.includes('已封禁') && document.querySelectorAll('#serverPatchComponents tr').length === 2);
+    await desktop.waitForFunction(() => document.querySelector('#antiCheatEvents').textContent.includes('权限或数据包模式异常') && document.querySelector('#antiCheatEvents').textContent.includes('健康操作回传'));
+    const patchInitiallyCollapsed = await desktop.evaluate(() => !document.querySelector('#serverPatchDisclosure').open);
+    await desktop.click('#serverPatchDisclosure > summary');
+    await desktop.waitForFunction(() => document.querySelector('#serverPatchDisclosure').open);
+    await desktop.check('#antiCheatHideBanned');
+    await desktop.waitForFunction(() => document.querySelectorAll('.anticheat-player-row').length === 1);
+    await desktop.uncheck('#antiCheatHideBanned');
+    await desktop.uncheck('#antiCheatHideSpeedNoise');
+    await desktop.waitForFunction(() => document.querySelectorAll('.anticheat-player-row').length === 3);
+    await desktop.check('#antiCheatHideSpeedNoise');
+    await desktop.click('#openAntiCheatBanSync');
+    await desktop.waitForSelector('#antiCheatBanSyncDialog', { state: 'visible' });
+    await desktop.click('#antiCheatBanSyncForm button[type="submit"]');
+    await desktop.waitForFunction(() => document.querySelector('#antiCheatBanSyncSummary').textContent.includes('共补充 1 条'));
+    await desktop.click('#closeAntiCheatBanSync');
+    await desktop.locator('.anticheat-player-row').filter({ hasText: 'Alice' }).click();
+    await desktop.click('#analyzeAntiCheatPlayer');
+    await desktop.waitForFunction(() => document.querySelector('.anticheat-ai-report.completed')?.textContent.includes('需要观察'));
+    const antiCheatLayout = await layout(desktop, ['.server-patch-table-wrap', '.server-patch-table', '.anticheat-layout', '.anticheat-player-list', '.anticheat-detail', '.anticheat-ai-report', '.anticheat-events']);
+    const antiCheatLocalization = await desktop.evaluate(initiallyCollapsed => ({
+      patchText: document.querySelector('#serverPatchComponents').textContent,
+      patchInitiallyCollapsed: initiallyCollapsed,
+      signalGuideText: document.querySelector('#antiCheatSignalGuide').textContent,
+      eventText: document.querySelector('#antiCheatEvents').textContent,
+      commandText: document.querySelector('.anticheat-command-summary').textContent,
+      actionWhiteSpace: getComputedStyle(document.querySelector('.anticheat-event-action p')).whiteSpace,
+      actionOverflow: getComputedStyle(document.querySelector('.anticheat-event-action p')).overflow,
+    }), patchInitiallyCollapsed);
+    await desktop.screenshot({ path: path.join(__dirname, 'pz-panel-player-ai-audit-desktop.png'), fullPage: true });
+
     await desktop.click('.nav-item[data-view="players"]');
     await desktop.waitForFunction(() => document.querySelectorAll('#grantForm .online-player-select option').length === 3);
     await desktop.fill('#playerAdminLookupForm input[name="steamId"]', '76561198000000001');
@@ -255,6 +329,17 @@ async function layout(page, selectors) {
     }
     await desktop.waitForFunction(() => document.querySelector('#commandResultOutput').textContent.includes('游戏确认成功 1/1'));
     const itemGrantLayout = await layout(desktop, ['#grantForm', '.item-grant-notification', '#commandResultTray']);
+
+    for (let index = 1; index <= 40; index += 1) players.push({ username: `历史玩家${String(index).padStart(2, '0')}`, steamId: `7656119810000${String(index).padStart(4, '0')}`, online: false, role: 'user', lastConnection: '2026-08-20 12:00' });
+    await desktop.evaluate(() => refreshPlayers());
+    await desktop.waitForFunction(() => document.querySelectorAll('.player-history .player-table-row').length === 40);
+    await desktop.click('.player-history summary');
+    await desktop.locator('.player-history .player-table-row').nth(30).scrollIntoViewIfNeeded();
+    const playerHistoryBeforeRefresh = await desktop.evaluate(() => ({ open: document.querySelector('.player-history').open, scrollY: window.scrollY }));
+    await desktop.evaluate(() => refreshPlayers());
+    await desktop.waitForFunction(() => document.querySelector('.player-history')?.open && document.querySelectorAll('.player-history .player-table-row').length === 40);
+    const playerHistoryAfterRefresh = await desktop.evaluate(() => ({ open: document.querySelector('.player-history').open, scrollY: window.scrollY }));
+    const playerHistoryRefresh = { before: playerHistoryBeforeRefresh, after: playerHistoryAfterRefresh, scrollDelta: Math.abs(playerHistoryAfterRefresh.scrollY - playerHistoryBeforeRefresh.scrollY) };
 
     await desktop.click('.nav-item[data-view="chat"]');
     await desktop.waitForFunction(() => document.querySelector('#broadcastScheduleList').textContent.includes('没有循环广播'));
@@ -288,13 +373,30 @@ async function layout(page, selectors) {
 
     await mobile.click('.mobile-nav [data-view="players"]');
     await mobile.waitForFunction(() => document.querySelectorAll('#grantForm .online-player-select option').length === 3);
+    await mobile.click('.player-history summary');
+    await mobile.locator('.player-history .player-table-row').nth(30).scrollIntoViewIfNeeded();
+    const mobilePlayerHistoryBeforeRefresh = await mobile.evaluate(() => ({ open: document.querySelector('.player-history').open, scrollY: window.scrollY }));
+    await mobile.evaluate(() => refreshPlayers());
+    await mobile.waitForFunction(() => document.querySelector('.player-history')?.open && document.querySelectorAll('.player-history .player-table-row').length === 40);
+    const mobilePlayerHistoryAfterRefresh = await mobile.evaluate(() => ({ open: document.querySelector('.player-history').open, scrollY: window.scrollY }));
+    const mobilePlayerHistoryRefresh = { before: mobilePlayerHistoryBeforeRefresh, after: mobilePlayerHistoryAfterRefresh, scrollDelta: Math.abs(mobilePlayerHistoryAfterRefresh.scrollY - mobilePlayerHistoryBeforeRefresh.scrollY) };
     await mobile.selectOption('#grantForm select[name="notificationChannel"]', 'both');
     const mobileItemGrantLayout = await layout(mobile, ['#grantForm', '.item-grant-notification']);
+
+    await mobile.click('.mobile-nav [data-view="anticheat"]');
+    await mobile.waitForFunction(() => document.querySelectorAll('.anticheat-player-row').length === 2);
+    await mobile.locator('.anticheat-player-row').filter({ hasText: 'Alice' }).click();
+    await mobile.click('#analyzeAntiCheatPlayer');
+    await mobile.waitForFunction(() => document.querySelector('.anticheat-ai-report.completed')?.textContent.includes('需要观察'));
+    const mobileAntiCheatLayout = await layout(mobile, ['.mobile-nav', '.mobile-nav [data-view="anticheat"]', '.server-patch-disclosure', '.anticheat-signal-guide', '.anticheat-layout', '.anticheat-player-list', '.anticheat-detail', '.anticheat-ai-report', '.anticheat-events']);
+    await mobile.screenshot({ path: path.join(__dirname, 'pz-panel-player-ai-audit-mobile.png'), fullPage: true });
 
     await mobile.click('.mobile-nav [data-view="ai"]');
     await mobile.waitForFunction(() => document.querySelector('#aiPolicyList').textContent.includes('76561198000000001'));
     const mobileAccess = await mobile.evaluate(() => ({
       aiVisible: !document.querySelector('.mobile-nav [data-view="ai"]').hidden,
+      antiCheatVisible: !document.querySelector('.mobile-nav [data-view="anticheat"]').hidden,
+      pageCount: [...document.querySelectorAll('.mobile-nav [data-view]')].filter(button => !button.hidden).length,
       usersHidden: document.querySelector('.mobile-nav [data-view="users"]').hidden,
       activeView: document.querySelector('.view.active')?.id,
     }));
@@ -307,7 +409,7 @@ async function layout(page, selectors) {
     const mobileHistoryLayout = await layout(mobile, ['.execution-history', '#executionHistoryList']);
     await mobile.screenshot({ path: path.join(__dirname, 'pz-panel-execution-history-mobile.png'), fullPage: true });
 
-    const result = { requests, policyCount: policies.length, scheduleCount: schedules.length, historyCount: history.length, desktop: { ai: aiLayout, itemGrant: itemGrantLayout, chat: chatLayout, history: historyLayout }, mobile: { access: mobileAccess, chat: mobileChatLayout, itemGrant: mobileItemGrantLayout, ai: mobileAiLayout, history: mobileHistoryLayout }, browserErrors: errors };
+    const result = { requests, policyCount: policies.length, scheduleCount: schedules.length, historyCount: history.length, antiCheatLocalization, playerHistoryRefresh, mobilePlayerHistoryRefresh, desktop: { ai: aiLayout, anticheat: antiCheatLayout, itemGrant: itemGrantLayout, chat: chatLayout, history: historyLayout }, mobile: { access: mobileAccess, chat: mobileChatLayout, itemGrant: mobileItemGrantLayout, anticheat: mobileAntiCheatLayout, ai: mobileAiLayout, history: mobileHistoryLayout }, browserErrors: errors };
     console.log(JSON.stringify(result, null, 2));
     if (errors.length) process.exitCode = 2;
     if (!requests.policy || requests.policy.serverId !== 'mock' || requests.policy.username !== 'Alice' || requests.policy.steamId !== '76561198000000001' || requests.policy.trustedAll || requests.policy.allowedOperations.length !== 2) process.exitCode = 3;
@@ -317,9 +419,14 @@ async function layout(page, selectors) {
     if (!requests.runNow || requests.runNow.id !== 'schedule-1' || history.length !== 2) process.exitCode = 5;
     if (!requests.itemGrant || requests.itemGrant.notificationChannel !== 'both' || requests.itemGrant.notificationDuration !== 25 || requests.itemGrant.usernames[0] !== 'Alice' || requests.itemGrant.count !== 2 || !/^[a-f0-9]{32}$/.test(requests.itemGrant.submissionId)) process.exitCode = 7;
     if (requests.itemResultQueries !== 0 || requests.itemSubmissionQueries !== 0) process.exitCode = 10;
-    if (!mobileAccess.aiVisible || !mobileAccess.usersHidden || mobileAccess.activeView !== 'view-ai') process.exitCode = 8;
+    if (!mobileAccess.aiVisible || !mobileAccess.antiCheatVisible || mobileAccess.pageCount !== 14 || !mobileAccess.usersHidden || mobileAccess.activeView !== 'view-ai') process.exitCode = 8;
     if (!requests.aiRuntime || requests.aiRuntime.action !== 'restart') process.exitCode = 9;
-    for (const state of [aiLayout, itemGrantLayout, chatLayout, historyLayout, mobileChatLayout, mobileItemGrantLayout, mobileAiLayout, mobileHistoryLayout]) {
+    if (!requests.playerAudit || requests.playerAudit.serverId !== 'mock' || requests.playerAudit.steamId !== '76561198000000001' || requests.playerAudit.username !== 'Alice' || requests.playerAudit.hours !== 168) process.exitCode = 15;
+    if (!requests.banSync || requests.banSync.sourceServerId !== 'mock' || requests.banSync.targetServerIds[0] !== 'server2' || requests.banSync.confirm !== 'SYNC_BANNED_STEAM_IDS') process.exitCode = 16;
+    if (!antiCheatLocalization.patchInitiallyCollapsed || !antiCheatLocalization.signalGuideText.includes('权限或数据包模式异常') || !antiCheatLocalization.signalGuideText.includes('移动速度信号') || !antiCheatLocalization.signalGuideText.includes('Lua / 脚本完整性不一致') || !antiCheatLocalization.patchText.includes('多人长读条动作隔离') || !antiCheatLocalization.patchText.includes('未声明语义版本') || !antiCheatLocalization.eventText.includes('命令鉴权') || !antiCheatLocalization.eventText.includes('原版只记录日志，未自动处罚') || !antiCheatLocalization.commandText.includes('查询奔跑者僵尸状态') || !antiCheatLocalization.commandText.includes('常规确认回执') || !antiCheatLocalization.commandText.includes('同步多人睡眠状态') || !antiCheatLocalization.commandText.includes('已配对记录不计风险') || antiCheatLocalization.actionWhiteSpace !== 'normal' || antiCheatLocalization.actionOverflow === 'hidden') process.exitCode = 17;
+    if (!playerHistoryRefresh.before.open || !playerHistoryRefresh.after.open || playerHistoryRefresh.before.scrollY < 300 || playerHistoryRefresh.scrollDelta > 2) process.exitCode = 18;
+    if (!mobilePlayerHistoryRefresh.before.open || !mobilePlayerHistoryRefresh.after.open || mobilePlayerHistoryRefresh.before.scrollY < 300 || mobilePlayerHistoryRefresh.scrollDelta > 2) process.exitCode = 19;
+    for (const state of [aiLayout, antiCheatLayout, itemGrantLayout, chatLayout, historyLayout, mobileChatLayout, mobileItemGrantLayout, mobileAntiCheatLayout, mobileAiLayout, mobileHistoryLayout]) {
       if (state.scrollWidth > state.clientWidth || state.clippedButtons.length || Object.values(state.bounds).some(rect => rect.left < -1 || rect.right > state.clientWidth + 1)) process.exitCode = 6;
     }
   } finally {

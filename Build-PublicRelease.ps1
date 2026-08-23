@@ -1,6 +1,6 @@
 ﻿param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "dist-public"),
-    [string]$Version = "0.9.5",
+    [string]$Version = "0.9.6",
     [string]$PackageName
 )
 
@@ -66,6 +66,7 @@ function Assert-PublicPackageContents {
         "audit.log",
         "broadcast-schedules.json",
         "maintenance-schedules.json",
+        "server-patches.json",
         "panel-state.json",
         "request-state.json",
         "手机访问地址.txt"
@@ -136,6 +137,10 @@ $rootFiles = @(
     "Build-PZServerKnowledgeBase.ps1",
     "Build-PZItemIndex.js",
     "Manage-PZPlayerData.js",
+    "Manage-PZBanList.js",
+    "Read-PZAntiCheatEvents.js",
+    "Build-PZPlayerAuditEvidence.js",
+    "PLAYER-AUDIT-SOP.zh-CN.md",
     "Build-PublicRelease.ps1",
     "Read-PZPlayers.js",
     "一键启动Web面板.bat",
@@ -159,10 +164,15 @@ $rootFiles = @(
     "Test-AIKnowledgeBuilder.ps1",
     "Test-AIKnowledgeBuildPipeline.ps1",
     "Test-ItemGrantCommandResults.ps1",
+    "Test-ItemGrantNotification.ps1",
     "Test-ProfileGameSettingsSync.ps1",
     "Test-MaintenanceBrowser.js",
     "Test-PlayerDataPermissions.ps1",
     "Test-PZPlayerDataManager.js",
+    "Test-AdminItemVaultBackend.ps1",
+    "Test-AdminItemVaultBrowser.js",
+    "Test-PlayerAuditAI.ps1",
+    "Test-PlayerAuditAIRetry.ps1",
     "CHANGELOG.md",
     "SECURITY.md",
     "panel-config.json",
@@ -176,6 +186,14 @@ foreach ($name in $rootFiles) {
 Copy-RequiredFile -Name "README-GitHub.zh-CN.md" -DestinationName "README.md"
 Copy-RequiredFile -Name "managed\Run-ManagedPZHost.ps1"
 Copy-RequiredFile -Name "managed\Invoke-ManagedPZLifecycle.ps1"
+Copy-RequiredDirectory -Name "patches"
+foreach ($name in @(
+    "Invoke-PZSelectiveWorldReset.ps1",
+    "pz_selective_world_reset.py",
+    "README.md"
+)) {
+    Copy-RequiredFile -Name "tools\PZSelectiveWorldReset\$name"
+}
 Copy-RequiredDirectory -Name "skill"
 foreach ($name in @("index.html", "app.css", "app.js", "lucide.min.js", "qrcode.min.js")) {
     Copy-RequiredFile -Name "web\$name"

@@ -17,17 +17,26 @@ ai-moderation-events.json
 # Schedules, history, logs and generated caches
 broadcast-schedules.json
 maintenance-schedules.json
+server-patches.json
+server-patches.json.bak
 execution-history.json
 audit.log
 *.log
 *.bak
 *.tmp
 item-index/
+admin-item-vault/
+map-reset/
+backups/
 dist/
 dist-public/
 release/
 release-test/
-tools/
+tools/*
+!tools/PZSelectiveWorldReset/
+!tools/PZSelectiveWorldReset/Invoke-PZSelectiveWorldReset.ps1
+!tools/PZSelectiveWorldReset/pz_selective_world_reset.py
+!tools/PZSelectiveWorldReset/README.md
 runtime/node.exe
 
 # Managed server runtime state and queues
@@ -42,3 +51,4 @@ managed/*/
 # Local test output
 pz-panel-*.png
 Test-*.result.json
+__pycache__/

@@ -20,6 +20,7 @@ $consoleLogCarry = ""
 $startupLogTail = ""
 $desiredPriorityClass = [Diagnostics.ProcessPriorityClass]::AboveNormal
 $appliedPriorityClass = $null
+$serverPatchesConfigPath = Join-Path (Split-Path -Parent $PSScriptRoot) "server-patches.json"
 if ([bool]$profile.showConsole) {
     try { $Host.UI.RawUI.WindowTitle = "PZ Server - $([string]$profile.serverName)" } catch { }
 }
@@ -118,6 +119,26 @@ function Get-JvmGcLogPathArgument {
     return [string]$match.Groups['rawPath'].Value
 }
 
+function Set-OrangeAntiCheatAgentArgument {
+    param([string]$Arguments, [bool]$Enabled, [string]$RuntimeRoot)
+    if ([string]::IsNullOrWhiteSpace($Arguments)) { throw "Java startup arguments are empty." }
+    $pattern = '(?i)(?:^|\s)-javaagent:server-patches[/\\]OrangeAntiCheat-agent\.jar(?:=[^\s"]+)?'
+    $result = ([regex]::Replace($Arguments, $pattern, ' ') -replace '\s+', ' ').Trim()
+    if (-not $Enabled) { return $result }
+    $jarPath = Join-Path $RuntimeRoot 'server-patches\OrangeAntiCheat-agent.jar'
+    if (-not (Test-Path -LiteralPath $jarPath -PathType Leaf)) {
+        throw "OrangeAntiCheat Java Agent is enabled but missing: $jarPath"
+    }
+    if ($result -notmatch '(?i)(?:^|\s)zombie\.network\.GameServer(?:\s|$)') {
+        throw "Java startup arguments do not contain zombie.network.GameServer."
+    }
+    return [regex]::Replace(
+        $result,
+        '(?i)(?=zombie\.network\.GameServer(?:\s|$))',
+        '-javaagent:server-patches/OrangeAntiCheat-agent.jar '
+    )
+}
+
 function Get-ConsoleLogLength {
     if ([string]::IsNullOrWhiteSpace($consoleLogPath) -or -not (Test-Path -LiteralPath $consoleLogPath -PathType Leaf)) { return 0L }
     try { return [long](Get-Item -LiteralPath $consoleLogPath).Length }
@@ -154,6 +175,20 @@ function Test-PZServerReady {
 
 New-Item -ItemType Directory -Path ([string]$profile.dataRoot), ([string]$profile.queueDir) -Force | Out-Null
 if ($profile.receiptDir) { New-Item -ItemType Directory -Path ([string]$profile.receiptDir) -Force | Out-Null }
+$antiCheatEnabled = $false
+if (Test-Path -LiteralPath $serverPatchesConfigPath -PathType Leaf) {
+    try {
+        $serverPatchConfiguration = Get-Content -LiteralPath $serverPatchesConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($serverPatchConfiguration.patches -and $serverPatchConfiguration.patches.OrangeAntiCheat) {
+            $antiCheatEnabled = [bool]$serverPatchConfiguration.patches.OrangeAntiCheat.enabled
+        }
+    }
+    catch { throw "OrangeAntiCheat patch configuration is invalid: $($_.Exception.Message)" }
+}
+$profile.arguments = Set-OrangeAntiCheatAgentArgument `
+    -Arguments ([string]$profile.arguments) `
+    -Enabled $antiCheatEnabled `
+    -RuntimeRoot ([string]$profile.workingDirectory)
 $gcLogArgument = Get-JvmGcLogPathArgument -Arguments ([string]$profile.arguments)
 if (-not [string]::IsNullOrWhiteSpace($gcLogArgument)) {
     $gcLogPath = if ([IO.Path]::IsPathRooted($gcLogArgument)) {

@@ -23,7 +23,7 @@ function Import-PanelFunction {
     Set-Item -LiteralPath "Function:\script:$Name" -Value $functionAst.Body.GetScriptBlock()
 }
 
-foreach ($name in @('Get-LogPayload', 'Get-AddItemCommandParts', 'New-AddItemOutcomeState', 'Update-AddItemOutcomeState', 'Get-AddItemOutcomeMap', 'Invoke-AddItemLogScan', 'Get-CommandResultPayload', 'Get-CommandResultsPayload', 'Get-CommandSubmissionPayload', 'Wait-ItemGrantSubmissionResult')) {
+foreach ($name in @('Protect-PZLogText', 'Get-LogPayload', 'Get-AddItemCommandParts', 'New-AddItemOutcomeState', 'Update-AddItemOutcomeState', 'Get-AddItemOutcomeMap', 'Invoke-AddItemLogScan', 'Get-CommandResultPayload', 'Get-CommandResultsPayload', 'Get-CommandSubmissionPayload', 'Wait-ItemGrantSubmissionResult')) {
     Import-PanelFunction -Name $name
 }
 $actualGetLogPayload = ${function:Get-LogPayload}

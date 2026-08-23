@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>PZ橙子服务器控制台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/app.css?v=20260810-2">
+  <link rel="stylesheet" href="/app.css?v=20260821-5">
 </head>
 <body>
   <div class="auth-screen" id="authScreen">
@@ -36,7 +36,9 @@
         <button class="nav-item" data-view="console"><i data-lucide="terminal-square"></i><span>实时日志</span></button>
         <button class="nav-item" data-view="chat"><i data-lucide="messages-square"></i><span>游戏聊天</span></button>
         <button class="nav-item" data-view="players"><i data-lucide="users"></i><span>玩家管理</span></button>
+        <button class="nav-item" data-view="anticheat"><i data-lucide="shield-alert"></i><span>反作弊</span></button>
         <button class="nav-item" data-view="items"><i data-lucide="package-search"></i><span>物品库</span></button>
+        <button class="nav-item" data-view="vault"><i data-lucide="archive-restore"></i><span>物品保险库</span></button>
         <button class="nav-item" data-view="world"><i data-lucide="cloud-sun"></i><span>世界控制</span></button>
         <button class="nav-item" data-view="commands"><i data-lucide="panel-top"></i><span>命令中心</span></button>
         <button class="nav-item" data-view="system"><i data-lucide="activity"></i><span>本机监控</span></button>
@@ -201,9 +203,102 @@
           <form class="tool-section" id="accessForm"><div class="tool-title"><i data-lucide="shield-check"></i><div><h3>访问级别</h3><p>页面玩家列表优先显示在线玩家，也可手工输入</p></div></div><label>游戏内用户名<input name="username" maxlength="64" autocomplete="new-password" required></label><label>权限<select name="level"><option value="admin">管理员</option><option value="moderator">版主</option><option value="gm">GM</option><option value="observer">观察员</option></select></label><div class="button-pair"><button class="primary-button" type="submit" data-access="selected">应用权限</button><button class="secondary-button" type="submit" data-access="user">撤销权限</button></div></form>
           <form class="tool-section" id="stateForm"><div class="tool-title"><i data-lucide="user-cog"></i><div><h3>玩家状态</h3><p>测试用临时状态开关</p></div></div><label>游戏内用户名<input name="username" maxlength="64" required></label><label>状态<select name="feature"><option value="godmodplayer">上帝模式</option><option value="invisibleplayer">隐身</option><option value="noclip">穿墙</option><option value="voiceban">语音禁用</option></select></label><div class="button-pair"><button class="secondary-button" type="submit" data-enabled="true">启用</button><button class="secondary-button" type="submit" data-enabled="false">关闭</button></div></form>
           <form class="tool-section" id="teleportForm"><div class="tool-title"><i data-lucide="map-pin"></i><div><h3>玩家传送</h3><p>传送到另一在线玩家</p></div></div><label>被传送玩家<input name="username" maxlength="64" required></label><label>目标玩家<input name="target" maxlength="64" required></label><button class="primary-button" type="submit">执行传送</button></form>
-          <form class="tool-section" id="grantForm"><div class="tool-title"><i data-lucide="package-plus"></i><div><h3>发放物品</h3><p>可发给一名、部分或全部当前在线玩家</p></div><button class="icon-button help-button" type="button" data-go="items" title="打开完整物品库"><i data-lucide="library"></i></button></div><div class="item-target-picker"><span class="item-target-label">发放对象</span><div class="item-target-modes"><label><input type="radio" name="targetMode" value="single" checked><span>单个玩家</span></label><label><input type="radio" name="targetMode" value="selected"><span>选择部分</span></label><label><input type="radio" name="targetMode" value="all-online"><span>全部在线</span></label></div><label class="item-target-single">在线玩家<select class="online-player-select" name="username" required><option value="">正在读取在线玩家...</option></select></label><div class="item-target-selected" hidden><div class="item-target-actions"><span>勾选在线玩家</span><div><button type="button" data-item-target-action="all">全选</button><button type="button" data-item-target-action="clear">清空</button></div></div><div class="item-target-checklist"></div></div><p class="item-target-summary">正在读取在线玩家...</p></div><div class="item-index-status" id="itemIndexStatus" data-state="loading"><div class="item-index-head"><span class="item-index-icon"><i data-lucide="database"></i></span><div><strong id="itemIndexState">正在读取物品索引</strong><small id="itemIndexPhase">等待服务器返回扫描状态</small></div></div><progress id="itemIndexProgress" max="100" value="0"></progress><div class="item-index-stats"><span>物品 <b id="itemIndexCount">--</b></span><span>中文名 <b id="itemIndexChinese">--</b></span><span>Mod <b id="itemIndexMods">--</b></span></div><time id="itemIndexGenerated">缓存时间 --</time></div><div class="item-field"><span>物品名称或 ID</span><div class="item-combobox"><input class="item-lookup-control" id="itemSearch" name="item" value="Base.Axe" maxlength="100" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="itemResults" aria-expanded="false" required><button class="secondary-button item-lookup-control" id="rebuildItemIndex" type="button" title="重新扫描本体和启用 Mod 的物品"><i data-lucide="refresh-cw"></i><span>重新扫描</span></button><div class="item-results" id="itemResults" role="listbox" hidden></div></div><small id="itemSearchStatus">输入中文名称或完整物品 ID 搜索</small></div><label>数量<input name="count" type="number" value="1" min="1" max="100" required></label><div class="item-grant-notification"><label>发放后通知<select name="notificationChannel"><option value="none">不发送通知</option><option value="native">文字全服广播</option><option value="popup">Mod 右下角弹窗</option><option value="both">文字广播 + Mod 弹窗</option></select></label><div class="item-grant-notification-fields" hidden><label>通知内容<textarea name="notificationMessage" maxlength="1200" rows="3" placeholder="留空时自动生成物品发放通知"></textarea></label><label class="item-notice-duration" hidden>弹窗时长（秒）<input name="notificationDuration" type="number" min="3" max="300" value="10"></label><p class="item-notification-hint">通知发送给当前全服在线玩家。</p></div></div><button class="primary-button" type="submit">发放物品</button></form>
+          <form class="tool-section" id="grantForm"><div class="tool-title"><i data-lucide="package-plus"></i><div><h3>发放物品</h3><p>可发给一名、部分或全部当前在线玩家</p></div><button class="icon-button help-button" type="button" data-go="items" title="打开完整物品库"><i data-lucide="library"></i></button></div><div class="item-target-picker"><span class="item-target-label">发放对象</span><div class="item-target-modes"><label><input type="radio" name="targetMode" value="single" checked><span>单个玩家</span></label><label><input type="radio" name="targetMode" value="selected"><span>选择部分</span></label><label><input type="radio" name="targetMode" value="all-online"><span>全部在线</span></label></div><label class="item-target-single">在线玩家<select class="online-player-select" name="username" required><option value="">正在读取在线玩家...</option></select></label><div class="item-target-selected" hidden><div class="item-target-actions"><span>勾选在线玩家</span><div><button type="button" data-item-target-action="all">全选</button><button type="button" data-item-target-action="clear">清空</button></div></div><div class="item-target-checklist"></div></div><p class="item-target-summary">正在读取在线玩家...</p></div><div class="item-index-status" id="itemIndexStatus" data-state="loading"><div class="item-index-head"><span class="item-index-icon"><i data-lucide="database"></i></span><div><strong id="itemIndexState">正在读取物品索引</strong><small id="itemIndexPhase">等待服务器返回扫描状态</small></div></div><progress id="itemIndexProgress" max="100" value="0"></progress><div class="item-index-stats"><span>物品 <b id="itemIndexCount">--</b></span><span>中文名 <b id="itemIndexChinese">--</b></span><span>Mod <b id="itemIndexMods">--</b></span></div><time id="itemIndexGenerated">缓存时间 --</time></div><div class="item-field"><span>物品名称或 ID</span><div class="item-combobox"><input class="item-lookup-control" id="itemSearch" name="item" value="Base.Axe" maxlength="100" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="itemResults" aria-expanded="false" required><button class="secondary-button item-lookup-control" id="rebuildItemIndex" type="button" title="重新扫描本体和启用 Mod 的物品"><i data-lucide="refresh-cw"></i><span>重新扫描</span></button><div class="item-results" id="itemResults" role="listbox" hidden></div></div><small id="itemSearchStatus">输入中文名称或完整物品 ID 搜索</small></div><label>数量<input name="count" type="number" value="1" min="1" max="100" required></label><div class="item-grant-notification"><label>发放后通知<select name="notificationChannel"><option value="popup" selected>自动 Mod 弹窗</option><option value="none">不发送通知</option><option value="native">文字全服广播</option><option value="both">文字广播 + Mod 弹窗</option></select></label><div class="item-grant-notification-fields"><label>自定义内容（可留空）<textarea name="notificationMessage" maxlength="1200" rows="3" placeholder="留空即自动生成物品发放通知"></textarea></label><label class="item-notice-duration">弹窗时长（秒）<input name="notificationDuration" type="number" min="3" max="300" value="10"></label><p class="item-notification-hint">Mod 弹窗只发给本次收到物品的玩家。</p></div></div><button class="primary-button" type="submit">发放物品</button></form>
           <form class="tool-section danger-zone" id="moderationForm"><div class="tool-title"><i data-lucide="user-x"></i><div><h3>移除玩家</h3><p>封禁操作需要确认</p></div></div><label>游戏内用户名<input name="username" maxlength="64" required></label><label>原因<input name="reason" maxlength="120" value="服务器管理操作" required></label><div class="button-pair"><button class="secondary-button" type="submit" data-mode="kick">踢出</button><button class="danger-button" type="submit" data-mode="ban">封禁</button></div></form>
         </div>
+      </section>
+
+      <section class="view" id="view-anticheat">
+        <div class="section-heading page-heading">
+          <div><p class="eyebrow">服务端鉴权与日志取证</p><h2>反作弊审计</h2></div>
+          <div class="heading-actions anticheat-heading-actions">
+            <label>查询范围<select id="antiCheatHours"><option value="24">最近24小时</option><option value="72">最近3天</option><option value="168" selected>最近7天</option><option value="720">最近30天</option></select></label>
+            <button class="secondary-button" id="refreshAntiCheat" type="button"><i data-lucide="refresh-cw"></i>重新扫描</button>
+          </div>
+        </div>
+        <div class="anticheat-metrics">
+          <div><span>高危待处理</span><strong id="antiCheatCritical">--</strong><small id="antiCheatCriticalMeta">未封禁玩家</small></div>
+          <div><span>危险命令</span><strong id="antiCheatProtected">--</strong><small>历史调用</small></div>
+          <div><span>已阻断</span><strong id="antiCheatBlocked">--</strong><small>补丁生效后</small></div>
+          <div><span>原版信号</span><strong id="antiCheatNative">--</strong><small>需结合证据复核</small></div>
+          <div><span>校验异常</span><strong id="antiCheatChecksum">--</strong><small>Lua / 脚本不一致</small></div>
+        </div>
+        <section class="anticheat-signal-guide" aria-labelledby="antiCheatSignalGuideTitle">
+          <div class="section-heading"><div><p class="eyebrow">中文分类与数量</p><h2 id="antiCheatSignalGuideTitle">本次扫描异常类型</h2></div><span class="badge neutral" id="antiCheatSignalGuideCount">等待扫描</span></div>
+          <div id="antiCheatSignalGuide"><p class="empty-state compact">正在整理异常类型...</p></div>
+        </section>
+        <div class="anticheat-toolbar">
+          <label><i data-lucide="search"></i><input id="antiCheatSearch" maxlength="80" placeholder="搜索用户名、SteamID、IP 或命令"></label>
+          <div class="segmented" id="antiCheatSeverity"><button class="active" data-severity="all">全部</button><button data-severity="critical">高危</button><button data-severity="high">较高</button><button data-severity="warning">观察</button></div>
+          <span id="antiCheatScanMeta">尚未扫描</span>
+        </div>
+        <div class="anticheat-filter-actions">
+          <div class="anticheat-filter-toggles">
+            <label><input id="antiCheatHideSpeedNoise" type="checkbox" checked><span>隐藏低于 35 的速度噪声</span></label>
+            <label><input id="antiCheatHideBanned" type="checkbox"><span>隐藏已封禁 SteamID</span></label>
+          </div>
+          <div class="anticheat-ban-actions">
+            <span id="antiCheatBanCount">封禁名单 --</span>
+            <button class="secondary-button" id="exportAntiCheatBans" type="button"><i data-lucide="download"></i>导出封禁 ID</button>
+            <button class="secondary-button" id="openAntiCheatBanSync" type="button"><i data-lucide="copy-check"></i>同步到其他服</button>
+          </div>
+        </div>
+        <div class="anticheat-layout">
+          <section class="anticheat-player-list" aria-label="可疑玩家">
+            <div class="anticheat-list-head"><span>风险玩家</span><span>信号</span><span>最近时间</span></div>
+            <div id="antiCheatPlayers"><p class="empty-state">正在读取可疑玩家...</p></div>
+          </section>
+          <aside class="anticheat-detail" id="antiCheatDetail">
+            <div class="anticheat-detail-empty"><i data-lucide="user-search"></i><strong>选择玩家查看证据</strong><span>危险命令会直接列出；原版反作弊和校验异常只作为复核线索。</span></div>
+          </aside>
+        </div>
+        <section class="anticheat-events">
+          <div class="section-heading"><div><p class="eyebrow">按时间倒序</p><h2>最近可疑事件</h2></div><span class="badge neutral" id="antiCheatEventCount">0 条</span></div>
+          <div class="anticheat-event-head"><span>时间 / 玩家</span><span>动作分类</span><span>可疑操作与中文说明</span><span>位置 / 日志来源</span><span>程度</span></div>
+          <div id="antiCheatEvents"><p class="empty-state compact">尚未读取事件。</p></div>
+        </section>
+        <details class="server-patch-disclosure" id="serverPatchDisclosure">
+          <summary>
+            <span class="server-patch-disclosure-icon"><i data-lucide="puzzle"></i></span>
+            <span><strong>补丁与运行状态</strong><small id="serverPatchDisclosureMeta">正在读取自动挂载状态...</small></span>
+            <b class="badge neutral" id="serverPatchDisclosureBadge">检查中</b>
+            <i class="server-patch-disclosure-chevron" data-lucide="chevron-down"></i>
+          </summary>
+          <div class="server-patch-disclosure-body">
+            <div class="anticheat-guard" id="antiCheatGuard" data-state="loading">
+              <span class="anticheat-guard-icon"><i data-lucide="shield-check"></i></span>
+              <div><strong id="antiCheatGuardTitle">正在检查服务端防护</strong><p id="antiCheatGuardText">读取补丁安装状态和当前 Java 进程加载记录。</p></div>
+              <span class="badge neutral" id="antiCheatGuardBadge">检查中</span>
+            </div>
+            <section class="server-patch-mount" id="serverPatchMount" data-state="loading">
+              <div class="server-patch-mount-head">
+                <span class="server-patch-icon"><i data-lucide="package-check"></i></span>
+                <div><p class="eyebrow">面板内置补丁</p><h2 id="serverPatchName">OrangeAntiCheat</h2><p id="serverPatchMeta">正在读取补丁清单与共享运行时状态...</p></div>
+                <span class="badge neutral" id="serverPatchVersion">版本 --</span>
+              </div>
+              <div class="server-patch-mount-control">
+                <label class="switch-control"><input id="serverPatchEnabled" type="checkbox"><span aria-hidden="true"></span><b>所有面板服务器自动挂载</b></label>
+                <button class="primary-button" id="applyServerPatch" type="button" disabled><i data-lucide="plug-zap"></i>应用挂载状态</button>
+              </div>
+              <div class="server-patch-table-wrap">
+                <table class="server-patch-table">
+                  <thead><tr><th>补丁 / 组件</th><th>中文用途备注</th><th>版本与兼容</th><th>文件状态</th><th>服务器加载状态</th></tr></thead>
+                  <tbody id="serverPatchComponents"><tr><td colspan="5"><p class="empty-state compact">正在识别补丁组件...</p></td></tr></tbody>
+                </table>
+              </div>
+              <details class="server-patch-source"><summary><span>内置源文件</span><b id="serverPatchSourceCount">--</b></summary><div id="serverPatchSources"></div></details>
+            </section>
+          </div>
+        </details>
+        <dialog class="help-dialog anticheat-ban-sync-dialog" id="antiCheatBanSyncDialog">
+          <form id="antiCheatBanSyncForm">
+            <div class="help-dialog-head"><div><p class="eyebrow">只合并，不自动解封</p><h2>同步 SteamID 封禁名单</h2></div><button class="icon-button" id="closeAntiCheatBanSync" type="button" title="关闭"><i data-lucide="x"></i></button></div>
+            <p class="anticheat-ban-sync-summary" id="antiCheatBanSyncSummary">正在读取源服务器封禁名单...</p>
+            <fieldset><legend>目标服务器</legend><div id="antiCheatBanSyncTargets"></div></fieldset>
+            <p class="anticheat-ban-sync-note">运行中的目标服通过正式 banid 命令生效；已停止的目标服会先备份账号数据库，再事务写入。目标服原有封禁不会被删除。</p>
+            <div class="help-actions"><button class="secondary-button" id="cancelAntiCheatBanSync" type="button">取消</button><button class="danger-button" type="submit"><i data-lucide="copy-check"></i>确认合并同步</button></div>
+          </form>
+        </dialog>
       </section>
 
       <section class="view" id="view-items">
@@ -224,6 +319,25 @@
             <div class="item-detail-empty"><i data-lucide="package-search"></i><strong>选择一件物品查看资料</strong><span>列表采用分页加载，不会一次载入全部物品。</span></div>
           </aside>
         </div>
+      </section>
+
+      <section class="view" id="view-vault">
+        <div class="section-heading page-heading"><div><p class="eyebrow">管理员专用 · 完整状态复制</p><h2>管理员物品保险库</h2></div><div class="heading-actions"><span class="sample-time" id="vaultUpdatedAt">尚未读取</span><button class="secondary-button" id="refreshVault" type="button"><i data-lucide="refresh-cw"></i>导入并刷新</button></div></div>
+        <div class="vault-alert" id="vaultAlert" data-state="idle"><i data-lucide="shield-check"></i><div><strong>原物品不会被移除</strong><p>在游戏内用管理员右键菜单保存模板；武器保留改装状态，背包可连同内含物品整体复制。</p></div></div>
+        <div class="vault-layout">
+          <section class="vault-template-pane" aria-label="保险库模板">
+            <header><div><strong>物品模板</strong><small id="vaultTemplateCount">0 项</small></div><label><span>筛选</span><input id="vaultSearch" maxlength="100" placeholder="名称、物品 ID、内容"></label></header>
+            <div class="vault-template-list" id="vaultTemplateList"><p class="empty-state">正在读取保险库...</p></div>
+          </section>
+          <section class="vault-detail-pane" id="vaultDetailPane">
+            <div class="vault-empty"><i data-lucide="archive-restore"></i><strong>选择一个物品模板</strong><span>这里会显示快照校验值、容器内容和跨服发放设置。</span></div>
+          </section>
+        </div>
+        <section class="vault-history">
+          <div class="section-heading"><div><p class="eyebrow">最近 100 条</p><h2>发放回执</h2></div></div>
+          <div class="vault-history-head"><span>状态</span><span>目标</span><span>服务器</span><span>数量</span><span>更新时间</span><span>详情</span></div>
+          <div id="vaultGrantHistory"><p class="empty-state compact">尚无保险库发放记录。</p></div>
+        </section>
       </section>
 
       <section class="view" id="view-world">
@@ -529,7 +643,7 @@
   </div>
 
   <nav class="mobile-nav">
-    <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="map-reset"><i data-lucide="map-pinned"></i><span>刷新</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
+    <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="anticheat"><i data-lucide="shield-alert"></i><span>反作弊</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="vault"><i data-lucide="archive-restore"></i><span>保险库</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="map-reset"><i data-lucide="map-pinned"></i><span>刷新</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
   </nav>
   <dialog class="admin-setup-dialog" id="adminSetupDialog">
     <form id="adminSetupForm">
@@ -545,6 +659,6 @@
   <dialog class="help-dialog" id="helpDialog"><div class="help-dialog-head"><div><p class="eyebrow">当前服务器 B42.20 内置 help</p><h2 id="helpTitle">命令帮助</h2></div><button class="icon-button" id="closeHelp" type="button" title="关闭"><i data-lucide="x"></i></button></div><div id="helpBody" class="help-body"></div><div class="help-actions"><a class="secondary-button" href="https://pzwiki.net/wiki/Admin_commands" target="_blank" rel="noreferrer">PZ Wiki 命令资料</a><button class="secondary-button" id="queryHelp" type="button"><i data-lucide="terminal"></i>向服务器查询 help</button></div></dialog>
   <script src="/lucide.min.js?v=20260810-2"></script>
   <script src="/qrcode.min.js?v=20260810-2"></script>
-  <script src="/app.js?v=20260810-2"></script>
+  <script src="/app.js?v=20260822-1"></script>
 </body>
 </html>

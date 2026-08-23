@@ -1,0 +1,16 @@
+{
+  "id": "OrangeAntiCheat",
+  "name": "OrangeAntiCheat 服务端命令防护",
+  "version": "2.1.0",
+  "scope": "runtime",
+  "defaultEnabled": true,
+  "target": "server-patches\\OrangeAntiCheat-agent.jar",
+  "protectedCommands": 14,
+  "sourceFiles": [
+    "patches\\OrangeAntiCheat\\OrangeAntiCheat-agent.jar",
+    "patches\\OrangeAntiCheat\\src\\OrangeAntiCheatAgent.java",
+    "patches\\OrangeAntiCheat\\src\\OrangeAntiCheatRuntime.java",
+    "patches\\OrangeAntiCheat\\manifest.json",
+    "patches\\OrangeAntiCheat\\README.zh-CN.md"
+  ]
+}
