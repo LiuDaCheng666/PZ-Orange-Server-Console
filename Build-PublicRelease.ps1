@@ -1,6 +1,6 @@
 ﻿param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "dist-public"),
-    [string]$Version = "0.9.6",
+    [string]$Version = "0.9.7",
     [string]$PackageName
 )
 
@@ -67,6 +67,7 @@ function Assert-PublicPackageContents {
         "broadcast-schedules.json",
         "maintenance-schedules.json",
         "server-patches.json",
+        "anticheat-review-state.json",
         "panel-state.json",
         "request-state.json",
         "手机访问地址.txt"
@@ -75,7 +76,8 @@ function Assert-PublicPackageContents {
         $_.Name -in $forbiddenNames -or
         $_.Name -like "*.bak" -or
         $_.Name -like "*.log" -or
-        $_.Name -like "*.tmp"
+        $_.Name -like "*.tmp" -or
+        $_.FullName.StartsWith((Join-Path $Root "disaster-center") + '\', [StringComparison]::OrdinalIgnoreCase)
     })
     if ($forbiddenFiles.Count -gt 0) {
         throw "公开包中发现运行态或敏感文件：$(@($forbiddenFiles.FullName) -join ', ')"
@@ -159,6 +161,7 @@ $rootFiles = @(
     "Test-ManagedLifecycle.ps1",
     "Test-ManagedStartupSerialization.ps1",
     "Test-MaintenanceRestartState.ps1",
+    "Test-LifecycleRecovery.ps1",
     "Test-JvmGcTelemetry.ps1",
     "Test-StockEventBridge.ps1",
     "Test-AIKnowledgeBuilder.ps1",
@@ -171,6 +174,7 @@ $rootFiles = @(
     "Test-PZPlayerDataManager.js",
     "Test-AdminItemVaultBackend.ps1",
     "Test-AdminItemVaultBrowser.js",
+    "Test-DisasterCenterBackend.ps1",
     "Test-PlayerAuditAI.ps1",
     "Test-PlayerAuditAIRetry.ps1",
     "CHANGELOG.md",
@@ -187,6 +191,8 @@ Copy-RequiredFile -Name "README-GitHub.zh-CN.md" -DestinationName "README.md"
 Copy-RequiredFile -Name "managed\Run-ManagedPZHost.ps1"
 Copy-RequiredFile -Name "managed\Invoke-ManagedPZLifecycle.ps1"
 Copy-RequiredDirectory -Name "patches"
+Get-ChildItem -LiteralPath (Join-Path $stage "patches") -Recurse -Force -File -Filter "*.bak" |
+    Remove-Item -Force
 foreach ($name in @(
     "Invoke-PZSelectiveWorldReset.ps1",
     "pz_selective_world_reset.py",

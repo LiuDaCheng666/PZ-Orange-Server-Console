@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>PZ橙子服务器控制台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/app.css?v=20260821-5">
+  <link rel="stylesheet" href="/app.css?v=20260823-mobile-menu-1">
 </head>
 <body>
   <div class="auth-screen" id="authScreen">
@@ -39,6 +39,7 @@
         <button class="nav-item" data-view="anticheat"><i data-lucide="shield-alert"></i><span>反作弊</span></button>
         <button class="nav-item" data-view="items"><i data-lucide="package-search"></i><span>物品库</span></button>
         <button class="nav-item" data-view="vault"><i data-lucide="archive-restore"></i><span>物品保险库</span></button>
+        <button class="nav-item" data-view="disasters"><i data-lucide="cloud-lightning"></i><span>灾难中心</span></button>
         <button class="nav-item" data-view="world"><i data-lucide="cloud-sun"></i><span>世界控制</span></button>
         <button class="nav-item" data-view="commands"><i data-lucide="panel-top"></i><span>命令中心</span></button>
         <button class="nav-item" data-view="system"><i data-lucide="activity"></i><span>本机监控</span></button>
@@ -337,6 +338,43 @@
           <div class="section-heading"><div><p class="eyebrow">最近 100 条</p><h2>发放回执</h2></div></div>
           <div class="vault-history-head"><span>状态</span><span>目标</span><span>服务器</span><span>数量</span><span>更新时间</span><span>详情</span></div>
           <div id="vaultGrantHistory"><p class="empty-state compact">尚无保险库发放记录。</p></div>
+        </section>
+      </section>
+
+      <section class="view" id="view-disasters">
+        <div class="section-heading page-heading"><div><p class="eyebrow">橙子社区经济 · 多服联动</p><h2>灾难与全服事件中心</h2></div><div class="heading-actions"><span class="sample-time" id="disasterUpdatedAt">尚未同步</span><button class="secondary-button" id="refreshDisasters" type="button"><i data-lucide="refresh-cw"></i>刷新状态</button></div></div>
+        <div class="disaster-summary">
+          <div><span>进行中事件</span><strong id="disasterActiveCount">--</strong><small>兼容效果可同时运行</small></div>
+          <div><span>本轮祈愿总额</span><strong id="disasterPrayerTotal">--</strong><small>独立纪念记录，不进入福利社</small></div>
+          <div><span>服务器世界时间</span><strong id="disasterWorldHour">--</strong><small id="disasterRuntimeState">等待 Mod 回传</small></div>
+        </div>
+        <section class="disaster-active-band">
+          <div class="section-heading"><div><p class="eyebrow">当前服务器</p><h2>正在运行</h2></div><span class="badge neutral" id="disasterCompatibility">同效果通道互斥</span></div>
+          <div class="disaster-active-list" id="disasterActiveList"><p class="empty-state compact">正在读取运行状态...</p></div>
+        </section>
+        <div class="disaster-center-layout">
+          <section class="disaster-template-pane">
+            <header><div><p class="eyebrow">所有服务器通用</p><h2>灾难模板</h2></div><button class="secondary-button" id="newDisasterTemplate" type="button"><i data-lucide="plus"></i>新建模板</button></header>
+            <div class="disaster-template-list" id="disasterTemplateList"><p class="empty-state compact">尚无灾难模板。</p></div>
+          </section>
+          <form class="disaster-template-form" id="disasterTemplateForm">
+            <input name="id" type="hidden">
+            <div class="section-heading"><div><p class="eyebrow">模板参数</p><h2 id="disasterTemplateTitle">新建灾难模板</h2></div><span class="badge neutral" id="disasterTemplateLane">效果通道</span></div>
+            <div class="disaster-template-basics">
+              <label>模板名称<input name="name" maxlength="64" placeholder="例如：严酷核冬天" required></label>
+              <label>事件类型<select name="kind" required></select></label>
+              <label>持续时间（游戏日）<input name="durationDays" type="number" min="0.25" max="30" step="0.25" value="3" required></label>
+            </div>
+            <div class="disaster-parameter-grid" id="disasterParameterGrid"></div>
+            <p class="disaster-form-note" id="disasterFormNote">保存为通用模板后，可用于任意服务器并加入各自队列。</p>
+            <div class="disaster-template-actions"><button class="danger-button" id="deleteDisasterTemplate" type="button"><i data-lucide="trash-2"></i>删除模板</button><button class="secondary-button" id="queueDisasterTemplate" type="button"><i data-lucide="calendar-plus"></i>加入当前服队列</button><button class="secondary-button" id="startDisasterTemplate" type="button"><i data-lucide="play"></i>立即启用</button><button class="primary-button" type="submit"><i data-lucide="save"></i>保存模板</button></div>
+            <label class="disaster-schedule-field">队列计划时间（本机时间）<input id="disasterScheduledAt" type="datetime-local" step="60"></label>
+          </form>
+        </div>
+        <section class="disaster-queue-section">
+          <div class="section-heading"><div><p class="eyebrow">当前服务器</p><h2>灾难队列与请求回执</h2></div></div>
+          <div class="disaster-queue-head"><span>状态</span><span>模板 / 操作</span><span>计划或提交时间</span><span>结果</span><span></span></div>
+          <div id="disasterQueueList"><p class="empty-state compact">当前没有排队项目。</p></div>
         </section>
       </section>
 
@@ -642,8 +680,14 @@
     </main>
   </div>
 
-  <nav class="mobile-nav">
-    <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="anticheat"><i data-lucide="shield-alert"></i><span>反作弊</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="vault"><i data-lucide="archive-restore"></i><span>保险库</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="map-reset"><i data-lucide="map-pinned"></i><span>刷新</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
+  <nav class="mobile-nav" id="mobileNav" aria-label="手机功能导航">
+    <div class="mobile-nav-menu" id="mobileNavMenu" aria-hidden="true">
+      <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="anticheat"><i data-lucide="shield-alert"></i><span>反作弊</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="vault"><i data-lucide="archive-restore"></i><span>保险库</span></button><button data-view="disasters"><i data-lucide="cloud-lightning"></i><span>灾难</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="map-reset"><i data-lucide="map-pinned"></i><span>刷新</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
+    </div>
+    <div class="mobile-nav-bar">
+      <div class="mobile-current-view"><small>当前页面</small><strong id="mobileCurrentTitle">服务器总览</strong></div>
+      <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-controls="mobileNavMenu" aria-expanded="false"><i data-lucide="menu"></i><span>功能</span></button>
+    </div>
   </nav>
   <dialog class="admin-setup-dialog" id="adminSetupDialog">
     <form id="adminSetupForm">
@@ -659,6 +703,6 @@
   <dialog class="help-dialog" id="helpDialog"><div class="help-dialog-head"><div><p class="eyebrow">当前服务器 B42.20 内置 help</p><h2 id="helpTitle">命令帮助</h2></div><button class="icon-button" id="closeHelp" type="button" title="关闭"><i data-lucide="x"></i></button></div><div id="helpBody" class="help-body"></div><div class="help-actions"><a class="secondary-button" href="https://pzwiki.net/wiki/Admin_commands" target="_blank" rel="noreferrer">PZ Wiki 命令资料</a><button class="secondary-button" id="queryHelp" type="button"><i data-lucide="terminal"></i>向服务器查询 help</button></div></dialog>
   <script src="/lucide.min.js?v=20260810-2"></script>
   <script src="/qrcode.min.js?v=20260810-2"></script>
-  <script src="/app.js?v=20260822-1"></script>
+  <script src="/app.js?v=20260823-lifecycle-recovery-1"></script>
 </body>
 </html>

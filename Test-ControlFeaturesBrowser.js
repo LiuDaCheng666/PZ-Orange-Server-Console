@@ -231,6 +231,13 @@ async function layout(page, selectors) {
   }, selectors);
 }
 
+async function clickMobileView(page, view) {
+  await page.click('#mobileMenuToggle');
+  await page.waitForFunction(() => document.querySelector('#mobileNav').classList.contains('expanded'));
+  await page.click(`.mobile-nav [data-view="${view}"]`);
+  await page.waitForFunction(view => document.querySelector(`#view-${view}`).classList.contains('active'), view);
+}
+
 (async () => {
   await new Promise((resolve, reject) => { testServer.once('error', reject); testServer.listen(0, '127.0.0.1', resolve); });
   const port = testServer.address().port;
@@ -371,7 +378,7 @@ async function layout(page, selectors) {
     const mobileChatLayout = await layout(mobile, ['.broadcast-scheduler', '#broadcastScheduleForm', '#broadcastScheduleList']);
     await mobile.screenshot({ path: path.join(__dirname, 'pz-panel-control-features-mobile.png'), fullPage: true });
 
-    await mobile.click('.mobile-nav [data-view="players"]');
+    await clickMobileView(mobile, 'players');
     await mobile.waitForFunction(() => document.querySelectorAll('#grantForm .online-player-select option').length === 3);
     await mobile.click('.player-history summary');
     await mobile.locator('.player-history .player-table-row').nth(30).scrollIntoViewIfNeeded();
@@ -383,15 +390,15 @@ async function layout(page, selectors) {
     await mobile.selectOption('#grantForm select[name="notificationChannel"]', 'both');
     const mobileItemGrantLayout = await layout(mobile, ['#grantForm', '.item-grant-notification']);
 
-    await mobile.click('.mobile-nav [data-view="anticheat"]');
+    await clickMobileView(mobile, 'anticheat');
     await mobile.waitForFunction(() => document.querySelectorAll('.anticheat-player-row').length === 2);
     await mobile.locator('.anticheat-player-row').filter({ hasText: 'Alice' }).click();
     await mobile.click('#analyzeAntiCheatPlayer');
     await mobile.waitForFunction(() => document.querySelector('.anticheat-ai-report.completed')?.textContent.includes('需要观察'));
-    const mobileAntiCheatLayout = await layout(mobile, ['.mobile-nav', '.mobile-nav [data-view="anticheat"]', '.server-patch-disclosure', '.anticheat-signal-guide', '.anticheat-layout', '.anticheat-player-list', '.anticheat-detail', '.anticheat-ai-report', '.anticheat-events']);
+    const mobileAntiCheatLayout = await layout(mobile, ['.mobile-nav', '#mobileMenuToggle', '.server-patch-disclosure', '.anticheat-signal-guide', '.anticheat-layout', '.anticheat-player-list', '.anticheat-detail', '.anticheat-ai-report', '.anticheat-events']);
     await mobile.screenshot({ path: path.join(__dirname, 'pz-panel-player-ai-audit-mobile.png'), fullPage: true });
 
-    await mobile.click('.mobile-nav [data-view="ai"]');
+    await clickMobileView(mobile, 'ai');
     await mobile.waitForFunction(() => document.querySelector('#aiPolicyList').textContent.includes('76561198000000001'));
     const mobileAccess = await mobile.evaluate(() => ({
       aiVisible: !document.querySelector('.mobile-nav [data-view="ai"]').hidden,
@@ -403,7 +410,7 @@ async function layout(page, selectors) {
     const mobileAiLayout = await layout(mobile, ['#view-ai .page-heading', '#view-ai .heading-actions', '.ai-layout', '.ai-bridge-log', '.ai-policy-section', '#aiPolicyForm', '#aiPolicyList']);
     await mobile.screenshot({ path: path.join(__dirname, 'pz-panel-ai-policy-mobile.png'), fullPage: true });
 
-    await mobile.click('.mobile-nav [data-view="maintenance"]');
+    await clickMobileView(mobile, 'maintenance');
     await mobile.waitForFunction(() => document.querySelectorAll('.execution-history-row').length === 2);
     await mobile.locator('.execution-history-row').first().click();
     const mobileHistoryLayout = await layout(mobile, ['.execution-history', '#executionHistoryList']);
@@ -419,7 +426,7 @@ async function layout(page, selectors) {
     if (!requests.runNow || requests.runNow.id !== 'schedule-1' || history.length !== 2) process.exitCode = 5;
     if (!requests.itemGrant || requests.itemGrant.notificationChannel !== 'both' || requests.itemGrant.notificationDuration !== 25 || requests.itemGrant.usernames[0] !== 'Alice' || requests.itemGrant.count !== 2 || !/^[a-f0-9]{32}$/.test(requests.itemGrant.submissionId)) process.exitCode = 7;
     if (requests.itemResultQueries !== 0 || requests.itemSubmissionQueries !== 0) process.exitCode = 10;
-    if (!mobileAccess.aiVisible || !mobileAccess.antiCheatVisible || mobileAccess.pageCount !== 14 || !mobileAccess.usersHidden || mobileAccess.activeView !== 'view-ai') process.exitCode = 8;
+    if (!mobileAccess.aiVisible || !mobileAccess.antiCheatVisible || mobileAccess.pageCount !== 15 || !mobileAccess.usersHidden || mobileAccess.activeView !== 'view-ai') process.exitCode = 8;
     if (!requests.aiRuntime || requests.aiRuntime.action !== 'restart') process.exitCode = 9;
     if (!requests.playerAudit || requests.playerAudit.serverId !== 'mock' || requests.playerAudit.steamId !== '76561198000000001' || requests.playerAudit.username !== 'Alice' || requests.playerAudit.hours !== 168) process.exitCode = 15;
     if (!requests.banSync || requests.banSync.sourceServerId !== 'mock' || requests.banSync.targetServerIds[0] !== 'server2' || requests.banSync.confirm !== 'SYNC_BANNED_STEAM_IDS') process.exitCode = 16;

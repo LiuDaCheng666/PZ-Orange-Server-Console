@@ -1,34 +1,43 @@
-# OrangeAntiCheat 2.1.0
+# OrangeAntiCheat 2.4.1 Java Agent
 
-这是 Web 面板内置的服务端命令鉴权 Java Agent，不属于创意工坊 Mod，也不要求
-客户端订阅。它在原版 `OnClientCommand` 进入 Lua 事件处理器之前检查 14 个危险
-命令，不修改 `media/lua/server/ClientCommands.lua`，因此不会造成客户端文件校验
-不一致。
+本补丁在服务端 Java 层拦截原版 `OnClientCommand` 事件中的 14 个危险命令路径。
+它不修改 `media/lua/server/ClientCommands.lua`，不会造成客户端 Lua 校验不一致，
+也不要求玩家安装 Mod。
 
-面板的“挂载到全部服务器”开关负责给每个托管配置增删以下 JVM 参数：
+## 防护范围
+
+- 校验所有带非空 `extra` 的 `ItemTransaction`，包括同容器变换和背包丢到地面的
+  跨容器交易。客户端只能换成原物品
+  `ClothingItemExtra` 明确列出的真实物品类型；利用临时载体把物品替换为水晶、武器
+  或其他任意类型时，服务端会拒绝交易。
+- 对没有 `ClothingItemExtra` 白名单的普通物品，只允许保持原类型；客户端不能借背包
+  内变换或丢到地面的 `extra` 字段把锤子、衣物或临时载体变成金锭等任意注册物品。
+- 变换载体必须真实存在于来源容器，且来源必须是发包玩家的直接背包或嵌套背包。
+- 非法替换会输出 `blocked_item_transform`，包含账号、SteamID、载体、目标物品和坐标，
+  并用 `route=same_container|cross_container` 标记路径，供 Web 反作弊作为明确高危证据展示。
+- 审计客户端回写的 `PlayerHealthPacket` 与 `PlayerDamagePacket`。单次身体部位生命增加超过
+  1 点、NaN/Infinity 或目标不属于发包连接时，输出 `observed_health_sync`。
+- 健康同步当前仅记录，不拒绝数据包、不恢复旧生命值，也不修改伤口状态。自然恢复和治疗仍可能
+  产生记录，因此这些事件只作为人工复核线索，不能单独定性或自动处罚。
+- 管理员连接和服务端已授权的健康面板操作不产生健康异常记录。
+
+- 普通玩家不能调用容器强制刷新、点火、烟雾、爆炸和调试液体命令。
+- 普通玩家不能直接修改伤势、体重、侵蚀或触发调试雷暴。
+- 车内睡眠和丢下重物只能以玩家自己的 OnlineID 为目标。
+- 具有 `UseDebugContextMenu` 或 `UseHealthCheat` 能力的管理员仍可正常使用对应功能。
+- 管理员修改其他玩家健康时，服务端签发 15 秒、单次使用且严格匹配目标、身体部位
+  和动作的一次性授权；解决合法回传被误拦，同时继续阻断伪造、过期和重放请求。
+
+## 运行方式
 
 ```text
 -javaagent:server-patches/OrangeAntiCheat-agent.jar
 ```
 
-启用时，面板会先把内置并经过校验的 JAR 自动部署到各服务器运行目录；创建新的
-托管服务器配置时也会自动补齐该文件，不需要再手工复制补丁。
+Web 面板的 OrangeAntiCheat 挂载开关统一管理三个服务器的启动参数。切换后需要完整
+重启相应服务器。补丁不写世界、角色数据库或 ModData，移除启动参数即可回退。
 
-使用同一运行目录的多个服务器可以共享一个 Agent JAR，但是否已经装入当前 Java
-进程仍会按服务器分别显示。切换开关后，运行中的服务器必须完整重启才改变行为。
-
-普通玩家调用容器强制刷新、点火、烟雾、爆炸、调试液体、健康作弊、体重修改、
-侵蚀关闭或雷暴命令时会被拒绝；车内睡眠和丢下重物只能以本人 OnlineID 为目标。
-具有 `UseDebugContextMenu` 或 `UseHealthCheat` 能力的管理员仍可使用对应命令。
-
-管理员修改其他玩家健康时，Agent 会签发一个有效期 15 秒、只能使用一次，并严格
-匹配目标 OnlineID、身体部位和动作的一次性授权。目标客户端的原版健康回传因此可
-正常通过；无授权、过期、目标不符或重放的回传仍会被拒绝并记录。Web 审计会把已
-配对回传标为“管理员授权操作”，保留记录但不对目标玩家增加风险分。
-
-Agent 只支持经过 SHA-256 审计的 B42.20.2 `LuaEventManager.class`。游戏更新改变该类
-时会输出 `guard_disabled` 并保持原版行为，不会盲目注入。补丁不写世界存档、角色
-数据库或 ModData，移除启动参数并重启即可回退。
-
-被拒绝的调用继续输出 `[OrangeAntiCheat] event=blocked_client_command` 结构化日志，
-Web 反作弊、玩家审计、SteamID 封禁和 PZAI 手动诊断页面可以继续使用这些证据。
+补丁只支持经过 SHA-256 审计的 `LuaEventManager.class`、`TransactionManager.class`、
+`PlayerHealthPacket.class` 和 `PlayerDamagePacket.class`。
+游戏更新后若类文件变化，Agent 会拒绝修改对应功能并输出 `guard_disabled`；其余服务端
+继续使用原版行为，避免盲目注入。

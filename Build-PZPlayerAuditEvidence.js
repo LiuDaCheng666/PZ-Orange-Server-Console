@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const dataRoot = path.resolve(process.argv[2] || '');
 const runtimeRoot = path.resolve(process.argv[3] || '');
@@ -9,6 +10,8 @@ const serverName = String(process.argv[4] || '').trim();
 const hours = Math.min(720, Math.max(1, Number(process.argv[5] || 168)));
 const requestedSteamId = String(process.argv[6] || '').trim();
 const requestedUsername = String(process.argv[7] || '').trim();
+const reviewStatePath = process.argv[8] ? path.resolve(process.argv[8]) : '';
+const serverId = String(process.argv[9] || '');
 const cutoff = Date.now() - hours * 3600000;
 const logsRoot = path.join(dataRoot, 'Logs');
 const consoleLogPath = path.join(dataRoot, 'server-console.txt');
@@ -16,6 +19,91 @@ const modDataPath = path.join(dataRoot, 'Saves', 'Multiplayer', serverName, 'glo
 
 if (!dataRoot || !runtimeRoot || !serverName) throw new Error('Missing server path arguments.');
 if (!/^7656119\d{10}$/.test(requestedSteamId) && !requestedUsername) throw new Error('SteamID or username is required.');
+
+const protectedCommands = new Map([
+  ['object.addFireOnSquare', 'debug-fire'], ['object.addSmokeOnSquare', 'debug-smoke'],
+  ['object.addExplosionOnSquare', 'debug-explosion'], ['object.addFluidDebug', 'debug-fluid'],
+  ['object.clearContainerExplore', 'container-refill'], ['object.addWaterContainer', 'debug-fluid-component'],
+  ['object.removeFluidContainer', 'debug-fluid-component'], ['player.onHealthCheatCurrentPlayer', 'health-cheat'],
+  ['player.setWeight', 'weight-cheat'], ['erosion.disableForSquare', 'erosion-cheat'],
+  ['event.thunder', 'debug-thunder'],
+]);
+const reviewedThrough = new Map();
+
+function loadReviewState() {
+  if (!reviewStatePath || !serverId || !fs.existsSync(reviewStatePath)) return;
+  let state;
+  try { state = JSON.parse(fs.readFileSync(reviewStatePath, 'utf8')); } catch { return; }
+  for (const record of Array.isArray(state?.records) ? state.records : []) {
+    if (String(record.serverId || '') !== serverId || !/^[a-f0-9]{64}$/i.test(String(record.reviewKey || ''))) continue;
+    const time = Date.parse(String(record.dismissedThrough || ''));
+    if (!Number.isFinite(time)) continue;
+    const key = String(record.reviewKey).toLowerCase();
+    reviewedThrough.set(key, Math.max(reviewedThrough.get(key) || 0, time));
+  }
+}
+
+function parseKeyValues(text) {
+  const result = {};
+  for (const match of text.matchAll(/([A-Za-z][A-Za-z0-9]*)=([^\s]+)/g)) result[match[1]] = match[2];
+  return result;
+}
+
+function eventReviewKey(event) {
+  const subject = /^7656119\d{10}$/.test(String(event.steamId || ''))
+    ? String(event.steamId) : `user:${String(event.username || 'unknown').toLowerCase()}`;
+  const signature = [
+    subject, event.type || '', event.code || '', event.command || '', event.reason || '',
+    event.sourceType || '', event.targetType || '', event.packet || '',
+  ].map(value => String(value).trim().toLowerCase()).join('|');
+  return crypto.createHash('sha256').update(signature, 'utf8').digest('hex');
+}
+
+function reviewEventForLine(line) {
+  if (line.includes('[OrangeAntiCheat]')) {
+    const values = parseKeyValues(line);
+    const username = String(values.username || requestedUsername || 'unknown').replace(/_/g, ' ');
+    const steamId = /^7656119\d{10}$/.test(values.steamId || '') ? values.steamId : requestedSteamId;
+    if (line.includes('event=observed_health_sync')) return {
+      steamId, username, type: 'observed-health-sync', code: 'health-sync-observed',
+      command: values.packet || 'PlayerHealthSync', reason: values.reason || '', packet: values.packet || '',
+    };
+    if (line.includes('event=blocked_health_overwrite')) return {
+      steamId, username, type: 'blocked-health-overwrite', code: 'health-overwrite-blocked',
+      command: values.packet || 'PlayerHealthSync', reason: values.reason || '', packet: values.packet || '',
+    };
+    if (line.includes('event=blocked_item_transform')) return {
+      steamId, username, type: 'blocked-item-transform', code: 'item-transform-blocked',
+      command: `${values.sourceType || 'unknown'} -> ${values.targetType || 'unknown'}`,
+      sourceType: values.sourceType || 'unknown', targetType: values.targetType || 'unknown',
+    };
+    if (line.includes('event=blocked_client_command')) return {
+      steamId, username, type: 'blocked-command', code: 'server-blocked',
+      command: `${values.module || '?'}.${values.command || '?'}`,
+    };
+  }
+  const command = /^\[[^\]]+\]\s+(7656119\d{10})\s+"([^"]+)"\s+([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s+@/.exec(line);
+  if (command) {
+    const fullCommand = `${command[3]}.${command[4]}`;
+    const code = protectedCommands.get(fullCommand);
+    if (code) return { steamId: command[1], username: command[2], type: 'protected-command', code, command: fullCommand };
+  }
+  const native = /Anti-cheat="([^"]+)"[^\n]*connection="([^"]+)"[^\n]*reason="([^"]*)"[^\n]*action="([^"]+)"/.exec(line);
+  if (native) return { steamId: requestedSteamId, username: native[2], type: 'native-anticheat', code: native[1], command: '' };
+  const checksum = /user (.+?) will be kicked[^\n]*because Lua\/script checksums do not match/i.exec(line);
+  if (checksum) return { steamId: requestedSteamId, username: checksum[1].trim(), type: 'checksum', code: 'lua-checksum', command: '' };
+  return null;
+}
+
+function isReviewedLine(line, time) {
+  if (!time || !reviewedThrough.size) return false;
+  const event = reviewEventForLine(line);
+  if (!event) return false;
+  const dismissedThrough = reviewedThrough.get(eventReviewKey(event));
+  return Boolean(dismissedThrough && new Date(time).getTime() <= dismissedThrough);
+}
+
+loadReviewState();
 
 function walk(root, result = []) {
   if (!fs.existsSync(root)) return result;
@@ -121,6 +209,7 @@ function readLogEvidence() {
   const lifestyle = [];
   const connectionHits = [];
   const relevantDebug = [];
+  let reviewedNoiseEvents = 0;
   let firstSeen = '';
   let lastSeen = '';
 
@@ -153,6 +242,7 @@ function readLogEvidence() {
         if (!lastSeen || parsed.iso > lastSeen) lastSeen = parsed.iso;
       }
       const row = { time: parsed.iso, source: source(file, index + 1), text: compactLine(line) };
+      if (isReviewedLine(line, parsed.iso)) { reviewedNoiseEvents += 1; continue; }
       if (/_connections\.txt$/i.test(name)) { categoryCounts.connections += 1; keep(connectionHits, row, 30); }
       else if (/_admin\.txt$/i.test(name)) { categoryCounts.admin += 1; keep(adminHits, row); }
       else if (/_item\.txt$/i.test(name)) { categoryCounts.item += 1; keep(itemHits, row); }
@@ -162,7 +252,7 @@ function readLogEvidence() {
         categoryCounts.command += 1;
         const command = /"[^"]+"\s+([A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+)\s+@/.exec(line);
         if (command) commandCounts.set(command[1], (commandCounts.get(command[1]) || 0) + 1);
-        if (/OrangeAntiCheat|blocked_client_command/i.test(line)) keepProtected(row);
+        if (/OrangeAntiCheat|blocked_client_command|blocked_item_transform|blocked_health_overwrite|observed_health_sync/i.test(line)) keepProtected(row);
         else if (/addFireOnSquare|addSmokeOnSquare|addExplosionOnSquare|addFluidDebug|clearContainerExplore|addWaterContainer|removeFluidContainer|onHealthCheat|setWeight|disableForSquare|event\.thunder/i.test(line)) {
           if (isPrivilegedIdentity()) keep(authorizedAdminActions, { ...row, classification: 'authorized-admin-action', riskPoints: 0 });
           else keepProtected(row);
@@ -194,7 +284,7 @@ function readLogEvidence() {
         }
       } else if (/^server-console\.txt$/i.test(name)) {
         categoryCounts.agent += 1;
-        if (/\[OrangeAntiCheat\][^\r\n]*event=blocked_client_command/i.test(line)) keepProtected(row);
+        if (/\[OrangeAntiCheat\][^\r\n]*event=(?:blocked_client_command|blocked_item_transform|blocked_health_overwrite|observed_health_sync)/i.test(line)) keepProtected(row);
       } else categoryCounts.user += 1;
     }
   }
@@ -216,7 +306,7 @@ function readLogEvidence() {
 
   return {
     identity: { steamIds: [...steamIds], usernames: [...names], maskedIps: [...ips], roles: [...roles], adminPower: isPrivilegedIdentity(), banned: banned.size > 0, firstSeen, lastSeen },
-    logSummary: { filesScanned: files.length, categoryCounts },
+    logSummary: { filesScanned: files.length, categoryCounts, reviewedNoiseEvents },
     commandSummary: [...commandCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([command, count]) => ({ command, count })),
     nativeAntiCheat, nativeAntiCheatSummary: nativeAntiCheatCounts,
     speedNoise: { count: nativeAntiCheatCounts.speedNoise, samples: speedNoiseSamples },

@@ -1,14 +1,23 @@
 package cn.zombiecommunity.orangeanticheat;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import zombie.characters.Capability;
 import zombie.characters.IsoPlayer;
+import zombie.characters.BodyDamage.BodyDamage;
+import zombie.characters.BodyDamage.BodyPart;
+import zombie.inventory.InventoryItem;
+import zombie.inventory.ItemContainer;
+import zombie.network.GameServer;
+import zombie.network.IConnection;
+import zombie.network.fields.character.PlayerID;
 
 public final class OrangeAntiCheatRuntime {
-    private static final String VERSION = "2.1.0";
+    private static final String VERSION = "2.4.1";
     private static final String EVENT = "OnClientCommand";
     private static final String OWN_PLAYER_ONLY = "OwnPlayerOnly";
     private static final String HEALTH_REQUEST = "player.onHealthCheat";
@@ -17,6 +26,13 @@ public final class OrangeAntiCheatRuntime {
     private static final int MAX_HEALTH_RELAY_TICKETS_PER_KEY = 8;
     private static final ConcurrentHashMap<String, ConcurrentLinkedQueue<Long>> HEALTH_RELAY_TICKETS =
             new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Short, Long> HEALTH_SYNC_AUTHORIZATIONS =
+            new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Long, Long> HEALTH_SYNC_LOG_TIMES =
+            new ConcurrentHashMap<>();
+    private static final ThreadLocal<HealthSnapshot> HEALTH_SNAPSHOT = new ThreadLocal<>();
+    private static final float HEALTH_INCREASE_EPSILON = 1.0f;
+    private static final long HEALTH_LOG_INTERVAL_NANOS = 5_000_000_000L;
     private static final Map<String, Capability> ADMIN_COMMANDS = Map.ofEntries(
             Map.entry("object.addFireOnSquare", Capability.UseDebugContextMenu),
             Map.entry("object.addSmokeOnSquare", Capability.UseDebugContextMenu),
@@ -124,6 +140,203 @@ public final class OrangeAntiCheatRuntime {
         }
     }
 
+    public static boolean shouldRejectItemTransform(
+            int itemId,
+            Object sourceValue,
+            Object destinationValue,
+            String requestedType,
+            Object playerValue) {
+        if (requestedType == null || requestedType.isBlank()) {
+            return false;
+        }
+        String route = sourceValue == destinationValue ? "same_container" : "cross_container";
+        IsoPlayer player = playerValue instanceof IsoPlayer ? (IsoPlayer) playerValue : null;
+        try {
+            if (!(sourceValue instanceof ItemContainer source)) {
+                logBlockedItemTransform(
+                        player, null, requestedType, itemId, 0, route, "missing_source_container");
+                return true;
+            }
+            if (player == null) {
+                logBlockedItemTransform(
+                        null, null, requestedType, itemId, 0, route, "missing_player");
+                return true;
+            }
+
+            InventoryItem carrier = source.getItemWithID(itemId);
+            if (carrier == null) {
+                logBlockedItemTransform(
+                        player, null, requestedType, itemId, 0, route, "carrier_not_in_source");
+                return true;
+            }
+
+            boolean sourceOwned = source.isInCharacterInventory(player);
+            List<String> allowedTargets = carrier.getClothingItemExtra();
+            if (!shouldRejectItemTransformValues(
+                    sourceOwned,
+                    true,
+                    allowedTargets,
+                    carrier.getModule(),
+                    carrier.getFullType(),
+                    requestedType)) {
+                return false;
+            }
+
+            logBlockedItemTransform(
+                    player,
+                    carrier,
+                    requestedType,
+                    itemId,
+                    allowedTargets == null ? 0 : allowedTargets.size(),
+                    route,
+                    sourceOwned ? "target_not_in_clothing_extra_options" : "source_not_owned_by_player");
+            return true;
+        } catch (Throwable failure) {
+            logBlockedItemTransform(
+                    player,
+                    null,
+                    requestedType,
+                    itemId,
+                    0,
+                    route,
+                    "guard_error_" + token(failure.getClass().getSimpleName()));
+            return true;
+        }
+    }
+
+    public static boolean beforeHealthSync(Object packetValue, Object connectionValue) {
+        HEALTH_SNAPSHOT.remove();
+        if (!GameServer.server) {
+            return false;
+        }
+        if (!(packetValue instanceof PlayerID packet)
+                || !(connectionValue instanceof IConnection connection)) {
+            return false;
+        }
+
+        IsoPlayer player = packet.getPlayer();
+        if (player == null) {
+            return false;
+        }
+        if (!connection.hasPlayer(player.getOnlineID())) {
+            logObservedHealthSync(player, packetValue, 0, 0.0f, "target_not_owned_by_connection");
+            return false;
+        }
+        if (connection.getRole() != null
+                && connection.getRole().hasCapability(Capability.UseHealthCheat)) {
+            return false;
+        }
+        if (hasHealthSyncAuthorization(player.getOnlineID())) {
+            return false;
+        }
+
+        BodyDamage damage = player.getBodyDamage();
+        if (damage == null) {
+            return false;
+        }
+        ArrayList<BodyPart> parts = damage.getBodyParts();
+        float[] health = new float[parts.size()];
+        for (int index = 0; index < health.length; index++) {
+            health[index] = parts.get(index).getHealth();
+        }
+        HEALTH_SNAPSHOT.set(new HealthSnapshot(player, health));
+        return false;
+    }
+
+    public static void afterHealthSync(Object packetValue) {
+        HealthSnapshot snapshot = HEALTH_SNAPSHOT.get();
+        HEALTH_SNAPSHOT.remove();
+        if (snapshot == null || !GameServer.server) {
+            return;
+        }
+        try {
+            BodyDamage damage = snapshot.player.getBodyDamage();
+            if (damage == null) {
+                return;
+            }
+            ArrayList<BodyPart> parts = damage.getBodyParts();
+            int count = Math.min(parts.size(), snapshot.health.length);
+            int increasedParts = 0;
+            float maxIncrease = 0.0f;
+            for (int index = 0; index < count; index++) {
+                BodyPart part = parts.get(index);
+                float before = snapshot.health[index];
+                float after = part.getHealth();
+                if (!isSuspiciousHealthIncrease(before, after)) {
+                    continue;
+                }
+                increasedParts++;
+                maxIncrease = Math.max(maxIncrease, Float.isFinite(after) ? after - before : Float.POSITIVE_INFINITY);
+            }
+            if (increasedParts > 0) {
+                logObservedHealthSync(
+                        snapshot.player,
+                        packetValue,
+                        increasedParts,
+                        maxIncrease,
+                        Float.isFinite(maxIncrease) ? "client_health_increase" : "non_finite_health");
+            }
+        } catch (Throwable failure) {
+            logObservedHealthSync(
+                    snapshot.player,
+                    packetValue,
+                    0,
+                    0.0f,
+                    "guard_error_" + token(failure.getClass().getSimpleName()));
+        }
+    }
+
+    static boolean isSuspiciousHealthIncrease(float before, float after) {
+        if (!Float.isFinite(after)) {
+            return true;
+        }
+        return Float.isFinite(before) && after > before + HEALTH_INCREASE_EPSILON;
+    }
+
+    static boolean shouldRejectItemTransformValues(
+            boolean sourceOwned,
+            boolean carrierFound,
+            List<String> allowedTargets,
+            String sourceModule,
+            String sourceFullType,
+            String requestedType) {
+        if (requestedType == null || requestedType.isBlank()) {
+            return false;
+        }
+        if (!sourceOwned || !carrierFound) {
+            return true;
+        }
+        return !isAllowedItemTransform(
+                allowedTargets, sourceModule, sourceFullType, requestedType);
+    }
+
+    static boolean isAllowedItemTransform(
+            List<String> allowedTargets,
+            String sourceModule,
+            String sourceFullType,
+            String requestedType) {
+        if (requestedType == null) {
+            return false;
+        }
+        if (requestedType.equals(sourceFullType)) {
+            return true;
+        }
+        if (allowedTargets == null) {
+            return false;
+        }
+        for (String target : allowedTargets) {
+            if (target == null || target.isBlank()) {
+                continue;
+            }
+            String fullTarget = target.indexOf('.') >= 0
+                    ? target : stringValue(sourceModule) + "." + target;
+            if (requestedType.equals(fullTarget)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static String policyFor(String module, String command) {
         String key = stringValue(module) + "." + stringValue(command);
         Capability capability = ADMIN_COMMANDS.get(key);
@@ -187,6 +400,9 @@ public final class OrangeAntiCheatRuntime {
             tickets.poll();
         }
         tickets.offer(now + HEALTH_RELAY_TTL_NANOS);
+        if (targetId >= Short.MIN_VALUE && targetId <= Short.MAX_VALUE) {
+            HEALTH_SYNC_AUTHORIZATIONS.put(targetId.shortValue(), now + HEALTH_RELAY_TTL_NANOS);
+        }
     }
 
     static boolean consumeHealthRelay(Long targetId, Long bodyPartIndex, String action) {
@@ -214,6 +430,7 @@ public final class OrangeAntiCheatRuntime {
 
     static void clearHealthRelayTicketsForTest() {
         HEALTH_RELAY_TICKETS.clear();
+        HEALTH_SYNC_AUTHORIZATIONS.clear();
     }
 
     private static String healthRelayKey(Long targetId, Long bodyPartIndex, String action) {
@@ -222,6 +439,18 @@ public final class OrangeAntiCheatRuntime {
             return null;
         }
         return targetId + "|" + bodyPartIndex + "|" + action;
+    }
+
+    private static boolean hasHealthSyncAuthorization(short onlineId) {
+        Long deadline = HEALTH_SYNC_AUTHORIZATIONS.get(onlineId);
+        if (deadline == null) {
+            return false;
+        }
+        if (deadline >= System.nanoTime()) {
+            return true;
+        }
+        HEALTH_SYNC_AUTHORIZATIONS.remove(onlineId, deadline);
+        return false;
     }
 
     private static String capabilityName(
@@ -268,6 +497,69 @@ public final class OrangeAntiCheatRuntime {
                 + " x=" + x + " y=" + y + " z=" + z);
     }
 
+    private static void logBlockedItemTransform(
+            IsoPlayer player,
+            InventoryItem carrier,
+            String requestedType,
+            int itemId,
+            int allowedCount,
+            String route,
+            String reason) {
+        System.out.println("[OrangeAntiCheat] event=blocked_item_transform severity=critical"
+                + " version=" + VERSION
+                + " mode=javaagent"
+                + " steamId=" + (player == null ? 0L : player.getSteamID())
+                + " username=" + (player == null ? "unknown" : token(player.getUsername()))
+                + " onlineId=" + (player == null ? -1 : player.getOnlineID())
+                + " sourceType=" + (carrier == null ? "unknown" : token(carrier.getFullType()))
+                + " targetType=" + token(requestedType)
+                + " itemId=" + itemId
+                + " allowedCount=" + allowedCount
+                + " route=" + token(route)
+                + " reason=" + token(reason)
+                + " x=" + (player == null ? 0 : player.getXi())
+                + " y=" + (player == null ? 0 : player.getYi())
+                + " z=" + (player == null ? 0 : player.getZi()));
+    }
+
+    private static void logObservedHealthSync(
+            IsoPlayer player,
+            Object packetValue,
+            int increasedParts,
+            float maxIncrease,
+            String reason) {
+        long steamId = player == null ? 0L : player.getSteamID();
+        long now = System.nanoTime();
+        Long previous = HEALTH_SYNC_LOG_TIMES.put(steamId, now);
+        if (previous != null && now - previous < HEALTH_LOG_INTERVAL_NANOS) {
+            return;
+        }
+        System.out.println("[OrangeAntiCheat] event=observed_health_sync severity=warning"
+                + " version=" + VERSION
+                + " mode=javaagent"
+                + " steamId=" + steamId
+                + " username=" + (player == null ? "unknown" : token(player.getUsername()))
+                + " onlineId=" + (player == null ? -1 : player.getOnlineID())
+                + " packet=" + token(packetValue == null ? "unknown" : packetValue.getClass().getSimpleName())
+                + " increasedParts=" + increasedParts
+                + " maxIncrease=" + (Float.isFinite(maxIncrease) ? maxIncrease : "non_finite")
+                + " reason=" + token(reason)
+                + " action=observed_not_blocked"
+                + " x=" + (player == null ? 0 : player.getXi())
+                + " y=" + (player == null ? 0 : player.getYi())
+                + " z=" + (player == null ? 0 : player.getZi()));
+    }
+
+    private static final class HealthSnapshot {
+        private final IsoPlayer player;
+        private final float[] health;
+
+        private HealthSnapshot(IsoPlayer player, float[] health) {
+            this.player = player;
+            this.health = health;
+        }
+    }
+
     private static String stringValue(Object value) {
         return value == null ? "" : String.valueOf(value);
     }
@@ -276,6 +568,7 @@ public final class OrangeAntiCheatRuntime {
         if (value == null || value.isBlank()) {
             return "unknown";
         }
-        return value.replaceAll("\\s+", "_").replaceAll("[=\\r\\n]", "_");
+        String normalized = value.replaceAll("\\s+", "_").replaceAll("[=\\r\\n]", "_");
+        return normalized.length() <= 160 ? normalized : normalized.substring(0, 160);
     }
 }

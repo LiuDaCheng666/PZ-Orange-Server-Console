@@ -70,6 +70,7 @@ function Write-Operation {
         message = $Message
         startedAt = $operationStartedAt.ToString("o")
         updatedAt = (Get-Date).ToString("o")
+        workerPid = $PID
         oldJavaPid = $oldJavaPid
         newJavaPid = $newJavaPid
         warningSeconds = if ($Action -in @("restart", "update")) { $WarningSeconds } else { 0 }

@@ -2,10 +2,13 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const dataRoot = path.resolve(process.argv[2] || '');
 const runtimeRoot = path.resolve(process.argv[3] || '');
 const hours = Math.min(720, Math.max(1, Number(process.argv[4] || 168)));
+const reviewStatePath = process.argv[5] ? path.resolve(process.argv[5]) : '';
+const serverId = String(process.argv[6] || '');
 const cutoff = Date.now() - hours * 3600000;
 const logsRoot = path.join(dataRoot, 'Logs');
 const consoleLogPath = path.join(dataRoot, 'server-console.txt');
@@ -34,9 +37,36 @@ const events = [];
 const eventKeys = new Set();
 const globalSignals = [];
 const pendingAdminHealthActions = [];
+const reviewedThrough = new Map();
+let reviewedNoiseEvents = 0;
 let filesScanned = 0;
 let bytesScanned = 0;
 let linesScanned = 0;
+
+function loadReviewState() {
+  if (!reviewStatePath || !serverId || !fs.existsSync(reviewStatePath)) return;
+  let state;
+  try { state = JSON.parse(fs.readFileSync(reviewStatePath, 'utf8')); } catch { return; }
+  for (const record of Array.isArray(state?.records) ? state.records : []) {
+    if (String(record.serverId || '') !== serverId || !/^[a-f0-9]{64}$/i.test(String(record.reviewKey || ''))) continue;
+    const time = Date.parse(String(record.dismissedThrough || ''));
+    if (!Number.isFinite(time)) continue;
+    const key = String(record.reviewKey).toLowerCase();
+    reviewedThrough.set(key, Math.max(reviewedThrough.get(key) || 0, time));
+  }
+}
+
+function eventReviewKey(event) {
+  const subject = /^7656119\d{10}$/.test(String(event.steamId || ''))
+    ? String(event.steamId) : `user:${String(event.username || 'unknown').toLowerCase()}`;
+  const signature = [
+    subject, event.type || '', event.code || '', event.command || '', event.reason || '',
+    event.sourceType || '', event.targetType || '', event.packet || '',
+  ].map(value => String(value).trim().toLowerCase()).join('|');
+  return crypto.createHash('sha256').update(signature, 'utf8').digest('hex');
+}
+
+loadReviewState();
 
 function walk(root, result = []) {
   if (!fs.existsSync(root)) return result;
@@ -131,7 +161,9 @@ function ensurePlayer(steamId, username) {
     playerMap.set(key, {
       steamId: resolved,
       usernames: new Set(), ips: new Set(), score: 0,
-      protectedCalls: 0, blockedCalls: 0, nativeSignals: 0, checksumSignals: 0,
+      protectedCalls: 0, blockedCalls: 0, blockedCommandCalls: 0,
+      blockedItemTransforms: 0, blockedHealthOverwrites: 0, observedHealthSyncs: 0,
+      nativeSignals: 0, checksumSignals: 0,
       speedSignals: 0, speedNoiseSignals: 0, speedReviewSignals: 0,
       actionableNativeSignals: 0, otherNativeSignals: 0, nativeWeight: 0,
       serverSnapshots: 0, clientSnapshots: 0, authorizedAdminActions: 0, adminCommandCalls: 0,
@@ -157,6 +189,13 @@ function updateSeen(player, time) {
 }
 
 function addEvent(event) {
+  event.reviewKey = eventReviewKey(event);
+  const eventTime = Date.parse(String(event.time || ''));
+  const dismissedThrough = reviewedThrough.get(event.reviewKey);
+  if (dismissedThrough && Number.isFinite(eventTime) && eventTime <= dismissedThrough) {
+    reviewedNoiseEvents += 1;
+    return false;
+  }
   const key = event.dedupe || [event.time, event.type, event.steamId, event.username, event.command, event.detail].join('|');
   if (eventKeys.has(key)) return false;
   eventKeys.add(key);
@@ -269,17 +308,22 @@ function parseCommandLine(file, line, lineNumber) {
     });
     return;
   }
-  player.protectedCalls += 1;
-  addEvent({
+  const added = addEvent({
     time, displayTime: rawTime, severity: 'critical', type: 'protected-command', code,
     steamId, username, command: fullCommand, coordinate: `${x},${y},${z}`,
     detail: '客户端调用了仅应由管理员或调试权限使用的原版命令。',
     ...eventSource(file, lineNumber),
   });
+  if (added) player.protectedCalls += 1;
 }
 
 function parseStructuredGuard(file, line, lineNumber) {
-  if (!line.includes('[OrangeAntiCheat]') || !line.includes('event=blocked_client_command')) return false;
+  if (!line.includes('[OrangeAntiCheat]')) return false;
+  const blockedCommand = line.includes('event=blocked_client_command');
+  const blockedItemTransform = line.includes('event=blocked_item_transform');
+  const blockedHealthOverwrite = line.includes('event=blocked_health_overwrite');
+  const observedHealthSync = line.includes('event=observed_health_sync');
+  if (!blockedCommand && !blockedItemTransform && !blockedHealthOverwrite && !observedHealthSync) return false;
   const values = parseKeyValues(line);
   const parsed = lineTime(line);
   const username = String(values.username || 'unknown').replace(/_/g, ' ');
@@ -289,8 +333,67 @@ function parseStructuredGuard(file, line, lineNumber) {
   updateSeen(player, time);
   const sequence = /\bf:(\d+)\s+st:([0-9,]+)>/.exec(line);
   const guardDedupe = sequence
-    ? ['orange-guard', sequence[1], sequence[2], player.steamId, values.module, values.command, values.reason, values.targetId].join('|')
+    ? ['orange-guard', sequence[1], sequence[2], player.steamId, values.module, values.command,
+      values.sourceType, values.targetType, values.itemId, values.packet, values.restoredParts,
+      values.increasedParts, values.action,
+      values.reason, values.targetId].join('|')
     : '';
+  if (observedHealthSync) {
+    const reason = values.reason || '';
+    const added = addEvent({
+      time, displayTime: parsed.raw, severity: 'warning', type: 'observed-health-sync', code: 'health-sync-observed',
+      steamId: player.steamId, username, command: values.packet || 'PlayerHealthSync',
+      coordinate: [values.x, values.y, values.z].join(','),
+      packet: values.packet || '', increasedParts: Number(values.increasedParts || 0),
+      maxIncrease: values.maxIncrease || '', reason, action: values.action || 'observed_not_blocked',
+      detail: reason === 'target_not_owned_by_connection'
+        ? '观察到连接提交了不属于自身玩家的健康同步；Agent 仅记录，未拦截。'
+        : reason === 'non_finite_health'
+          ? '观察到客户端健康同步包含 NaN 或 Infinity；Agent 仅记录，未拦截。'
+          : `观察到客户端同步的身体部位生命增加：数据包 ${values.packet || 'unknown'}，身体部位 ${values.increasedParts || 'unknown'} 个，最大增加 ${values.maxIncrease || 'unknown'}。自然恢复或治疗也可能产生记录，Agent 未拦截。`,
+      dedupe: guardDedupe,
+      ...eventSource(file, lineNumber),
+    });
+    if (added) player.observedHealthSyncs += 1;
+    return true;
+  }
+  if (blockedHealthOverwrite) {
+    const added = addEvent({
+      time, displayTime: parsed.raw, severity: 'critical', type: 'blocked-health-overwrite', code: 'health-overwrite-blocked',
+      steamId: player.steamId, username, command: values.packet || 'PlayerHealthSync',
+      coordinate: [values.x, values.y, values.z].join(','),
+      packet: values.packet || '', restoredParts: Number(values.restoredParts || 0),
+      maxIncrease: values.maxIncrease || '', reason: values.reason || '',
+      detail: values.reason === 'target_not_owned_by_connection'
+        ? '服务端已拒绝该连接修改不属于自己的玩家健康数据。'
+        : `服务端已回滚客户端擅自增加的生命值：数据包 ${values.packet || 'unknown'}，身体部位 ${values.restoredParts || 'unknown'} 个，最大增加 ${values.maxIncrease || 'unknown'}。`,
+      dedupe: guardDedupe,
+      ...eventSource(file, lineNumber),
+    });
+    if (added) {
+      player.blockedCalls += 1;
+      player.blockedHealthOverwrites += 1;
+    }
+    return true;
+  }
+  if (blockedItemTransform) {
+    const sourceType = values.sourceType || 'unknown';
+    const targetType = values.targetType || 'unknown';
+    const added = addEvent({
+      time, displayTime: parsed.raw, severity: 'critical', type: 'blocked-item-transform', code: 'item-transform-blocked',
+      steamId: player.steamId, username, command: `${sourceType} -> ${targetType}`,
+      coordinate: [values.x, values.y, values.z].join(','),
+      sourceType, targetType, itemId: values.itemId || '',
+      detail: `服务端已拒绝非法物品替换：载体 ${sourceType}，请求目标 ${targetType}，物品 ID ${values.itemId || 'unknown'}。`,
+      dedupe: guardDedupe,
+      ...eventSource(file, lineNumber),
+    });
+    if (added) {
+      player.blockedCalls += 1;
+      player.blockedItemTransforms += 1;
+    }
+    return true;
+  }
   const added = addEvent({
     time, displayTime: parsed.raw, severity: 'critical', type: 'blocked-command', code: 'server-blocked',
     steamId: player.steamId, username, command: `${values.module || '?'}.${values.command || '?'}`,
@@ -301,7 +404,10 @@ function parseStructuredGuard(file, line, lineNumber) {
     dedupe: guardDedupe,
     ...eventSource(file, lineNumber),
   });
-  if (added) player.blockedCalls += 1;
+  if (added) {
+    player.blockedCalls += 1;
+    player.blockedCommandCalls += 1;
+  }
   return true;
 }
 
@@ -476,7 +582,23 @@ function finalizePlayers() {
     if (player.blockedCalls > 0) {
       const points = Math.max(0, 100 - player.score);
       player.score = Math.max(100, player.score);
-      addReason(player, 'server-blocked', '服务端已拦截', player.blockedCalls, 'critical', points);
+      if (player.blockedItemTransforms > 0) {
+        addReason(player, 'blocked-item-transform', '非法物品替换已拦截', player.blockedItemTransforms, 'critical', points);
+      }
+      if (player.blockedHealthOverwrites > 0) {
+        addReason(player, 'blocked-health-overwrite', '非法健康回写已拦截', player.blockedHealthOverwrites, 'critical',
+          player.blockedItemTransforms > 0 ? 0 : points);
+      }
+      if (player.blockedCommandCalls > 0) {
+        addReason(player, 'server-blocked', '危险命令已拦截', player.blockedCommandCalls, 'critical',
+          player.blockedItemTransforms > 0 || player.blockedHealthOverwrites > 0 ? 0 : points);
+      }
+    }
+    if (player.observedHealthSyncs > 0) {
+      const points = Math.min(12, 4 + player.observedHealthSyncs * 2);
+      player.score += points;
+      addReason(player, 'observed-health-sync', '健康同步异常（仅记录）', player.observedHealthSyncs,
+        'warning', points);
     }
     if (player.otherNativeSignals > 0) {
       const points = Math.min(30, player.nativeWeight);
@@ -506,6 +628,9 @@ function finalizePlayers() {
       steamId, usernames: [...player.usernames], ips: [...player.ips], score: Math.min(100, player.score),
       severity: player.protectedCalls || player.blockedCalls ? 'critical' : player.score >= 40 ? 'high' : player.score >= 15 ? 'warning' : 'low',
       protectedCalls: player.protectedCalls, blockedCalls: player.blockedCalls,
+      blockedCommandCalls: player.blockedCommandCalls, blockedItemTransforms: player.blockedItemTransforms,
+      blockedHealthOverwrites: player.blockedHealthOverwrites,
+      observedHealthSyncs: player.observedHealthSyncs,
       nativeSignals: player.nativeSignals, actionableNativeSignals: player.actionableNativeSignals,
       speedSignals: player.speedSignals, speedNoiseSignals: player.speedNoiseSignals, speedReviewSignals: player.speedReviewSignals,
       speedNoiseOnly: player.nativeSignals > 0 && player.nativeSignals === player.speedNoiseSignals && player.score === 0,
@@ -605,6 +730,11 @@ async function main() {
       suspiciousPlayers: players.filter(player => player.score > 0).length, criticalPlayers,
       protectedCalls: players.reduce((sum, player) => sum + player.protectedCalls, 0),
       blockedCalls: players.reduce((sum, player) => sum + player.blockedCalls, 0),
+      blockedCommandCalls: players.reduce((sum, player) => sum + player.blockedCommandCalls, 0),
+      blockedItemTransforms: players.reduce((sum, player) => sum + player.blockedItemTransforms, 0),
+      blockedHealthOverwrites: players.reduce((sum, player) => sum + player.blockedHealthOverwrites, 0),
+      observedHealthSyncs: players.reduce((sum, player) => sum + player.observedHealthSyncs, 0),
+      reviewedNoiseEvents,
       nativeSignals: players.reduce((sum, player) => sum + player.nativeSignals, 0),
       speedNoiseSignals: players.reduce((sum, player) => sum + player.speedNoiseSignals, 0),
       checksumSignals: players.reduce((sum, player) => sum + player.checksumSignals, 0),

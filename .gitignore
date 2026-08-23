@@ -19,6 +19,7 @@ broadcast-schedules.json
 maintenance-schedules.json
 server-patches.json
 server-patches.json.bak
+anticheat-review-state.json
 execution-history.json
 audit.log
 *.log
@@ -27,6 +28,7 @@ audit.log
 item-index/
 admin-item-vault/
 map-reset/
+disaster-center/
 backups/
 dist/
 dist-public/

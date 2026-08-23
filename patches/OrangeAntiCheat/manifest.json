@@ -1,11 +1,14 @@
 {
   "id": "OrangeAntiCheat",
-  "name": "OrangeAntiCheat 服务端命令防护",
-  "version": "2.1.0",
+  "name": "OrangeAntiCheat 服务端命令、物品防护与健康同步审计",
+  "version": "2.4.1",
   "scope": "runtime",
   "defaultEnabled": true,
   "target": "server-patches\\OrangeAntiCheat-agent.jar",
   "protectedCommands": 14,
+  "protectedTransactions": 3,
+  "protectedHealthPackets": 0,
+  "monitoredHealthPackets": 2,
   "sourceFiles": [
     "patches\\OrangeAntiCheat\\OrangeAntiCheat-agent.jar",
     "patches\\OrangeAntiCheat\\src\\OrangeAntiCheatAgent.java",
