@@ -42,6 +42,13 @@ ObjectModData 同步防护、玻璃附件死循环、容器循环、重复实体
 
 详细清单、构建方法、加载边界和 SHA-256 见 [Java Agent 说明](patches/README.zh-CN.md)。
 
+## Claude CLI 日志诊断 Skill
+
+[`skill/pz-server-log-diagnostics`](skill/pz-server-log-diagnostics/SKILL.md)
+提供只读的 PZ 实例识别、当前启动窗口异常聚合、实时 CPU/内存与日志增量观察，并记录
+SpriteConfig、ObjectModData、长读条、Java Agent 等已验证结论和排查误区。将该目录放入
+`~/.claude/skills/` 后，可在 Claude Code 中使用 `/pz-server-log-diagnostics` 调用。
+
 ## 面板实机界面
 
 以下图片由本机 Playwright 验收和实际面板生成，不是设计稿。截图中的测试服务器、测试
