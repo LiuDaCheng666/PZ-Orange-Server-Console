@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>PZ橙子服务器控制台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/app.css?v=20260824-anticheat-progress-patches-1">
+  <link rel="stylesheet" href="/app.css?v=20260824-selective-reset-guard-1">
 </head>
 <body>
   <div class="auth-screen" id="authScreen">
@@ -454,9 +454,9 @@
           <summary><span><i data-lucide="book-open-check"></i><strong>地图重置须知</strong></span><small>流程、保护规则、数据影响与回滚边界</small></summary>
           <div class="map-reset-guide-grid">
             <article><h3>完整流程</h3><ol><li>选择服务器并保存保护配置。</li><li>运行只读审计，核对拟刷新区块、容量和车辆数量。</li><li>在游戏内保存并正常停止目标服。</li><li>输入 serverName 正式执行。</li><li>工具先创建整个存档的 ZIP64 完整备份，并逐文件校验 CRC。</li><li>校验通过后，未保护的地图区块才会移入隔离目录。</li><li>手动启动服务器；发现异常时停服并选择对应备份点完整回滚。</li></ol></article>
-            <article><h3>工作原理</h3><p>工具不清空数据库，只移动未保护的 <code>map/X/Y.bin</code>。每个文件对应一个 8×8 格区块；游戏下次访问缺失区块时按当前地图和 Mod 重新生成。保护区块文件保持原样，所有楼层一起保留。</p><p>重新生成在玩家接近时按需发生，不会提前生成全图，因此首次进入大量新区仍可能出现短时加载压力。</p></article>
+            <article><h3>工作原理</h3><p>工具不清空数据库，只移动未保护的 <code>map/X/Y.bin</code>。每个文件对应一个 8×8 格区块；游戏下次访问缺失区块时按当前地图和 Mod 重新生成。保护区块文件保持原样，所有楼层一起保留。</p><p>重置清单会阻止这些区块再次生成原版地图车辆；首次加载后由原版 IsoRegion 工作线程重建墙体、屋顶和室内缓存。</p></article>
             <article><h3>自动保护</h3><p>保护范围由原版安全屋、全部未死亡角色最后位置、<code>AnimalZone</code> 畜牧区及手动保护矩形组成。边距单位是区块；人物边距设为 0 时，脚下的一个区块仍会保留。</p><p>动物存档会全量保留，但畜牧区外的动物数据不保护地图。车辆数据库保留，车辆所在区块当前只统计、不自动保护。</p></article>
-            <article><h3>会刷新与会保留</h3><p>未保护区会重新生成地形、建筑、容器、门窗和世界对象；其中的玩家建筑、落地物、尸体及摆设会消失。人物背包、装备、车辆数据库、全局 Mod 数据、动物数据及派生目录不会主动删除。</p><p>重要停车场、公共设施、未申领基地和跨区块建筑应手动加入保护区域。</p></article>
+            <article><h3>会刷新与会保留</h3><p>未保护区会重新生成地形、建筑、容器、门窗和世界对象；其中的玩家建筑、落地物、尸体及摆设会消失。人物背包、装备、车辆数据库、全局 Mod 数据和动物数据不会主动删除。</p><p>重置区及周围一圈的旧 IsoRegion 缓存会隔离并按需重建；其他区域缓存保持原样。</p></article>
             <article><h3>完整备份</h3><p>正式执行前会无压缩归档整个多人存档，校验文件数、总字节数及每个 ZIP 条目的 CRC。磁盘空间不足或任何文件校验失败都会取消刷新，不移动地图区块。</p><p>完整备份与隔离目录位于目标存档同级目录，正式执行和回滚均不会自动启动游戏服务器。</p></article>
             <article><h3>完整回滚</h3><p>回滚会再次校验备份，先解压到临时目录，再将当前存档整体改名保留，最后原子替换为刷新前存档。人物、车辆、动物、交易数据和地图会一起回到同一时间点。</p><p>刷新后产生的角色进度和世界变化不会合并；它们保存在 <code>*-before-rollback-*</code> 目录，需要人工确认后再清理。</p></article>
           </div>
@@ -484,13 +484,15 @@
             <div><dt>拟刷新区块</dt><dd id="mapResetChunks">--</dd></div>
             <div><dt>拟隔离容量</dt><dd id="mapResetBytes">--</dd></div>
             <div><dt>车辆记录</dt><dd id="mapResetVehicles">--</dd></div>
+            <div><dt>车辆禁刷区块</dt><dd id="mapResetVehicleSuppression">--</dd></div>
+            <div><dt>区域缓存失效</dt><dd id="mapResetRegionCaches">--</dd></div>
           </dl>
           <div class="map-reset-paths"><span>存档</span><code id="mapResetSaveRoot">--</code><span>报告</span><code id="mapResetReportPath">--</code><span>隔离</span><code id="mapResetQuarantinePath">尚未执行</code></div>
           <pre class="map-reset-error" id="mapResetError" hidden></pre>
         </section>
 
         <section class="map-reset-apply">
-          <div><p class="eyebrow">不可在线执行</p><h2>正式刷新未保护区块</h2><p>停服后先创建并校验完整存档 ZIP；只有校验成功才隔离未保护区块，完成后不会自动重启。</p></div>
+          <div><p class="eyebrow">不可在线执行</p><h2>正式刷新未保护区块</h2><p>停服后先创建并校验完整存档 ZIP；运行时防护就绪后才会隔离区块、失效区域缓存并提交车辆禁刷清单。</p></div>
           <label>输入 serverName 确认<input id="mapResetConfirmation" autocomplete="off" spellcheck="false" placeholder="等待读取 serverName"></label>
           <button class="danger-button map-reset-admin" id="applyMapReset" type="button" disabled><i data-lucide="archive"></i>完整备份并执行</button>
         </section>
@@ -744,6 +746,6 @@
   <dialog class="help-dialog" id="helpDialog"><div class="help-dialog-head"><div><p class="eyebrow">当前服务器 B42.20 内置 help</p><h2 id="helpTitle">命令帮助</h2></div><button class="icon-button" id="closeHelp" type="button" title="关闭"><i data-lucide="x"></i></button></div><div id="helpBody" class="help-body"></div><div class="help-actions"><a class="secondary-button" href="https://pzwiki.net/wiki/Admin_commands" target="_blank" rel="noreferrer">PZ Wiki 命令资料</a><button class="secondary-button" id="queryHelp" type="button"><i data-lucide="terminal"></i>向服务器查询 help</button></div></dialog>
   <script src="/lucide.min.js?v=20260810-2"></script>
   <script src="/qrcode.min.js?v=20260810-2"></script>
-  <script src="/app.js?v=20260824-anticheat-progress-patches-1"></script>
+  <script src="/app.js?v=20260824-selective-reset-guard-1"></script>
 </body>
 </html>

@@ -16,6 +16,7 @@
 | `PZItemContainerCycleGuard` | 阻断物品或尸体容器所有者链的自身回指与循环递归 |
 | `PZEntityRegistrationGuard` | 忽略同一实体、状态一致的幂等重复注册 |
 | `PZItemPickInfoContainerFix` | 在掉落桶构建前注册 `inventorymale` 与 `inventoryfemale` |
+| `PZSelectiveWorldResetGuard` | 阻止已重置区块重新生成原版车辆，并按需重建对应 IsoRegion 缓存 |
 | `PZTimedActionIsolationFix` | 按玩家动作实例停止联机读条，避免动作编号撞号互相取消 |
 | `PZSpriteConfigAliasPatch` | 将已确认的合法动态贴图映射回实体定义后执行原版初始化 |
 

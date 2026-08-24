@@ -8,13 +8,19 @@ from unittest.mock import patch
 from pz_selective_world_reset import (
     EMPTY_APOP_BYTES,
     LivestockZone,
+    RESET_GUARD_MANIFEST,
     build_livestock_protection,
+    build_region_invalidation_chunks,
     create_full_save_backup,
     main,
     parse_world_protection,
     read_animal_state_cells,
+    read_region_header,
+    read_reset_guard_manifest,
+    region_hash,
     rollback_full_save,
     verify_full_save_backup,
+    write_region_header,
 )
 
 
@@ -115,6 +121,17 @@ class WorldProtectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "truncated"):
                 read_animal_state_cells(apop)
 
+    def test_region_header_round_trip_and_reset_halo(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "RegionHeader.bin"
+            entries = [region_hash(10, 20), region_hash(-1, 3)]
+            write_region_header(path, 249, entries)
+            self.assertEqual(read_region_header(path), (249, entries))
+        halo = build_region_invalidation_chunks({(10, 20)})
+        self.assertEqual(len(halo), 9)
+        self.assertIn((9, 19), halo)
+        self.assertIn((11, 21), halo)
+
     def test_complete_backup_and_atomic_rollback(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -165,6 +182,17 @@ class WorldProtectionTests(unittest.TestCase):
             chunk.parent.mkdir(parents=True)
             chunk.write_bytes(b"world before reset")
             (save / "map_meta.bin").write_bytes(minimal_map_meta())
+            region_dir = save / "isoregiondata"
+            region_dir.mkdir()
+            reset_region = region_dir / "datachunk_0_0.bin"
+            reset_region.write_bytes(b"stale region")
+            unrelated_region = region_dir / "datachunk_9_9.bin"
+            unrelated_region.write_bytes(b"unrelated region")
+            write_region_header(
+                region_dir / "RegionHeader.bin",
+                249,
+                [region_hash(0, 0), region_hash(9, 9)],
+            )
             manual = root / "manual.json"
             manual.write_text("[]", encoding="utf-8")
 
@@ -193,6 +221,15 @@ class WorldProtectionTests(unittest.TestCase):
             ):
                 self.assertEqual(main(), 0)
             self.assertFalse(chunk.exists())
+            self.assertFalse(reset_region.exists())
+            self.assertTrue(unrelated_region.exists())
+            self.assertEqual(
+                read_region_header(region_dir / "RegionHeader.bin"),
+                (249, [region_hash(9, 9)]),
+            )
+            vehicles, regions = read_reset_guard_manifest(save / RESET_GUARD_MANIFEST)
+            self.assertEqual(vehicles, {(0, 0)})
+            self.assertEqual(len(regions), 9)
             quarantine = next(root.glob("servertest-selective-reset-quarantine-*"))
             with patch.object(
                 sys,
@@ -210,6 +247,8 @@ class WorldProtectionTests(unittest.TestCase):
             ):
                 self.assertEqual(main(), 0)
             self.assertEqual(chunk.read_bytes(), b"world before reset")
+            self.assertEqual(reset_region.read_bytes(), b"stale region")
+            self.assertFalse((save / RESET_GUARD_MANIFEST).exists())
 
 
 if __name__ == "__main__":

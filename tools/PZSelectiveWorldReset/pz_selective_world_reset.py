@@ -14,6 +14,7 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import time
 import zipfile
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -27,6 +28,10 @@ EXPECTED_META_MAGIC = b"META"
 FULL_BACKUP_ARCHIVE = "full-save-backup.zip"
 FULL_BACKUP_MANIFEST = "full-save-backup-manifest.json"
 ROLLBACK_RESULT = "rollback-result.json"
+RESET_GUARD_MANIFEST = "orange-selective-reset-guard-v1.txt"
+RESET_GUARD_HEADER = "PZ_SELECTIVE_RESET_GUARD_V1"
+REGION_HEADER_NAME = "RegionHeader.bin"
+MAX_GUARD_RECORDS = 5_000_000
 
 
 @dataclass(frozen=True)
@@ -424,6 +429,240 @@ def iter_map_chunks(map_dir: Path) -> Iterable[tuple[int, int, Path]]:
             except ValueError:
                 continue
             yield wx, wy, Path(entry.path)
+
+
+def region_hash(wx: int, wy: int) -> int:
+    value = ((((wy & 0xFFFFFFFF) << 16) & 0xFFFFFFFF) ^ (wx & 0xFFFFFFFF))
+    return value - 0x100000000 if value >= 0x80000000 else value
+
+
+def build_region_invalidation_chunks(
+    reset_chunks: Iterable[tuple[int, int]],
+) -> set[tuple[int, int]]:
+    result: set[tuple[int, int]] = set()
+    for wx, wy in reset_chunks:
+        for offset_x in (-1, 0, 1):
+            for offset_y in (-1, 0, 1):
+                result.add((wx + offset_x, wy + offset_y))
+    return result
+
+
+def region_cache_path(save_root: Path, wx: int, wy: int) -> Path:
+    return save_root / "isoregiondata" / f"datachunk_{wx}_{wy}.bin"
+
+
+def read_region_header(path: Path) -> tuple[int, list[int]] | None:
+    if not path.is_file():
+        return None
+    payload = path.read_bytes()
+    if len(payload) < 8:
+        raise ValueError(f"IsoRegion header is truncated: {path}")
+    version, count = struct.unpack_from(">ii", payload, 0)
+    if count < 0 or count > MAX_GUARD_RECORDS:
+        raise ValueError(f"IsoRegion header has invalid chunk count {count}: {path}")
+    expected = 8 + count * 4
+    if len(payload) != expected:
+        raise ValueError(
+            f"IsoRegion header size mismatch: expected {expected}, got {len(payload)}"
+        )
+    entries = list(struct.unpack_from(f">{count}i", payload, 8)) if count else []
+    return version, entries
+
+
+def write_region_header(path: Path, version: int, entries: Iterable[int]) -> None:
+    values = list(entries)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    payload = bytearray(struct.pack(">ii", version, len(values)))
+    if values:
+        payload.extend(struct.pack(f">{len(values)}i", *values))
+    temporary.write_bytes(payload)
+    os.replace(temporary, path)
+
+
+def read_reset_guard_manifest(
+    path: Path,
+) -> tuple[set[tuple[int, int]], dict[tuple[int, int], int]]:
+    if not path.is_file():
+        return set(), {}
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0].strip() != RESET_GUARD_HEADER:
+        raise ValueError(f"Unsupported reset guard manifest: {path}")
+    if len(lines) - 1 > MAX_GUARD_RECORDS:
+        raise ValueError(f"Reset guard manifest exceeds record limit: {path}")
+    vehicle_chunks: set[tuple[int, int]] = set()
+    region_epochs: dict[tuple[int, int], int] = {}
+    for line_number, raw in enumerate(lines[1:], start=2):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        try:
+            if fields[0] == "V" and len(fields) == 3:
+                vehicle_chunks.add((int(fields[1]), int(fields[2])))
+            elif fields[0] == "R" and len(fields) == 4:
+                epoch = int(fields[3])
+                if epoch <= 0:
+                    raise ValueError("epoch must be positive")
+                region_epochs[(int(fields[1]), int(fields[2]))] = epoch
+            else:
+                raise ValueError("unknown record")
+        except ValueError as failure:
+            raise ValueError(
+                f"Invalid reset guard manifest record at line {line_number}: {raw!r}"
+            ) from failure
+    return vehicle_chunks, region_epochs
+
+
+def write_reset_guard_manifest(
+    path: Path,
+    vehicle_chunks: Iterable[tuple[int, int]],
+    region_epochs: dict[tuple[int, int], int],
+) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(RESET_GUARD_HEADER + "\n")
+        stream.write("# V=disable vanilla vehicle regeneration; R=rebuild IsoRegion after epoch-ms\n")
+        for wx, wy in sorted(set(vehicle_chunks)):
+            stream.write(f"V\t{wx}\t{wy}\n")
+        for (wx, wy), epoch in sorted(region_epochs.items()):
+            stream.write(f"R\t{wx}\t{wy}\t{epoch}\n")
+    os.replace(temporary, path)
+
+
+def inspect_reset_guard_plan(
+    save_root: Path,
+    reset_coordinates: set[tuple[int, int]],
+) -> dict:
+    region_chunks = build_region_invalidation_chunks(reset_coordinates)
+    region_files = [
+        region_cache_path(save_root, wx, wy)
+        for wx, wy in sorted(region_chunks)
+        if region_cache_path(save_root, wx, wy).is_file()
+    ]
+    header_path = save_root / "isoregiondata" / REGION_HEADER_NAME
+    header = read_region_header(header_path)
+    invalid_hashes = {region_hash(wx, wy) for wx, wy in region_chunks}
+    retained_header_entries = None
+    removed_header_entries = 0
+    if header is not None:
+        version, entries = header
+        retained_header_entries = [entry for entry in entries if entry not in invalid_hashes]
+        removed_header_entries = len(entries) - len(retained_header_entries)
+    else:
+        version = None
+    manifest_path = save_root / RESET_GUARD_MANIFEST
+    previous_vehicle_chunks, previous_region_epochs = read_reset_guard_manifest(manifest_path)
+    return {
+        "regionChunks": region_chunks,
+        "regionFiles": region_files,
+        "regionHeaderPath": header_path,
+        "regionHeaderVersion": version,
+        "retainedRegionHeaderEntries": retained_header_entries,
+        "removedRegionHeaderEntries": removed_header_entries,
+        "manifestPath": manifest_path,
+        "previousVehicleChunks": previous_vehicle_chunks,
+        "previousRegionEpochs": previous_region_epochs,
+    }
+
+
+def apply_reset_transaction(
+    save_root: Path,
+    quarantine: Path,
+    reset_chunks: list[tuple[int, int, Path, int]],
+    guard_plan: dict,
+    progress_path: Path | None = None,
+) -> dict:
+    quarantine_map = quarantine / "map"
+    quarantine_regions = quarantine / "isoregiondata"
+    quarantine_map.mkdir()
+    quarantine_regions.mkdir()
+    moved_files: list[tuple[Path, Path]] = []
+    header_path: Path = guard_plan["regionHeaderPath"]
+    manifest_path: Path = guard_plan["manifestPath"]
+    original_header = header_path.read_bytes() if header_path.is_file() else None
+    original_manifest = manifest_path.read_bytes() if manifest_path.is_file() else None
+    epoch_millis = time.time_ns() // 1_000_000
+    reset_coordinates = {(wx, wy) for wx, wy, _path, _size in reset_chunks}
+    vehicle_chunks = set(guard_plan["previousVehicleChunks"])
+    vehicle_chunks.update(reset_coordinates)
+    region_epochs = dict(guard_plan["previousRegionEpochs"])
+    for coordinate in guard_plan["regionChunks"]:
+        region_epochs[coordinate] = epoch_millis
+
+    try:
+        moved = 0
+        last_target_parent: Path | None = None
+        for wx, wy, source, _size in reset_chunks:
+            target = quarantine_map / str(wx) / f"{wy}.bin"
+            if target.parent != last_target_parent:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                last_target_parent = target.parent
+            if target.exists():
+                raise FileExistsError(f"Reset quarantine target already exists: {target}")
+            shutil.move(str(source), str(target))
+            moved_files.append((source, target))
+            moved += 1
+            if moved % 5000 == 0 or moved == len(reset_chunks):
+                write_progress(
+                    progress_path,
+                    "reset-move",
+                    moved,
+                    len(reset_chunks),
+                    f"Isolated {moved} of {len(reset_chunks)} map chunks",
+                )
+
+        region_files: list[Path] = guard_plan["regionFiles"]
+        for index, source in enumerate(region_files, start=1):
+            target = quarantine_regions / source.name
+            if target.exists():
+                raise FileExistsError(f"IsoRegion quarantine target already exists: {target}")
+            shutil.move(str(source), str(target))
+            moved_files.append((source, target))
+            if index % 5000 == 0 or index == len(region_files):
+                write_progress(
+                    progress_path,
+                    "region-invalidate",
+                    index,
+                    len(region_files),
+                    f"Invalidated {index} of {len(region_files)} IsoRegion caches",
+                )
+
+        if original_header is not None:
+            (quarantine_regions / REGION_HEADER_NAME).write_bytes(original_header)
+            write_region_header(
+                header_path,
+                int(guard_plan["regionHeaderVersion"]),
+                guard_plan["retainedRegionHeaderEntries"],
+            )
+        if original_manifest is not None:
+            (quarantine / f"{RESET_GUARD_MANIFEST}.before-reset").write_bytes(original_manifest)
+        write_progress(progress_path, "reset-manifest", 0, 1, "Writing reset guard manifest")
+        write_reset_guard_manifest(manifest_path, vehicle_chunks, region_epochs)
+        write_progress(progress_path, "reset-manifest", 1, 1, "Reset guard manifest committed")
+        return {
+            "movedMapChunkCount": moved,
+            "invalidatedRegionCacheFileCount": len(region_files),
+            "invalidatedRegionChunkCount": len(guard_plan["regionChunks"]),
+            "removedRegionHeaderEntryCount": int(guard_plan["removedRegionHeaderEntries"]),
+            "vehicleRespawnSuppressionChunkCount": len(vehicle_chunks),
+            "resetGuardManifest": str(manifest_path),
+            "resetEpochMillis": epoch_millis,
+        }
+    except Exception:
+        if original_header is None:
+            header_path.unlink(missing_ok=True)
+        else:
+            header_path.parent.mkdir(parents=True, exist_ok=True)
+            header_path.write_bytes(original_header)
+        if original_manifest is None:
+            manifest_path.unlink(missing_ok=True)
+        else:
+            manifest_path.write_bytes(original_manifest)
+        for source, target in reversed(moved_files):
+            if target.exists():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(target), str(source))
+        raise
 
 
 def java_server_is_running(save_root: Path, server_name: str) -> tuple[bool, list[str]]:
@@ -854,6 +1093,9 @@ def main() -> int:
         if (wx, wy) in vehicle_chunk_set:
             vehicle_chunks_reset += 1
 
+    reset_coordinates = {(wx, wy) for wx, wy, _path, _size in reset_chunks}
+    guard_plan = inspect_reset_guard_plan(save_root, reset_coordinates)
+
     write_progress(
         args.progress_path,
         "audit-report",
@@ -890,6 +1132,14 @@ def main() -> int:
         "resetMapBytes": reset_bytes,
         "vehicleCountPreservedInDatabase": vehicles["count"],
         "vehicleChunksAmongResetChunks": vehicle_chunks_reset,
+        "vehicleRespawnSuppressionChunkCount": len(
+            set(guard_plan["previousVehicleChunks"]) | reset_coordinates
+        ),
+        "regionInvalidationChunkCount": len(guard_plan["regionChunks"]),
+        "regionCacheFilesToInvalidate": len(guard_plan["regionFiles"]),
+        "regionHeaderEntriesToRemove": int(guard_plan["removedRegionHeaderEntries"]),
+        "resetGuardManifest": str(guard_plan["manifestPath"]),
+        "resetGuardAgentRequired": True,
         "preservedFiles": [
             "players.db",
             "vehicles.db",
@@ -903,7 +1153,7 @@ def main() -> int:
             "apop/*",
             "zpop/*",
             "metagrid/*",
-            "isoregiondata/*",
+            "isoregiondata/* outside reset chunks and their one-chunk region halo",
         ],
     }
 
@@ -969,9 +1219,6 @@ def main() -> int:
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
-        quarantine_map = quarantine / "map"
-        quarantine_map.mkdir()
-
         critical_backup = quarantine / "critical-files"
         critical_backup.mkdir()
         for name in (
@@ -991,24 +1238,14 @@ def main() -> int:
         if apop_source.is_dir():
             shutil.copytree(apop_source, critical_backup / "apop")
 
-        moved = 0
-        last_target_parent: Path | None = None
-        for wx, wy, source, _size in reset_chunks:
-            target = quarantine_map / str(wx) / f"{wy}.bin"
-            if target.parent != last_target_parent:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                last_target_parent = target.parent
-            shutil.move(str(source), str(target))
-            moved += 1
-            if moved % 5000 == 0 or moved == len(reset_chunks):
-                write_progress(
-                    args.progress_path,
-                    "reset-move",
-                    moved,
-                    len(reset_chunks),
-                    f"Isolated {moved} of {len(reset_chunks)} map chunks",
-                )
-        summary["movedMapChunkCount"] = moved
+        transaction_result = apply_reset_transaction(
+            save_root,
+            quarantine,
+            reset_chunks,
+            guard_plan,
+            args.progress_path,
+        )
+        summary.update(transaction_result)
         (report_dir / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
         )

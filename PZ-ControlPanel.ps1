@@ -2673,6 +2673,65 @@ function Get-MapResetRollbackPoints {
         } | Sort-Object createdAt -Descending)
 }
 
+function Get-MapResetGuardState {
+    param($Profile)
+    $fileName = "PZSelectiveWorldResetGuard-agent.jar"
+    $configuration = Get-ServerPatchConfiguration
+    $record = $configuration.patches.PSObject.Properties["PZSelectiveWorldResetGuard"].Value
+    $enabled = [bool]($record -and $record.enabled)
+    $jarPath = Join-Path ([string]$Profile.runtimeRoot) "server-patches\$fileName"
+    $jarPresent = Test-Path -LiteralPath $jarPath -PathType Leaf
+    $gameJarPath = Join-Path ([string]$Profile.runtimeRoot) "java\projectzomboid.jar"
+    $gameClassCompatible = $false
+    if (Test-Path -LiteralPath $gameJarPath -PathType Leaf) {
+        $archive = $null
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $archive = [IO.Compression.ZipFile]::OpenRead($gameJarPath)
+            $expected = [ordered]@{
+                "zombie/vehicles/VehiclesDB2.class" = "f908628f3a94a018cc4666ef14bdb01326eeb90ca27f55d7b744d215a7a9f9ba"
+                "zombie/iso/IsoChunk.class" = "68431ace471b30c842ff7c2a6e706d8ba48d7a84ae07f876484153c0d62a794b"
+            }
+            $matches = $true
+            foreach ($entryName in $expected.Keys) {
+                $entry = $archive.GetEntry($entryName)
+                if (-not $entry) { $matches = $false; break }
+                $stream = $entry.Open()
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try {
+                    $actual = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+                    if ($actual -cne [string]$expected[$entryName]) { $matches = $false; break }
+                }
+                finally { $sha.Dispose(); $stream.Dispose() }
+            }
+            $gameClassCompatible = $matches
+        }
+        catch { $gameClassCompatible = $false }
+        finally { if ($archive) { $archive.Dispose() } }
+    }
+    $managedPaths = Get-ManagedProfilePaths -Id ([string]$Profile.id)
+    $arguments = ""
+    if (Test-Path -LiteralPath $managedPaths.profilePath -PathType Leaf) {
+        try { $arguments = [string](Get-Content -LiteralPath $managedPaths.profilePath -Raw -Encoding UTF8 | ConvertFrom-Json).arguments }
+        catch { }
+    }
+    $pattern = '(?i)(?:^|\s)-javaagent:(?:"?)[^\s"]*' + [regex]::Escape($fileName) + '(?:=[^\s"]+)?'
+    $configured = [regex]::IsMatch($arguments, $pattern)
+    return [pscustomobject][ordered]@{
+        enabled = $enabled
+        jarPresent = [bool]$jarPresent
+        configured = [bool]$configured
+        gameClassCompatible = [bool]$gameClassCompatible
+        ready = [bool]($enabled -and $jarPresent -and $configured -and $gameClassCompatible)
+        jarPath = $jarPath
+        message = if (-not $enabled) { "请先在 Java 补丁页启用选择性地图重置运行时防护。" }
+            elseif (-not $jarPresent) { "运行目录缺少选择性地图重置防护 JAR。" }
+            elseif (-not $configured) { "下次启动参数尚未挂载选择性地图重置防护。" }
+            elseif (-not $gameClassCompatible) { "当前 projectzomboid.jar 与已审核的车辆或区块类哈希不一致，禁止执行。" }
+            else { "车辆禁刷与 IsoRegion 重建防护已配置，将在下次游戏服务器启动时读取重置清单。" }
+    }
+}
+
 function Get-MapResetPayload {
     param($Profile, $Session)
     $paths = Get-MapResetPaths -Profile $Profile
@@ -2685,6 +2744,7 @@ function Get-MapResetPayload {
     $serverState = Get-ServerState -Profile $Profile
     $configHash = Get-MapResetConfigHash -Config $config
     $progress = if ($status -and $status.progressPath) { Read-MapResetJson -Path ([string]$status.progressPath) } else { $null }
+    $resetGuard = Get-MapResetGuardState -Profile $Profile
     return [ordered]@{
         ok = $true
         serverId = [string]$Profile.id
@@ -2695,6 +2755,7 @@ function Get-MapResetPayload {
         toolAvailable = [bool]((Test-Path -LiteralPath $mapResetToolPath -PathType Leaf) -and (Test-Path -LiteralPath $mapResetRunnerPath -PathType Leaf))
         serverAlive = [bool]$serverState.alive
         lifecycleBusy = [bool](Get-ActiveLifecycleOperation -Profile $Profile)
+        resetGuard = $resetGuard
         config = $config
         configHash = $configHash
         status = $status
@@ -2731,6 +2792,10 @@ function Start-MapResetOperation {
         if ($Confirmation -cne [string]$Profile.serverName) { throw "确认文字必须与 serverName 完全一致：$($Profile.serverName)" }
     }
     if ($Mode -eq "apply") {
+        $resetGuard = Get-MapResetGuardState -Profile $Profile
+        if (-not [bool]$resetGuard.ready) {
+            throw "选择性地图重置防护未就绪：$([string]$resetGuard.message)"
+        }
         $lastAudit = Read-MapResetJson -Path $paths.lastAuditPath
         if (-not $lastAudit -or [string]$lastAudit.configHash -cne $configHash -or -not (Test-Path -LiteralPath ([string]$lastAudit.summaryPath) -PathType Leaf)) {
             throw "当前配置没有匹配的成功审计，请先保存配置并重新运行只读审计。"
@@ -3903,6 +3968,7 @@ function Get-KnownServerPatchDefinitions {
         [pscustomobject][ordered]@{ id = "PZItemContainerCycleGuard"; name = "物品容器循环防护"; category = "稳定性修复"; fileName = "PZItemContainerCycleGuard-agent.jar"; arguments = ""; activePattern = '\[PZItemContainerCycleGuard\] ACTIVE'; activeEvidence = "pre-pz-stdout"; compatibility = "PZ 42.20.x"; manageable = $true; target = "ItemContainer.getCharacter"; risk = "异常容器链返回无所属角色；不删除物品、不写存档。"; description = "阻断异常物品或尸体容器的自身回指与循环链，避免无限递归和栈溢出。" },
         [pscustomobject][ordered]@{ id = "PZEntityRegistrationGuard"; name = "重复实体注册防护"; category = "稳定性修复"; fileName = "PZEntityRegistrationGuard-agent.jar"; arguments = ""; activePattern = '\[PZEntityRegistrationGuard\] ACTIVE'; compatibility = "PZ 42.20.2"; manageable = $true; target = "EngineEntityManager.addEntityInternal"; risk = "仅忽略同一对象、状态一致的幂等重复注册；其他异常保留原版报错。"; description = "避免区块加载时同一实体被重复注册并连续中断 ServerCell 加载。" },
         [pscustomobject][ordered]@{ id = "PZItemPickInfoContainerFix"; name = "尸体容器 ID 注册修复"; category = "掉落兼容"; fileName = "PZItemPickInfoContainerFix-agent.jar"; arguments = ""; activePattern = '\[PZItemPickInfoContainerFix\] ACTIVE'; compatibility = "PZ 42.20 已审核构建"; manageable = $true; target = "ItemConfigurator.Preprocess"; risk = "只补注册 inventorymale 与 inventoryfemale，不改变掉落表或物品内容。"; description = "在 ItemConfig 建桶前补充两个原版尸体容器 ID，消除高频 cannot get ID 日志。" },
+        [pscustomobject][ordered]@{ id = "PZSelectiveWorldResetGuard"; name = "选择性地图重置运行时防护"; category = "地图维护"; fileName = "PZSelectiveWorldResetGuard-agent.jar"; arguments = ""; activePattern = '\[PZSelectiveResetGuard\] ACTIVE'; activeEvidence = "pre-pz-stdout"; compatibility = "PZ 42.20.3 已审核构建"; manageable = $true; target = "VehiclesDB2.init / IsoChunk.doLoadGridsquare"; risk = "仅在存档存在工具生成的重置清单时生效；清单中的区域不会再次生成原版地图车辆。"; description = "将重置区块标记为车辆已生成，并在区块加载后调用原版 IsoRegion 工作线程重建失效的墙体、屋顶和室内缓存。" },
         [pscustomobject][ordered]@{ id = "PZTimedActionIsolationFix"; name = "多人长读条动作隔离"; category = "联机修复"; fileName = "PZTimedActionIsolationFix-agent.jar"; arguments = ""; activePattern = '\[PZTimedActionIsolationFix\] ACTIVE'; compatibility = "PZ 42.20.x"; manageable = $true; target = "ActionManager.stop(Action)"; risk = "不能与 PZTimedActionTrace 同时加载；不强制动作完成，不改配方和物品。"; description = "按玩家动作实例停止读条，防止不同玩家相同一字节动作编号互相取消。" },
         [pscustomobject][ordered]@{ id = "PZSpriteConfigAliasPatch"; name = "动态贴图映射兼容"; category = "区块兼容"; fileName = "PZSpriteConfigAliasPatch-agent.jar"; arguments = "enabled=true"; activePattern = '\[PZSpriteAlias\].*(?:ACTIVE|agent installed)'; compatibility = "PZ 42.20.x"; manageable = $true; target = "SpriteConfigManager / TileInfo.verifyObject"; risk = "只映射 24 个已确认贴图；不能与旧 PZSpriteConfigGuard 同时启用。"; description = "把 Open All Containers、Wooden_Windows 与 Lifestyle 的合法动态贴图映射回实体原贴图后执行完整原版初始化。" },
         [pscustomobject][ordered]@{ id = "PZPlayerStateFiniteGuard"; name = "玩家状态有限数防护"; category = "数值安全"; fileName = "PZPlayerStateFiniteGuard-agent.jar"; arguments = ""; activePattern = '\[PZPlayerStateFiniteGuard\] ACTIVE'; compatibility = "PZ 42.20.x"; manageable = $true; target = "Stats / Nutrition / Thermoregulator"; risk = "只拒绝 NaN 和 Infinity；不会自动修复已经保存的最低值。"; description = "在原生 setter 入口拒绝非有限数，避免食物或温度计算污染角色状态并保存。" },
