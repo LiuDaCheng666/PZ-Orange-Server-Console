@@ -2819,9 +2819,11 @@ function Get-AdminItemVaultProfilePaths {
     param($Profile)
     $luaRoot = Join-Path ([string]$Profile.dataRoot) "Lua"
     return [pscustomobject]@{
-        export = Join-Path $luaRoot "OrangeCommunityEconomy-admin-vault-exports.jsonl"
-        import = Join-Path $luaRoot "OrangeCommunityEconomy-admin-vault-imports.jsonl"
-        receipt = Join-Path $luaRoot "OrangeCommunityEconomy-admin-vault-receipts.jsonl"
+        export = Join-Path $luaRoot "OrangeCommunityEconomy-admin-vault-exports.txt"
+        import = Join-Path $luaRoot "OrangeCommunityEconomy-admin-vault-imports.txt"
+        receipt = Join-Path $luaRoot "OrangeCommunityEconomy-admin-vault-receipts.txt"
+        legacyExport = Join-Path $luaRoot "OrangeCommunityEconomy-admin-vault-exports.jsonl"
+        legacyReceipt = Join-Path $luaRoot "OrangeCommunityEconomy-admin-vault-receipts.jsonl"
     }
 }
 
@@ -2893,30 +2895,38 @@ function Import-AdminItemVaultTemplates {
 
     foreach ($profile in $serverProfiles) {
         $paths = Get-AdminItemVaultProfilePaths -Profile $profile
-        $rows = @(Read-AdminItemVaultJsonLines -Path $paths.export)
-        $cursor = @($store.sourceCursors | Where-Object { [string]$_.profileId -ceq [string]$profile.id } | Select-Object -First 1)
-        $start = if ($cursor.Count -and [int]$cursor[0].lineCount -le $rows.Count) { [int]$cursor[0].lineCount } else { 0 }
-        for ($index = $start; $index -lt $rows.Count; $index++) {
-            $row = $rows[$index]
-            if (-not $row.valid -or -not (Test-AdminItemVaultTemplateRecord -Record $row.value)) { $invalid++; continue }
-            $record = $row.value
-            $id = [string]$record.templateId
-            if ($templateIds.ContainsKey($id) -or $tombstones.ContainsKey($id)) { continue }
-            $record | Add-Member -NotePropertyName sourceProfileId -NotePropertyValue ([string]$profile.id) -Force
-            $record | Add-Member -NotePropertyName sourceProfileName -NotePropertyValue ([string]$profile.name) -Force
-            $record | Add-Member -NotePropertyName importedAt -NotePropertyValue ((Get-Date).ToString("o")) -Force
-            $store.templates += $record
-            $templateIds[$id] = $true
-            $imported++
-            $changed = $true
+        $exportPaths = @([string]$paths.legacyExport, [string]$paths.export) | Select-Object -Unique
+        foreach ($exportPath in $exportPaths) {
+            $rows = @(Read-AdminItemVaultJsonLines -Path $exportPath)
+            $cursor = @($store.sourceCursors | Where-Object {
+                [string]$_.profileId -ceq [string]$profile.id -and [string]$_.path -ceq $exportPath
+            } | Select-Object -First 1)
+            $previousCount = if ($cursor.Count) { [int]$cursor[0].lineCount } else { 0 }
+            $start = if ($cursor.Count -and $previousCount -le $rows.Count) { $previousCount } else { 0 }
+            for ($index = $start; $index -lt $rows.Count; $index++) {
+                $row = $rows[$index]
+                if (-not $row.valid -or -not (Test-AdminItemVaultTemplateRecord -Record $row.value)) { $invalid++; continue }
+                $record = $row.value
+                $id = [string]$record.templateId
+                if ($templateIds.ContainsKey($id) -or $tombstones.ContainsKey($id)) { continue }
+                $record | Add-Member -NotePropertyName sourceProfileId -NotePropertyValue ([string]$profile.id) -Force
+                $record | Add-Member -NotePropertyName sourceProfileName -NotePropertyValue ([string]$profile.name) -Force
+                $record | Add-Member -NotePropertyName importedAt -NotePropertyValue ((Get-Date).ToString("o")) -Force
+                $store.templates += $record
+                $templateIds[$id] = $true
+                $imported++
+                $changed = $true
+            }
+            $store.sourceCursors = @($store.sourceCursors | Where-Object {
+                -not ([string]$_.profileId -ceq [string]$profile.id -and [string]$_.path -ceq $exportPath)
+            }) + @([pscustomobject]@{
+                profileId = [string]$profile.id
+                lineCount = $rows.Count
+                path = $exportPath
+                checkedAt = (Get-Date).ToString("o")
+            })
+            if (-not $cursor.Count -or $previousCount -ne $rows.Count) { $changed = $true }
         }
-        $store.sourceCursors = @($store.sourceCursors | Where-Object { [string]$_.profileId -cne [string]$profile.id }) + @([pscustomobject]@{
-            profileId = [string]$profile.id
-            lineCount = $rows.Count
-            path = [string]$paths.export
-            checkedAt = (Get-Date).ToString("o")
-        })
-        if ($start -ne $rows.Count) { $changed = $true }
     }
     if ($changed) { Save-AdminItemVaultStore -Store $store }
     if ($imported -gt 0 -or $invalid -gt 0) {
@@ -2930,14 +2940,17 @@ function Sync-AdminItemVaultReceipts {
     $latest = @{}
     foreach ($profile in $serverProfiles) {
         $paths = Get-AdminItemVaultProfilePaths -Profile $profile
-        foreach ($row in @(Read-AdminItemVaultJsonLines -Path $paths.receipt)) {
-            if (-not $row.valid) { continue }
-            $receipt = $row.value
-            $requestId = [string]$receipt.requestId
-            if ($requestId -notmatch '^vault-grant-[A-Za-z0-9-]+$') { continue }
-            $receipt | Add-Member -NotePropertyName profileId -NotePropertyValue ([string]$profile.id) -Force
-            $current = $latest[$requestId]
-            if (-not $current -or [double]$receipt.updatedMs -ge [double]$current.updatedMs) { $latest[$requestId] = $receipt }
+        $receiptPaths = @([string]$paths.legacyReceipt, [string]$paths.receipt) | Select-Object -Unique
+        foreach ($receiptPath in $receiptPaths) {
+            foreach ($row in @(Read-AdminItemVaultJsonLines -Path $receiptPath)) {
+                if (-not $row.valid) { continue }
+                $receipt = $row.value
+                $requestId = [string]$receipt.requestId
+                if ($requestId -notmatch '^vault-grant-[A-Za-z0-9-]+$') { continue }
+                $receipt | Add-Member -NotePropertyName profileId -NotePropertyValue ([string]$profile.id) -Force
+                $current = $latest[$requestId]
+                if (-not $current -or [double]$receipt.updatedMs -ge [double]$current.updatedMs) { $latest[$requestId] = $receipt }
+            }
         }
     }
     $changed = $false

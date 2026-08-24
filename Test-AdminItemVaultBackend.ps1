@@ -97,10 +97,20 @@ try {
         snapshot = $snapshot
     }
     $sourcePaths = Get-AdminItemVaultProfilePaths -Profile $serverProfiles[0]
+    if ([IO.Path]::GetExtension($sourcePaths.export) -cne '.txt' -or
+        [IO.Path]::GetExtension($sourcePaths.import) -cne '.txt' -or
+        [IO.Path]::GetExtension($sourcePaths.receipt) -cne '.txt') {
+        throw 'B42 vault bridge paths must use a whitelisted file extension.'
+    }
+    if ([IO.Path]::GetExtension($sourcePaths.legacyExport) -cne '.jsonl') { throw 'Legacy export compatibility path is missing.' }
+    $legacyTemplate = $template | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+    $legacyTemplate.templateId = 'vault-template-1111111111111111'
+    $legacyTemplate.snapshotHash = '1111111111111111'
+    [IO.File]::WriteAllText($sourcePaths.legacyExport, ($legacyTemplate | ConvertTo-Json -Depth 32 -Compress) + "`n", $utf8)
     [IO.File]::WriteAllText($sourcePaths.export, ($template | ConvertTo-Json -Depth 32 -Compress) + "`n", $utf8)
 
     $payload = Invoke-AdminItemVaultSync -Remote 'test' -RequestedBy 'admin' -WaitMilliseconds 1000
-    if ($payload.templates.Count -ne 1 -or $payload.imported -ne 1) { throw 'Template import failed.' }
+    if ($payload.templates.Count -ne 2 -or $payload.imported -ne 2) { throw 'Current and legacy template import failed.' }
     if ($payload.sync.synced -ne 2 -or $payload.sync.failed -ne 0) { throw 'Triggered server synchronization failed.' }
     if ([string]$payload.templates[0].snapshot.modData.nested.mode -cne 'full-auto') { throw 'Nested snapshot data changed during import.' }
 
@@ -133,12 +143,14 @@ try {
     $store.sourceCursors = @()
     Save-AdminItemVaultStore -Store $store
     $afterDelete = Get-AdminItemVaultPayload -Remote 'test' -RequestedBy 'admin'
-    if ($afterDelete.templates.Count -ne 0) { throw 'Deleted template was re-imported.' }
+    if ($afterDelete.templates.Count -ne 1 -or [string]$afterDelete.templates[0].templateId -cne 'vault-template-1111111111111111') {
+        throw 'Deleted template was re-imported or the legacy template was lost.'
+    }
     if (-not ($auditRecords | Where-Object action -ceq 'admin-item-vault-grant')) { throw 'Grant audit record is missing.' }
 
     [pscustomobject]@{
         ok = $true
-        imported = 1
+        imported = 2
         queuedCopies = 2
         receipt = 'queued_offline'
         deletedTemplateStayedDeleted = $true
