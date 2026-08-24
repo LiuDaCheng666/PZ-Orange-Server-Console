@@ -2974,6 +2974,72 @@ function Get-AdminItemVaultPayload {
     }
 }
 
+function Invoke-AdminItemVaultSync {
+    param(
+        [string]$Remote,
+        [string]$RequestedBy,
+        [int]$WaitMilliseconds = 7000
+    )
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $requests = @($serverProfiles | ForEach-Object {
+        $profile = $_
+        $requestId = "vault-sync-$([guid]::NewGuid().ToString('N'))"
+        $paths = Get-AdminItemVaultProfilePaths -Profile $profile
+        Add-AdminItemVaultJsonLine -Path $paths.import -Value ([ordered]@{
+            schema = 1
+            kind = 'sync'
+            requestId = $requestId
+            createdMs = $now
+            expiresMs = $now + 60000
+        })
+        [pscustomobject]@{
+            requestId = $requestId
+            profileId = [string]$profile.id
+            profileName = [string]$profile.name
+            receiptPath = [string]$paths.receipt
+            status = 'waiting'
+            detail = 'waiting_for_server'
+        }
+    })
+    $deadline = [DateTime]::UtcNow.AddMilliseconds([Math]::Max(0, $WaitMilliseconds))
+    do {
+        if ($WaitMilliseconds -gt 0) { Start-Sleep -Milliseconds 200 }
+        foreach ($entry in @($requests | Where-Object status -ceq 'waiting')) {
+            $receipt = @(Read-AdminItemVaultJsonLines -Path $entry.receiptPath | Where-Object {
+                $_.valid -and [string]$_.value.requestId -ceq [string]$entry.requestId
+            } | Select-Object -Last 1)
+            if ($receipt.Count) {
+                $entry.status = [string]$receipt[0].value.status
+                $entry.detail = [string]$receipt[0].value.detail
+            }
+        }
+        $waiting = @($requests | Where-Object status -ceq 'waiting').Count
+    } while ($waiting -gt 0 -and [DateTime]::UtcNow -lt $deadline)
+
+    foreach ($entry in @($requests | Where-Object status -ceq 'waiting')) {
+        $entry.status = 'timeout'
+        $entry.detail = 'server_did_not_reply'
+    }
+    $payload = Get-AdminItemVaultPayload -Remote $Remote -RequestedBy $RequestedBy
+    $synced = @($requests | Where-Object status -ceq 'synced').Count
+    $failed = @($requests | Where-Object { $_.status -notin @('synced', 'duplicate') }).Count
+    $payload['sync'] = [ordered]@{
+        requested = $requests.Count
+        synced = $synced
+        failed = $failed
+        servers = @($requests | ForEach-Object { [ordered]@{
+            id = $_.profileId
+            name = $_.profileName
+            status = $_.status
+            detail = $_.detail
+        } })
+    }
+    Add-Audit -Remote $Remote -Action 'admin-item-vault-sync' `
+        -Detail "requested=$($requests.Count) synced=$synced failed=$failed requestedBy=$RequestedBy" `
+        -Result $(if ($failed -gt 0) { 'warning' } else { 'ok' })
+    return $payload
+}
+
 function Add-AdminItemVaultGrant {
     param($Body, [string]$Remote, [string]$RequestedBy)
     if ([string]$Body.confirm -cne "GRANT_ADMIN_VAULT_ITEM") { throw "跨服发放需要二次确认。" }
@@ -7097,6 +7163,12 @@ try {
             if ($request.HttpMethod -eq "GET" -and $path -eq "/api/admin-item-vault") {
                 Assert-PlayerDataPermission -Session $session
                 Write-JsonResponse $context 200 (Get-AdminItemVaultPayload `
+                    -Remote $request.RemoteEndPoint.Address.ToString() -RequestedBy ([string]$session.user.username))
+                continue
+            }
+            if ($request.HttpMethod -eq "POST" -and $path -eq "/api/admin-item-vault/sync") {
+                Assert-PlayerDataPermission -Session $session
+                Write-JsonResponse $context 200 (Invoke-AdminItemVaultSync `
                     -Remote $request.RemoteEndPoint.Address.ToString() -RequestedBy ([string]$session.user.username))
                 continue
             }

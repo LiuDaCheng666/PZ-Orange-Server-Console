@@ -208,7 +208,7 @@ function renderVault(){
 }
 async function refreshVault(silent=false){
   if(vaultBusy)return;vaultBusy=true;const alert=document.querySelector('#vaultAlert');if(!silent){alert.dataset.state='loading';alert.querySelector('strong').textContent='正在导入服务器模板';alert.querySelector('p').textContent='正在扫描各服务器导出记录并同步发放回执。'}
-  try{const data=await api('/api/admin-item-vault',{timeoutMs:30000});vaultSnapshot=data;renderVault();alert.dataset.state=data.invalid?'warning':'ready';alert.querySelector('strong').textContent=data.invalid?'已导入模板，但发现无效记录':'保险库索引已同步';alert.querySelector('p').textContent=`当前 ${data.templates.length} 个模板，本次新增 ${data.imported} 个${data.invalid?`，跳过 ${data.invalid} 条无效记录`:''}。保存模板只复制状态，不移除游戏内原物品。`}
+  try{const data=await api(silent?'/api/admin-item-vault':'/api/admin-item-vault/sync',{method:silent?'GET':'POST',timeoutMs:30000});vaultSnapshot=data;renderVault();const sync=data.sync,failed=Number(sync?.failed||0);alert.dataset.state=data.invalid||failed?'warning':'ready';alert.querySelector('strong').textContent=failed?'保险库已导入，部分服务器未响应':data.invalid?'已导入模板，但发现无效记录':'保险库索引已同步';alert.querySelector('p').textContent=`当前 ${data.templates.length} 个模板，本次新增 ${data.imported} 个${sync?`；${sync.synced}/${sync.requested} 个服务器完成触发同步`:''}${data.invalid?`，跳过 ${data.invalid} 条无效记录`:''}。保存模板只复制状态，不移除游戏内原物品。`}
   catch(error){alert.dataset.state='error';alert.querySelector('strong').textContent='保险库读取失败';alert.querySelector('p').textContent=error.message;if(!silent)toast(error.message,true)}finally{vaultBusy=false}
 }
 async function submitVaultGrant(event){

@@ -26,7 +26,7 @@ foreach ($name in @(
     'Assert-SimpleText', 'New-AdminItemVaultStore', 'Read-AdminItemVaultStore', 'Save-AdminItemVaultStore',
     'Get-AdminItemVaultProfilePaths', 'Read-AdminItemVaultJsonLines', 'Add-AdminItemVaultJsonLine',
     'Test-AdminItemVaultTemplateRecord', 'Import-AdminItemVaultTemplates', 'Sync-AdminItemVaultReceipts',
-    'Get-AdminItemVaultPayload', 'Add-AdminItemVaultGrant', 'Remove-AdminItemVaultTemplate',
+    'Get-AdminItemVaultPayload', 'Invoke-AdminItemVaultSync', 'Add-AdminItemVaultGrant', 'Remove-AdminItemVaultTemplate',
     'Get-AdminItemVaultReceiptPayload'
 )) { Import-PanelFunction -Name $name }
 
@@ -55,6 +55,25 @@ $serverProfiles = @(
     [pscustomobject]@{ id = 'two'; name = 'Server Two'; serverName = 'server2'; dataRoot = (Join-Path $testRoot 'two') }
 )
 foreach ($profile in $serverProfiles) { New-Item -ItemType Directory -Path (Join-Path $profile.dataRoot 'Lua') -Force | Out-Null }
+$processedSyncRequests = @{}
+
+function Start-Sleep {
+    param([int]$Milliseconds)
+    foreach ($profile in $script:serverProfiles) {
+        $paths = Get-AdminItemVaultProfilePaths -Profile $profile
+        foreach ($row in @(Read-AdminItemVaultJsonLines -Path $paths.import)) {
+            if (-not $row.valid -or [string]$row.value.kind -cne 'sync') { continue }
+            $requestId = [string]$row.value.requestId
+            if ($script:processedSyncRequests[$requestId]) { continue }
+            Add-AdminItemVaultJsonLine -Path $paths.receipt -Value ([ordered]@{
+                schema = 1; kind = 'sync'; requestId = $requestId; status = 'synced'
+                detail = 'attempted=1;completed=1;failed=0;remaining=0'; delivered = 1
+                updatedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            })
+            $script:processedSyncRequests[$requestId] = $true
+        }
+    }
+}
 
 try {
     $snapshot = [ordered]@{
@@ -80,8 +99,9 @@ try {
     $sourcePaths = Get-AdminItemVaultProfilePaths -Profile $serverProfiles[0]
     [IO.File]::WriteAllText($sourcePaths.export, ($template | ConvertTo-Json -Depth 32 -Compress) + "`n", $utf8)
 
-    $payload = Get-AdminItemVaultPayload -Remote 'test' -RequestedBy 'admin'
+    $payload = Invoke-AdminItemVaultSync -Remote 'test' -RequestedBy 'admin' -WaitMilliseconds 1000
     if ($payload.templates.Count -ne 1 -or $payload.imported -ne 1) { throw 'Template import failed.' }
+    if ($payload.sync.synced -ne 2 -or $payload.sync.failed -ne 0) { throw 'Triggered server synchronization failed.' }
     if ([string]$payload.templates[0].snapshot.modData.nested.mode -cne 'full-auto') { throw 'Nested snapshot data changed during import.' }
 
     $grantResult = Add-AdminItemVaultGrant -Remote 'test' -RequestedBy 'admin' -Body ([pscustomobject]@{
@@ -93,7 +113,9 @@ try {
         count = 2
     })
     $targetPaths = Get-AdminItemVaultProfilePaths -Profile $serverProfiles[1]
-    $queueRows = @(Read-AdminItemVaultJsonLines -Path $targetPaths.import)
+    $queueRows = @(Read-AdminItemVaultJsonLines -Path $targetPaths.import | Where-Object {
+        $_.valid -and [string]$_.value.requestId -ceq [string]$grantResult.grant.requestId
+    })
     if ($queueRows.Count -ne 1 -or -not $queueRows[0].valid) { throw 'Grant queue row was not written.' }
     $queued = $queueRows[0].value
     if ([string]$queued.snapshot.modData.nested.mode -cne 'full-auto' -or [int]$queued.count -ne 2 -or [int]$queued.hashVersion -ne 2) { throw 'Grant queue changed the item snapshot or hash version.' }

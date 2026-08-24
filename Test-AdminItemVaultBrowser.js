@@ -85,6 +85,7 @@ async function api(request, response, url) {
   if (url.pathname === "/api/notices/status") return json(response, { ok: true, serverId: url.searchParams.get("serverId"), channel: { usable: false } });
   if (url.pathname === "/api/players") return json(response, { ok: true, serverId: url.searchParams.get("serverId"), onlineKnown: true, online: ["TargetPlayer"], players: [{ username: "TargetPlayer", steamId: "76561198000000002", online: true, role: "user" }, { username: "HistoryPlayer", steamId: "76561198000000003", online: false, role: "user" }] });
   if (url.pathname === "/api/admin-item-vault" && request.method === "GET") return json(response, { ok: true, templates: [containerTemplate, template], grants: [], imported: 2, invalid: 0, profiles, updatedAt: new Date().toISOString() });
+  if (url.pathname === "/api/admin-item-vault/sync" && request.method === "POST") return json(response, { ok: true, templates: [containerTemplate, template], grants: [], imported: 2, invalid: 0, profiles, updatedAt: new Date().toISOString(), sync: { requested: 2, synced: 2, failed: 0, servers: profiles.map(profile => ({ id: profile.id, name: profile.name, status: "synced", detail: "completed=1" })) } });
   if (url.pathname === "/api/admin-item-vault/grant" && request.method === "POST") {
     grantBody = await body(request);
     return json(response, { ok: true, message: "发放请求已写入 2服 队列。", grant: queuedGrant }, 202);
