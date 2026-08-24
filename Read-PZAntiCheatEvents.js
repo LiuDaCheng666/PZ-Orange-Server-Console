@@ -29,6 +29,8 @@ const protectedCommands = new Map([
 const selfOnlyCommands = ['player.onVehicleSleep', 'player.onDropHeavyItem'];
 
 const identities = new Map();
+const identitiesBySteamId = new Map();
+const steamIdsByUsername = new Map();
 const roleHistoryByUsername = new Map();
 const roleHistoryBySteamId = new Map();
 const bannedSteamIds = new Set();
@@ -99,8 +101,27 @@ function inWindow(line) {
   return !parsed.date || parsed.date.getTime() >= cutoff;
 }
 
-function identityFor(username) {
-  return identities.get(String(username || '').toLowerCase()) || {};
+function isSteamId(value) {
+  return /^7656119\d{10}$/.test(String(value || ''));
+}
+
+function isPlaceholderUsername(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return !normalized || ['null', 'unknown', 'none', 'undefined', '(null)'].includes(normalized);
+}
+
+function usernameKey(value) {
+  return isPlaceholderUsername(value) ? '' : String(value).trim().toLowerCase();
+}
+
+function identityFor(username, steamId = '') {
+  if (isSteamId(steamId)) return identitiesBySteamId.get(String(steamId)) || {};
+  const key = usernameKey(username);
+  if (!key) return {};
+  const matches = steamIdsByUsername.get(key);
+  if (matches?.size === 1) return identitiesBySteamId.get([...matches][0]) || {};
+  if (matches?.size > 1) return {};
+  return identities.get(key) || {};
 }
 
 function isPrivilegedRole(role) {
@@ -119,20 +140,31 @@ function rememberRole(history, key, entry) {
 }
 
 function rememberIdentity(username, steamId, ip, role = '', timeMs = 0, adminPower = null) {
-  if (!username) return;
-  const key = String(username).toLowerCase();
-  const current = identities.get(key) || {};
-  if (/^7656119\d{10}$/.test(String(steamId || ''))) current.steamId = String(steamId);
+  const key = usernameKey(username);
+  const resolvedSteamId = isSteamId(steamId) ? String(steamId) : '';
+  if (!key && !resolvedSteamId) return;
+  const current = resolvedSteamId
+    ? (identitiesBySteamId.get(resolvedSteamId) || { steamId: resolvedSteamId })
+    : (identities.get(key) || {});
+  if (resolvedSteamId) current.steamId = resolvedSteamId;
   if (ip) current.ip = String(ip);
   if (role) {
     current.role = String(role).toLowerCase();
     current.adminPower = adminPower === null ? isPrivilegedRole(role) : Boolean(adminPower);
     const entry = { timeMs: Number(timeMs || 0), role: current.role, adminPower: current.adminPower };
-    rememberRole(roleHistoryByUsername, key, entry);
-    if (/^7656119\d{10}$/.test(String(steamId || ''))) rememberRole(roleHistoryBySteamId, String(steamId), entry);
+    if (key) rememberRole(roleHistoryByUsername, key, entry);
+    if (resolvedSteamId) rememberRole(roleHistoryBySteamId, resolvedSteamId, entry);
   }
-  current.username = String(username);
-  identities.set(key, current);
+  if (key) current.username = String(username).trim();
+  if (resolvedSteamId) {
+    identitiesBySteamId.set(resolvedSteamId, current);
+    if (key) {
+      if (!steamIdsByUsername.has(key)) steamIdsByUsername.set(key, new Set());
+      steamIdsByUsername.get(key).add(resolvedSteamId);
+    }
+  } else if (key) {
+    identities.set(key, current);
+  }
 }
 
 function roleAt(username, steamId, timeMs = 0) {
@@ -150,13 +182,14 @@ function roleAt(username, steamId, timeMs = 0) {
   }
   if (resolved) return resolved;
   if (timeMs > 0 && hasHistory) return null;
-  const current = identityFor(username);
+  const current = identityFor(username, steamId);
   return current.role ? { timeMs: 0, role: current.role, adminPower: Boolean(current.adminPower) } : null;
 }
 
 function ensurePlayer(steamId, username) {
-  const resolved = /^7656119\d{10}$/.test(String(steamId || '')) ? String(steamId) : '';
-  const key = resolved || `user:${String(username || 'unknown').toLowerCase()}`;
+  const resolved = isSteamId(steamId) ? String(steamId) : '';
+  const nameKey = usernameKey(username);
+  const key = resolved || `user:${nameKey || 'identity-pending'}`;
   if (!playerMap.has(key)) {
     playerMap.set(key, {
       steamId: resolved,
@@ -173,8 +206,8 @@ function ensurePlayer(steamId, username) {
     });
   }
   const player = playerMap.get(key);
-  if (username) player.usernames.add(String(username));
-  const known = identityFor(username);
+  if (nameKey) player.usernames.add(String(username).trim());
+  const known = identityFor(username, resolved);
   if (!player.steamId && known.steamId) player.steamId = known.steamId;
   if (known.ip) player.ips.add(known.ip);
   if (known.role) player.roles.add(known.role);
@@ -211,12 +244,20 @@ function parseKeyValues(text) {
 }
 
 function forEachLine(file, callback) {
-  const text = path.basename(file).toLowerCase() === 'server-console.txt'
+  const basename = path.basename(file).toLowerCase();
+  const text = basename === 'server-console.txt'
     ? readTail(file, 16 * 1024 * 1024)
     : fs.readFileSync(file, 'utf8');
   const lines = text.split(/\r?\n/);
   linesScanned += lines.length;
-  for (let index = 0; index < lines.length; index += 1) callback(lines[index], index + 1);
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^orangeanticheat-events(?:\.\d+)?\.jsonl$/.test(basename)) {
+      let record;
+      try { record = JSON.parse(lines[index]); } catch { continue; }
+      if (!record?.time || !record?.message) continue;
+      callback(`[${record.time}] ${record.message}`, index + 1);
+    } else callback(lines[index], index + 1);
+  }
 }
 
 function eventSource(file, lineNumber) {
@@ -327,17 +368,19 @@ function parseStructuredGuard(file, line, lineNumber) {
   const values = parseKeyValues(line);
   const parsed = lineTime(line);
   const username = String(values.username || 'unknown').replace(/_/g, ' ');
-  const steamId = /^7656119\d{10}$/.test(values.steamId || '') ? values.steamId : (identityFor(username).steamId || '');
+  const steamId = isSteamId(values.steamId) ? values.steamId : (identityFor(username).steamId || '');
   const player = ensurePlayer(steamId, username);
   const time = isoTime(parsed.raw);
   updateSeen(player, time);
   const sequence = /\bf:(\d+)\s+st:([0-9,]+)>/.exec(line);
-  const guardDedupe = sequence
+  const guardDedupe = values.eventId
+    ? `orange-guard-id|${values.eventId}`
+    : sequence
     ? ['orange-guard', sequence[1], sequence[2], player.steamId, values.module, values.command,
       values.sourceType, values.targetType, values.itemId, values.packet, values.restoredParts,
       values.increasedParts, values.action,
       values.reason, values.targetId].join('|')
-    : '';
+      : '';
   if (observedHealthSync) {
     const reason = values.reason || '';
     const added = addEvent({
@@ -491,7 +534,8 @@ function parseNativeSignals(file, line, lineNumber) {
 async function scanEvents(files) {
   for (const file of files) {
     const name = path.basename(file);
-    if (!/(_cmd|_user|_DebugLog-server|server-console)\.txt$/i.test(name)) continue;
+    if (!/(_cmd|_user|_DebugLog-server|server-console)\.txt$/i.test(name)
+        && !/^OrangeAntiCheat-events(?:\.\d+)?\.jsonl$/i.test(name)) continue;
     filesScanned += 1;
     bytesScanned += fs.statSync(file).size;
     forEachLine(file, (line, lineNumber) => {
@@ -563,6 +607,33 @@ async function scanPzaiIdentities(files) {
       if (!username || !telemetryRole?.name) return;
       const knownSteamId = String(record.actor?.steamId || record.data?.steamId || identityFor(username).steamId || '');
       rememberIdentity(username, knownSteamId, '', String(telemetryRole.name), Number(record.timestampMs || 0), telemetryRole.adminPower === true);
+    });
+  }
+}
+
+function scanPanelBanAudit() {
+  if (!serverId) return;
+  const auditPath = path.join(__dirname, 'audit.log');
+  if (!fs.existsSync(auditPath)) return;
+  const lines = readTail(auditPath, 8 * 1024 * 1024).split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^(\S+)\t[^\t]*\tanticheat-ban\t[^\t]*\tserver=([^\s]+)\s+steamId=(7656119\d{10})\s+username=(.*?)\s+reason=(.*)$/.exec(lines[index]);
+    if (!match || match[2] !== serverId) continue;
+    const timeMs = Date.parse(match[1]);
+    if (!Number.isFinite(timeMs) || timeMs < cutoff) continue;
+    const steamId = match[3];
+    const username = isPlaceholderUsername(match[4]) ? '' : match[4].trim();
+    const reason = match[5].trim();
+    rememberIdentity(username, steamId, '');
+    const player = ensurePlayer(steamId, username);
+    const time = new Date(timeMs).toISOString();
+    updateSeen(player, time);
+    bannedSteamIds.add(steamId);
+    addEvent({
+      time, displayTime: match[1], severity: 'info', type: 'historical-ban-audit', code: 'panel-ban-audit',
+      steamId, username, command: '', coordinate: '',
+      detail: `${reason}；这是面板封禁审计。若原始高危事件已经轮转，本记录不会推断或补造具体命令。`,
+      sourceFile: 'panel:audit.log', lineNumber: index + 1,
     });
   }
 }
@@ -685,6 +756,10 @@ async function main() {
   const files = walk(logsRoot).filter(file => allowed.test(path.basename(file)) && fs.statSync(file).mtimeMs >= cutoff - 3600000);
   if (fs.existsSync(consoleLogPath) && fs.statSync(consoleLogPath).mtimeMs >= cutoff - 3600000) files.push(consoleLogPath);
   const luaRoot = path.join(dataRoot, 'Lua');
+  if (fs.existsSync(luaRoot)) {
+    files.push(...walk(luaRoot).filter(file => /^OrangeAntiCheat-events(?:\.\d+)?\.jsonl$/i.test(path.basename(file))
+      && fs.statSync(file).mtimeMs >= cutoff - 3600000));
+  }
   const pzaiFiles = fs.existsSync(luaRoot)
     ? walk(luaRoot).filter(file => /^PZAI-session-\d+-events\.log$/i.test(path.basename(file)) && fs.statSync(file).mtimeMs >= cutoff - 3600000)
     : [];
@@ -692,6 +767,7 @@ async function main() {
   await scanPzaiIdentities(pzaiFiles);
   await scanEvents(files);
   await scanPzaiEvents(pzaiFiles);
+  scanPanelBanAudit();
   const players = finalizePlayers();
   events.push(...globalSignals);
   events.sort((a, b) => String(b.time).localeCompare(String(a.time)));
@@ -699,7 +775,9 @@ async function main() {
   for (const player of players) {
     const names = new Set(player.usernames.map(value => String(value).toLowerCase()));
     player.evidenceEvents = events
-      .filter(event => (player.steamId && event.steamId === player.steamId) || names.has(String(event.username || '').toLowerCase()))
+      .filter(event => event.steamId
+        ? Boolean(player.steamId && event.steamId === player.steamId)
+        : names.has(String(event.username || '').toLowerCase()))
       .sort((left, right) => (severityRank[right.severity] || 0) - (severityRank[left.severity] || 0) || String(right.time).localeCompare(String(left.time)))
       .slice(0, 24);
   }
@@ -708,7 +786,15 @@ async function main() {
   const installed = fs.existsSync(agentPath);
   const consoleText = readTail(consoleLogPath, 16 * 1024 * 1024);
   const agentState = readAgentRuntimeState(consoleText);
-  const version = agentState.version || (installed ? '2.0.0' : '');
+  const patchManifestPath = path.join(__dirname, 'patches', 'OrangeAntiCheat', 'manifest.json');
+  let installedVersion = installed ? 'unknown' : '';
+  try {
+    installedVersion = String(JSON.parse(fs.readFileSync(patchManifestPath, 'utf8')).version || installedVersion);
+  } catch {}
+  const activeVersion = agentState.version;
+  const pendingRestart = installed && !agentState.disabledReason
+    && (!agentState.active || (installedVersion !== 'unknown' && activeVersion !== installedVersion));
+  const version = activeVersion || installedVersion;
   const criticalPlayers = players.filter(player => player.severity === 'critical' && !player.banned).length;
   const pzaiRoot = path.join(runtimeRoot, 'steamapps', 'workshop', 'content', '108600', '3777330954', 'mods', 'PZAIServerAgent', '42.20');
   const pzaiModInfoPath = path.join(pzaiRoot, 'mod.info');
@@ -722,8 +808,8 @@ async function main() {
     ok: true, generatedAt: new Date().toISOString(), hours,
     patch: {
       installed, active: agentState.active,
-      pendingRestart: installed && !agentState.active && !agentState.disabledReason,
-      version, disabledReason: agentState.disabledReason, classSha256: agentState.classSha256,
+      pendingRestart, version, activeVersion, installedVersion,
+      disabledReason: agentState.disabledReason, classSha256: agentState.classSha256,
     },
     pzai: { installed: Boolean(pzaiVersion), version: pzaiVersion, integrationReady: pzaiIntegrationReady },
     summary: {

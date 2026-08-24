@@ -784,7 +784,7 @@ document.querySelector('#grantForm').onsubmit=event=>{event.preventDefault();sub
 document.querySelector('#moderationForm').addEventListener('click',event=>{const button=event.target.closest('button[data-mode]');if(!button)return;event.preventDefault();const data=formData(document.querySelector('#moderationForm')),mode=button.dataset.mode;if(mode==='ban'&&!confirm(`确认封禁玩家 ${data.username}？`))return;command({action:mode,...data,confirm:mode==='ban'?'CONFIRM':undefined})});
 
 const antiCheatSeverityLabels={critical:'高危',high:'较高',warning:'需观察',low:'低风险',info:'辅助信息'};
-const antiCheatTypeLabels={'protected-command':'未鉴权调试命令','blocked-command':'危险命令已阻断','blocked-item-transform':'非法物品替换已阻断','blocked-health-overwrite':'非法健康回写已阻断（旧版）','observed-health-sync':'健康同步异常（仅记录）','authorized-admin-action':'管理员授权操作','native-anticheat':'原版反作弊','checksum':'Lua 校验异常','lua-checksum':'Lua 校验异常','permission':'权限模式异常','permission-mode':'权限模式异常','command-rate':'命令频率异常','pzai-server-snapshot':'PZAI 服务端可信快照','pzai-client-snapshot':'PZAI 客户端声明'};
+const antiCheatTypeLabels={'protected-command':'未鉴权调试命令','blocked-command':'危险命令已阻断','blocked-item-transform':'非法物品替换已阻断','blocked-health-overwrite':'非法健康回写已阻断（旧版）','observed-health-sync':'健康同步异常（仅记录）','authorized-admin-action':'管理员授权操作','historical-ban-audit':'历史封禁审计','native-anticheat':'原版反作弊','checksum':'Lua 校验异常','lua-checksum':'Lua 校验异常','permission':'权限模式异常','permission-mode':'权限模式异常','command-rate':'命令频率异常','pzai-server-snapshot':'PZAI 服务端可信快照','pzai-client-snapshot':'PZAI 客户端声明'};
 const antiCheatCommandMetadata={
   'object.addFireOnSquare':{label:'点燃地块',category:'危险调试命令',risk:'dangerous',explanation:'原版调试接口，可在指定地块生成火焰；普通玩家不应拥有调用权限。'},
   'object.addSmokeOnSquare':{label:'添加调试烟雾',category:'危险调试命令',risk:'dangerous',explanation:'原版调试接口，可在指定地块生成烟雾；普通玩家不应拥有调用权限。'},
@@ -821,10 +821,11 @@ const antiCheatCodeLabels={
   'debug-fire':'点燃地块','debug-smoke':'添加调试烟雾','debug-explosion':'制造调试爆炸','debug-fluid':'修改调试液体','container-refill':'重置容器探索状态',
   'debug-fluid-component':'修改液体容器组件','health-cheat':'修改玩家健康状态','weight-cheat':'修改玩家重量参数','erosion-cheat':'关闭地块侵蚀','debug-thunder':'触发雷声事件',
   'Power':'权限或数据包模式异常','Speed':'移动速度异常','PlayerUpdate':'玩家状态更新异常','SafeHouseMember':'安全屋成员操作异常','lua-checksum':'Lua / 脚本完整性不一致',
-  'server-authoritative':'服务端可信状态快照','client-declared':'客户端辅助状态声明','server-blocked':'服务端已拒绝危险命令','item-transform-blocked':'服务端已拒绝非法物品替换','health-overwrite-blocked':'服务端已拒绝非法健康回写','health-sync-observed':'健康同步异常（未阻断）','health-relay':'管理员健康操作回传','invalid-mode':'反作弊权限模式无效'
+  'server-authoritative':'服务端可信状态快照','client-declared':'客户端辅助状态声明','server-blocked':'服务端已拒绝危险命令','item-transform-blocked':'服务端已拒绝非法物品替换','health-overwrite-blocked':'服务端已拒绝非法健康回写','health-sync-observed':'健康同步异常（未阻断）','health-relay':'管理员健康操作回传','panel-ban-audit':'面板历史封禁记录','invalid-mode':'反作弊权限模式无效'
 };
 function getAntiCheatCategory(event={}){
   if(event.type==='authorized-admin-action')return{label:'合法管理操作',tone:'info'};
+  if(event.type==='historical-ban-audit')return{label:'处罚审计',tone:'info'};
   if(event.type==='blocked-item-transform')return{label:'物品交易鉴权',tone:'critical'};
   if(event.type==='blocked-health-overwrite')return{label:'健康同步鉴权',tone:'critical'};
   if(event.type==='observed-health-sync')return{label:'健康同步观察',tone:'warning'};
@@ -850,6 +851,7 @@ function getAntiCheatExplanation(event={}){
   const detail=String(event.detail||'').trim(),action=/action=Kick/i.test(detail)?'原版反作弊已踢出玩家':/action=Ban/i.test(detail)?'原版反作弊已封禁玩家':/action=Log/i.test(detail)?'原版只记录日志，未自动处罚':'';
   let explanation='';
   if(event.type==='authorized-admin-action')explanation=event.code==='health-relay'?'管理员先通过原版 UseHealthCheat 权限检查发起操作，随后目标客户端完成对应健康回传。这是正常管理链，保留审计但不增加风险分。':'服务端连接日志确认该玩家在操作发生时具有管理权限。本次操作保留在审计记录中，但不计入作弊风险。';
+  else if(event.type==='historical-ban-audit')explanation='面板确认该 SteamID 曾由管理员执行反作弊封禁。若当时的原始高危日志已轮转，本记录只证明封禁操作存在，不推断具体作弊命令。';
   else if(event.type==='protected-command')explanation='普通玩家客户端调用了仅应由管理员或调试权限使用的原版命令，属于需要重点核查的危险调用。';
   else if(event.type==='blocked-command')explanation='服务端鉴权补丁已经拒绝本次危险命令，游戏状态不应被该命令修改。';
   else if(event.type==='blocked-item-transform')explanation='客户端试图把一个合法载体替换成载体脚本未允许的物品类型。Java Agent 已在原版 ItemTransaction 执行前拒绝，因此本次请求不会生成目标物品。';
@@ -939,7 +941,7 @@ document.querySelector('#serverPatchEnabled').onchange=updateServerPatchApplySta
 document.querySelector('#applyServerPatch').onclick=applyServerPatchState;
 function antiCheatMatchesPlayer(event,player){
   if(!event||!player)return false;
-  if(player.steamId&&event.steamId===player.steamId)return true;
+  if(event.steamId)return Boolean(player.steamId&&event.steamId===player.steamId);
   const names=new Set((player.usernames||[]).map(value=>String(value).toLowerCase()));
   return names.has(String(event.username||'').toLowerCase());
 }

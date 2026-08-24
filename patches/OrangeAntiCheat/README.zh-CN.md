@@ -1,4 +1,4 @@
-# OrangeAntiCheat 2.4.1 Java Agent
+# OrangeAntiCheat 2.5.0 Java Agent
 
 本补丁在服务端 Java 层拦截原版 `OnClientCommand` 事件中的 14 个危险命令路径。
 它不修改 `media/lua/server/ClientCommands.lua`，不会造成客户端 Lua 校验不一致，
@@ -36,6 +36,11 @@
 
 Web 面板的 OrangeAntiCheat 挂载开关统一管理三个服务器的启动参数。切换后需要完整
 重启相应服务器。补丁不写世界、角色数据库或 ModData，移除启动参数即可回退。
+
+2.5.0 起，实际阻断事件和限频后的健康观察同时写入每服独立的
+`cachedir/Lua/OrangeAntiCheat-events.jsonl`。单文件上限 8 MiB，滚动保留 5 份；
+Web 面板读取该文件后，控制台滚动或服务器重启不会再让高危证据消失。写入失败只输出
+限频警告并回退到控制台，不改变拦截结果，也不写入世界或角色存档。
 
 补丁只支持经过 SHA-256 审计的 `LuaEventManager.class`、`TransactionManager.class`、
 `PlayerHealthPacket.class` 和 `PlayerDamagePacket.class`。

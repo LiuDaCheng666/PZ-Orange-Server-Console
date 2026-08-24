@@ -1,6 +1,6 @@
 ﻿param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "dist-public"),
-    [string]$Version = "0.9.8",
+    [string]$Version = "0.9.9",
     [string]$PackageName
 )
 
@@ -178,6 +178,7 @@ $rootFiles = @(
     "Test-DisasterCenterBackend.ps1",
     "Test-PlayerAuditAI.ps1",
     "Test-PlayerAuditAIRetry.ps1",
+    "Test-AntiCheatIdentity.js",
     "CHANGELOG.md",
     "SECURITY.md",
     "panel-config.json",
@@ -202,6 +203,7 @@ foreach ($name in @(
     Copy-RequiredFile -Name "tools\PZSelectiveWorldReset\$name"
 }
 Copy-RequiredDirectory -Name "skill"
+Copy-RequiredDirectory -Name "tests"
 foreach ($name in @("index.html", "app.css", "app.js", "lucide.min.js", "qrcode.min.js")) {
     Copy-RequiredFile -Name "web\$name"
 }
