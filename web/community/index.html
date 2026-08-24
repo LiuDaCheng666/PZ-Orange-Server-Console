@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111416">
+  <title>PZ橙子社区聊天</title>
+  <link rel="stylesheet" href="/community/app.css">
+</head>
+<body>
+  <div class="auth-screen" id="authScreen">
+    <form class="auth-panel" id="loginForm">
+      <div class="brand-mark"><span>橙</span><div><strong>PZ橙子社区聊天</strong><small>专属访问</small></div></div>
+      <label>登录名<input name="username" autocomplete="username" maxlength="32" required autofocus></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" maxlength="128" required></label>
+      <button type="submit">登录</button>
+      <p class="form-error" id="authError" role="alert"></p>
+    </form>
+  </div>
+
+  <div class="shell" id="app" hidden>
+    <header class="topbar">
+      <div class="brand-mark compact"><span>橙</span><div><strong>PZ橙子社区聊天</strong><small id="signedUser"></small></div></div>
+      <button class="icon-button" id="logoutButton" type="button" title="退出登录" aria-label="退出登录"><i data-lucide="log-out"></i></button>
+    </header>
+
+    <nav class="server-tabs" id="serverTabs" aria-label="切换服务器"></nav>
+
+    <main class="workspace">
+      <section class="chat-pane">
+        <div class="pane-head">
+          <div><span class="eyebrow">公开频道</span><h1>游戏聊天</h1></div>
+          <div class="channel-tabs" id="channelTabs">
+            <button class="active" type="button" data-channel="all">全部</button>
+            <button type="button" data-channel="General">全服</button>
+            <button type="button" data-channel="Local">附近</button>
+            <button type="button" data-channel="Broadcast">广播</button>
+          </div>
+        </div>
+        <div class="chat-status"><span id="chatDot"></span><small id="chatStatus">正在连接聊天日志</small></div>
+        <div class="messages" id="messages" aria-live="polite"><p class="empty">正在读取游戏聊天...</p></div>
+      </section>
+
+      <aside class="players-pane">
+        <div class="pane-head"><div><span class="eyebrow">当前服务器</span><h2>在线玩家</h2></div><strong class="count" id="playerCount">0</strong></div>
+        <div class="players" id="players"><p class="empty">正在读取在线玩家...</p></div>
+      </aside>
+    </main>
+
+    <section class="notice-pane">
+      <div class="notice-heading">
+        <div><span class="eyebrow">PZWebNotices</span><h2>游戏内弹窗</h2></div>
+        <span class="notice-state" id="noticeState">检测通道</span>
+      </div>
+      <form id="noticeForm">
+        <label>发送目标<select name="targetType" id="targetType"><option value="all">全部在线玩家</option><option value="player">指定在线玩家</option></select></label>
+        <label id="targetPlayerField" hidden>在线玩家<select name="targetUsername" id="targetUsername"></select></label>
+        <label>样式<select name="style"><option value="info">普通</option><option value="success">成功</option><option value="warning">警告</option></select></label>
+        <label>显示秒数<input name="duration" type="number" min="3" max="60" value="10" required></label>
+        <label class="wide">标题<input name="title" maxlength="80" value="服务器通知" required></label>
+        <label class="wide">正文<textarea name="message" rows="4" maxlength="1300" required></textarea></label>
+        <div class="notice-actions wide"><small id="noticeResult">等待发送</small><button type="submit" id="sendNotice"><i data-lucide="send"></i><span>发送弹窗</span></button></div>
+      </form>
+    </section>
+  </div>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="/lucide.min.js"></script>
+  <script src="/community/app.js"></script>
+</body>
+</html>

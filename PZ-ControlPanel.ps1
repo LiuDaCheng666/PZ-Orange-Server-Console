@@ -12,6 +12,7 @@ $auditPath = Join-Path $root "audit.log"
 $profilesPath = Join-Path $root "servers.json"
 $profilesBackupPath = Join-Path $root "servers.json.bak"
 $usersPath = Join-Path $root "users.json"
+$communityUsersPath = Join-Path $root "community-users.json"
 $maintenanceSchedulesPath = Join-Path $root "maintenance-schedules.json"
 $aiOperationPoliciesPath = Join-Path $root "ai-operation-policies.json"
 $broadcastSchedulesPath = Join-Path $root "broadcast-schedules.json"
@@ -76,7 +77,11 @@ $disasterSchedulerLastTick = [datetime]::MinValue
 $disasterQueryAt = @{}
 $sessions = @{}
 $loginAttempts = @{}
+$communitySessions = @{}
+$communityLoginAttempts = @{}
+$communityNoticeLastSentAt = @{}
 $sessionCookieName = "PZSESSION"
+$communitySessionCookieName = "PZCOMMUNITYSESSION"
 $sessionLifetime = [timespan]::FromHours(12)
 $passwordIterations = 310000
 
@@ -833,6 +838,113 @@ function Get-ManagedProfilePaths {
         operationPath = Join-Path $controlRoot "lifecycle-operation.json"
         lifecycleLockPath = Join-Path $controlRoot "lifecycle.lock"
     }
+}
+
+function Read-CommunityUsers {
+    if (-not (Test-Path -LiteralPath $communityUsersPath)) { return @() }
+    try {
+        $document = Get-Content -LiteralPath $communityUsersPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return @($document.users)
+    }
+    catch { throw "专属聊天用户文件损坏，无法读取：$communityUsersPath" }
+}
+
+function Save-CommunityUsers {
+    param([object[]]$Users)
+    $tempPath = "$communityUsersPath.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($tempPath, ([ordered]@{ version = 1; users = @($Users) } | ConvertTo-Json -Depth 6), $utf8)
+        Move-Item -LiteralPath $tempPath -Destination $communityUsersPath -Force
+    }
+    finally { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+}
+
+function New-CommunityUser {
+    param([string]$Username, [string]$DisplayName, [string]$Password, [bool]$Enabled = $true)
+    $user = New-PanelUser -Username $Username -DisplayName $DisplayName -Password $Password -Enabled $Enabled
+    $user.PSObject.Properties.Remove("canManagePlayerData")
+    return $user
+}
+
+function Get-PublicCommunityUser {
+    param($User)
+    return [ordered]@{
+        id = [string]$User.id
+        username = [string]$User.username
+        displayName = [string]$User.displayName
+        enabled = [bool]$User.enabled
+        createdAt = [string]$User.createdAt
+        updatedAt = [string]$User.updatedAt
+    }
+}
+
+function Set-CommunitySessionCookie {
+    param($Response, [string]$Token)
+    $Response.AppendHeader("Set-Cookie", "$communitySessionCookieName=$Token; Path=/community; HttpOnly; SameSite=Strict; Max-Age=$([int]$sessionLifetime.TotalSeconds)")
+}
+
+function Clear-CommunitySessionCookie {
+    param($Response)
+    $Response.AppendHeader("Set-Cookie", "$communitySessionCookieName=; Path=/community; HttpOnly; SameSite=Strict; Max-Age=0")
+}
+
+function Get-AuthenticatedCommunitySession {
+    param($Request)
+    $token = Get-RequestCookieValue -Request $Request -Name $communitySessionCookieName
+    if ([string]::IsNullOrWhiteSpace($token) -or -not $communitySessions.ContainsKey($token)) { return $null }
+    $session = $communitySessions[$token]
+    if ((Get-Date) -ge $session.expiresAt) {
+        $communitySessions.Remove($token)
+        return $null
+    }
+    $user = Read-CommunityUsers | Where-Object { [string]$_.id -ceq [string]$session.userId } | Select-Object -First 1
+    if (-not $user -or -not [bool]$user.enabled -or [int]$user.sessionVersion -ne [int]$session.sessionVersion) {
+        $communitySessions.Remove($token)
+        return $null
+    }
+    $session.user = $user
+    return $session
+}
+
+function New-AuthenticatedCommunitySession {
+    param($User)
+    $token = New-RandomToken
+    $session = [pscustomobject]@{
+        userId = [string]$User.id
+        sessionVersion = [int]$User.sessionVersion
+        csrf = New-RandomToken -ByteCount 24
+        createdAt = Get-Date
+        expiresAt = (Get-Date).Add($sessionLifetime)
+        user = $User
+    }
+    $communitySessions[$token] = $session
+    return [pscustomobject]@{ token = $token; session = $session }
+}
+
+function Test-CommunityLoginAllowed {
+    param([string]$Remote)
+    if (-not $communityLoginAttempts.ContainsKey($Remote)) { return $true }
+    $attempt = $communityLoginAttempts[$Remote]
+    if ($attempt.blockedUntil -and (Get-Date) -lt $attempt.blockedUntil) { return $false }
+    if (((Get-Date) - $attempt.windowStart).TotalMinutes -ge 10) { $communityLoginAttempts.Remove($Remote) }
+    return $true
+}
+
+function Add-CommunityLoginFailure {
+    param([string]$Remote)
+    $now = Get-Date
+    if (-not $communityLoginAttempts.ContainsKey($Remote) -or ($now - $communityLoginAttempts[$Remote].windowStart).TotalMinutes -ge 10) {
+        $communityLoginAttempts[$Remote] = [pscustomobject]@{ count = 0; windowStart = $now; blockedUntil = $null }
+    }
+    $attempt = $communityLoginAttempts[$Remote]
+    $attempt.count++
+    if ($attempt.count -ge 5) { $attempt.blockedUntil = $now.AddMinutes(15) }
+}
+
+function Get-CommunityServerProfile {
+    param([string]$Id)
+    if ($Id -notin @("production", "server2", "server3")) { throw "该服务器不在专属聊天页面的允许列表中。" }
+    return Get-ServerProfile -Id $Id
 }
 
 function Get-PZAdminDatabasePath {
@@ -4803,6 +4915,75 @@ function Protect-PZLogText {
     return [regex]::Replace($protected, '(?im)(Your new password is)\s+[^\r\n]+', '$1 [REDACTED].')
 }
 
+function Add-CommunityNotice {
+    param($Profile, $Body, $Session, [string]$Remote)
+    $serverState = Get-ServerState -Profile $Profile
+    if (-not $serverState.alive) { throw "服务器未运行，不能发送游戏内通知。" }
+
+    $style = ([string]$Body.style).ToLowerInvariant()
+    if ($style -notin @("info", "success", "warning")) { throw "专属聊天页面只允许普通、成功或警告样式。" }
+    $duration = [int]$Body.duration
+    if ($duration -lt 3 -or $duration -gt 60) { throw "显示时长必须为 3 至 60 秒。" }
+    $title = Assert-NoticeUtf8Text -Value ([string]$Body.title) -Name "通知标题" -MaxBytes 240
+    $message = Assert-NoticeUtf8Text -Value ([string]$Body.message) -Name "通知正文" -MaxBytes 4096 -AllowNewlines
+    $targetType = ([string]$Body.targetType).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($targetType)) { $targetType = "all" }
+    if ($targetType -notin @("all", "player")) { throw "通知对象无效。" }
+
+    $targetUsername = ""
+    if ($targetType -eq "player") {
+        $targetUsername = Assert-NoticeUtf8Text -Value ([string]$Body.targetUsername) -Name "目标玩家" -MaxBytes 64
+        $directory = Get-PlayerDirectory -Profile $Profile
+        if (-not $directory.onlineKnown) { throw "当前无法确认在线玩家，不能发送定向通知。" }
+        $onlineTarget = @($directory.players | Where-Object { $_.online -and [string]$_.username -ieq $targetUsername } | Select-Object -First 1)
+        if ($onlineTarget.Count -eq 0) { throw "目标玩家当前不在线，请刷新玩家列表后重试。" }
+        $targetUsername = [string]$onlineTarget[0].username
+    }
+
+    $heartbeat = Get-NoticeHeartbeat -Profile $Profile
+    if (-not $heartbeat.usable) {
+        if (-not $heartbeat.installed) { throw "本机未找到 PZWebNotices Mod。" }
+        if ($heartbeat.status -eq "missing") { throw "尚未收到该服务器的通知 Mod 心跳。" }
+        throw "通知 Mod 心跳已超时，当前不能确认通道可用。"
+    }
+    try { $noticeVersion = [version]([string]$heartbeat.version) }
+    catch { throw "通知 Mod 心跳版本无效。" }
+    if ($noticeVersion -lt [version]"0.2.3") { throw "PZWebNotices 版本过低，需要 0.2.3 或更高版本。" }
+
+    $cooldownKey = "$([string]$Session.user.id):$([string]$Profile.id)"
+    if ($communityNoticeLastSentAt.ContainsKey($cooldownKey)) {
+        $elapsed = ((Get-Date) - [datetime]$communityNoticeLastSentAt[$cooldownKey]).TotalSeconds
+        if ($elapsed -lt 5) { throw "发送过于频繁，请等待 $([math]::Ceiling(5 - $elapsed)) 秒后再试。" }
+    }
+
+    $colors = switch ($style) {
+        "success" { @{ accent = "#35B779"; text = "#F4FFF9" } }
+        "warning" { @{ accent = "#E59A3A"; text = "#FFF8ED" } }
+        default { @{ accent = "#E87932"; text = "#FFF8F2" } }
+    }
+    $id = "notice-" + [guid]::NewGuid().ToString("N")
+    $expectedClients = if ($targetType -eq "player") { 1 } elseif ($serverState.onlineKnown) { [int]$serverState.onlineCount } else { 0 }
+    Add-NoticeQueueEntry -Profile $Profile -Id $id -TargetType $targetType -TargetUsername $targetUsername -Style $style `
+        -Duration $duration -TitleSize "medium" -BodySize "medium" -AccentColor $colors.accent -TextColor $colors.text `
+        -Title $title -Message $message -ExpectedClients $expectedClients
+    $communityNoticeLastSentAt[$cooldownKey] = Get-Date
+
+    $targetLabel = if ($targetType -eq "player") { "玩家 $targetUsername" } else { "全服玩家" }
+    Add-Audit -Remote $Remote -Action "community-notice" -Detail "account=$([string]$Session.user.username) server=$($Profile.id) id=$id target=$targetType/$targetUsername style=$style titleBytes=$($utf8.GetByteCount($title)) messageBytes=$($utf8.GetByteCount($message)) expectedClients=$expectedClients nativeBroadcast=false" -Result "queued"
+    [void](Add-ExecutionHistoryRecord -ServerId ([string]$Profile.id) -Category "broadcast" -Action "community-notice" -Source "community" `
+        -Summary "专属聊天账号发送 Mod 弹窗给 $targetLabel" -Status "queued" -Message "Mod 弹窗已提交，正在等待服务端和客户端回执。" `
+        -RequestIds @() -NoticeId $id -Detail "account=$([string]$Session.user.username); content=redacted")
+    return [ordered]@{
+        ok = $true
+        message = "通知已进入 $($Profile.name) 的 Mod 队列。"
+        id = $id
+        serverId = [string]$Profile.id
+        targetType = $targetType
+        targetUsername = $targetUsername
+        expectedClients = $expectedClients
+    }
+}
+
 function Get-LogPayload {
     param(
         $Profile,
@@ -6477,6 +6658,128 @@ try {
                 Write-TextResponse $context 200 (Get-Content -LiteralPath (Join-Path $webRoot "qrcode.min.js") -Raw -Encoding UTF8) "application/javascript"
                 continue
             }
+            if ($path -in @("/community", "/community/", "/community/index.html")) {
+                Write-TextResponse $context 200 (Get-Content -LiteralPath (Join-Path $webRoot "community\index.html") -Raw -Encoding UTF8) "text/html"
+                continue
+            }
+            if ($path -eq "/community/app.css") {
+                Write-TextResponse $context 200 (Get-Content -LiteralPath (Join-Path $webRoot "community\app.css") -Raw -Encoding UTF8) "text/css"
+                continue
+            }
+            if ($path -eq "/community/app.js") {
+                Write-TextResponse $context 200 (Get-Content -LiteralPath (Join-Path $webRoot "community\app.js") -Raw -Encoding UTF8) "application/javascript"
+                continue
+            }
+            if ($request.HttpMethod -eq "GET" -and $path -eq "/community/api/auth/session") {
+                $communitySession = Get-AuthenticatedCommunitySession -Request $request
+                Write-JsonResponse $context 200 @{
+                    ok = $true
+                    authenticated = [bool]$communitySession
+                    user = if ($communitySession) { Get-PublicCommunityUser $communitySession.user } else { $null }
+                    csrf = if ($communitySession) { [string]$communitySession.csrf } else { $null }
+                }
+                continue
+            }
+            if ($request.HttpMethod -eq "POST" -and $path -eq "/community/api/auth/login") {
+                $remote = $request.RemoteEndPoint.Address.ToString()
+                if (-not (Test-CommunityLoginAllowed -Remote $remote)) {
+                    Write-JsonResponse $context 429 @{ ok = $false; error = "登录失败次数过多，请 15 分钟后重试。" }
+                    continue
+                }
+                $body = Get-RequestBody $request
+                $username = ([string]$body.username).Trim()
+                $user = Read-CommunityUsers | Where-Object { [string]$_.username -ieq $username } | Select-Object -First 1
+                $valid = $false
+                if ($user -and [bool]$user.enabled) {
+                    try {
+                        $salt = [Convert]::FromBase64String([string]$user.passwordSalt)
+                        $expected = [Convert]::FromBase64String([string]$user.passwordHash)
+                        $actual = Get-PasswordHash -Password ([string]$body.password) -Salt $salt -Iterations ([int]$user.iterations)
+                        $valid = Test-FixedTimeEqual -Left $expected -Right $actual
+                    }
+                    catch { $valid = $false }
+                }
+                if (-not $valid) {
+                    Add-CommunityLoginFailure -Remote $remote
+                    Add-Audit -Remote $remote -Action "community-auth-login" -Detail "username=$username" -Result "failed"
+                    Write-JsonResponse $context 401 @{ ok = $false; error = "登录名或密码错误。" }
+                    continue
+                }
+                $communityLoginAttempts.Remove($remote)
+                $created = New-AuthenticatedCommunitySession -User $user
+                Set-CommunitySessionCookie -Response $context.Response -Token $created.token
+                Add-Audit -Remote $remote -Action "community-auth-login" -Detail "username=$($user.username)" -Result "ok"
+                Write-JsonResponse $context 200 @{ ok = $true; message = "登录成功。"; user = Get-PublicCommunityUser $user; csrf = $created.session.csrf }
+                continue
+            }
+            if ($request.HttpMethod -eq "POST" -and $path -eq "/community/api/auth/logout") {
+                $communitySession = Get-AuthenticatedCommunitySession -Request $request
+                $token = Get-RequestCookieValue -Request $request -Name $communitySessionCookieName
+                if ($communitySession -and (Test-Csrf -Request $request -Session $communitySession)) { $communitySessions.Remove($token) }
+                Clear-CommunitySessionCookie -Response $context.Response
+                Write-JsonResponse $context 200 @{ ok = $true; message = "已退出登录。" }
+                continue
+            }
+            if ($path -like "/community/api/*") {
+                $communitySession = Get-AuthenticatedCommunitySession -Request $request
+                if (-not $communitySession) {
+                    Write-JsonResponse $context 401 @{ ok = $false; error = "请先登录专属聊天页面。" }
+                    continue
+                }
+                if ($request.HttpMethod -ne "GET" -and -not (Test-Csrf -Request $request -Session $communitySession)) {
+                    Write-JsonResponse $context 403 @{ ok = $false; error = "请求校验失败，请刷新页面后重试。" }
+                    continue
+                }
+                if ($request.HttpMethod -eq "GET" -and $path -eq "/community/api/servers") {
+                    $communityServers = @($serverProfiles | Where-Object { [string]$_.id -in @("production", "server2", "server3") } | ForEach-Object {
+                        [ordered]@{ id = [string]$_.id; name = [string]$_.name }
+                    })
+                    Write-JsonResponse $context 200 @{ ok = $true; servers = $communityServers }
+                    continue
+                }
+                if ($request.HttpMethod -eq "GET" -and $path -eq "/community/api/chat") {
+                    $profile = Get-CommunityServerProfile -Id ([string]$request.QueryString["serverId"])
+                    $after = 0L
+                    [void][long]::TryParse($request.QueryString["after"], [ref]$after)
+                    $chatPayload = Get-ChatPayload -Profile $profile -After $after -RequestedFile ([string]$request.QueryString["file"])
+                    $publicMessages = @($chatPayload.messages | Where-Object { [string]$_.channel -in @("General", "Local", "Broadcast") } | ForEach-Object {
+                        [ordered]@{ id = [string]$_.id; timestamp = [string]$_.timestamp; channel = [string]$_.channel; author = [string]$_.author; text = [string]$_.text; kind = [string]$_.kind }
+                    })
+                    Write-JsonResponse $context 200 @{
+                        ok = $true; serverId = [string]$profile.id; messages = $publicMessages
+                        cursor = [long]$chatPayload.cursor; fileId = $chatPayload.fileId; reset = [bool]$chatPayload.reset
+                        available = [bool]$chatPayload.available; updatedAt = $chatPayload.updatedAt
+                    }
+                    continue
+                }
+                if ($request.HttpMethod -eq "GET" -and $path -eq "/community/api/players") {
+                    $profile = Get-CommunityServerProfile -Id ([string]$request.QueryString["serverId"])
+                    $directory = Get-PlayerDirectory -Profile $profile
+                    $publicPlayers = @($directory.players | Where-Object { [bool]$_.online } | Sort-Object username | ForEach-Object {
+                        [ordered]@{ username = [string]$_.username; role = [string]$_.role; online = $true }
+                    })
+                    Write-JsonResponse $context 200 @{ ok = $true; serverId = [string]$profile.id; onlineKnown = [bool]$directory.onlineKnown; players = $publicPlayers }
+                    continue
+                }
+                if ($request.HttpMethod -eq "GET" -and $path -eq "/community/api/notices/status") {
+                    $profile = Get-CommunityServerProfile -Id ([string]$request.QueryString["serverId"])
+                    Write-JsonResponse $context 200 @{ ok = $true; serverId = [string]$profile.id; channel = Get-NoticeHeartbeat -Profile $profile }
+                    continue
+                }
+                if ($request.HttpMethod -eq "GET" -and $path -eq "/community/api/notices/receipt") {
+                    $profile = Get-CommunityServerProfile -Id ([string]$request.QueryString["serverId"])
+                    Write-JsonResponse $context 200 (Get-NoticeReceiptPayload -Profile $profile -Id ([string]$request.QueryString["id"]))
+                    continue
+                }
+                if ($request.HttpMethod -eq "POST" -and $path -eq "/community/api/notices") {
+                    $body = Get-RequestBody $request
+                    $profile = Get-CommunityServerProfile -Id ([string]$body.serverId)
+                    Write-JsonResponse $context 202 (Add-CommunityNotice -Profile $profile -Body $body -Session $communitySession -Remote $request.RemoteEndPoint.Address.ToString())
+                    continue
+                }
+                Write-JsonResponse $context 404 @{ ok = $false; error = "专属聊天接口不存在。" }
+                continue
+            }
             if ($request.HttpMethod -eq "GET" -and $path -eq "/api/auth/session") {
                 $session = Get-AuthenticatedSession -Request $request
                 $users = @(Read-Users)
@@ -6625,6 +6928,70 @@ try {
                 $body = Get-RequestBody $request
                 Write-JsonResponse $context 200 (Remove-DisasterQueueEntry -Body $body `
                     -Remote $request.RemoteEndPoint.Address.ToString() -RequestedBy ([string]$session.user.username))
+                continue
+            }
+            if ($path -eq "/api/community-users") {
+                if (-not (Test-LocalRequest $request)) {
+                    Write-JsonResponse $context 403 @{ ok = $false; error = "专属聊天账号只能在服务器本机 127.0.0.1 页面管理。" }
+                    continue
+                }
+                Assert-HostControlAdministrator -Session $session
+                if ($request.HttpMethod -eq "GET") {
+                    Write-JsonResponse $context 200 @{ ok = $true; users = @(Read-CommunityUsers | ForEach-Object { Get-PublicCommunityUser $_ }) }
+                    continue
+                }
+                if ($request.HttpMethod -eq "POST") {
+                    $body = Get-RequestBody $request
+                    $users = @(Read-CommunityUsers)
+                    $username = Assert-LoginName ([string]$body.username)
+                    if ($users | Where-Object { [string]$_.username -ieq $username }) { throw "登录名已存在。" }
+                    $user = New-CommunityUser -Username $username -DisplayName ([string]$body.displayName) -Password ([string]$body.password) -Enabled ([bool]$body.enabled)
+                    Save-CommunityUsers -Users (@($users) + @($user))
+                    Add-Audit -Remote "local" -Action "community-user-create" -Detail "username=$username" -Result "ok"
+                    Write-JsonResponse $context 201 @{ ok = $true; message = "专属聊天账号已创建。"; user = Get-PublicCommunityUser $user }
+                    continue
+                }
+                if ($request.HttpMethod -eq "PUT") {
+                    $body = Get-RequestBody $request
+                    $users = @(Read-CommunityUsers)
+                    $user = $users | Where-Object { [string]$_.id -ceq [string]$body.id } | Select-Object -First 1
+                    if (-not $user) { throw "专属聊天账号不存在。" }
+                    $username = Assert-LoginName ([string]$body.username)
+                    if ($users | Where-Object { [string]$_.id -cne [string]$user.id -and [string]$_.username -ieq $username }) { throw "登录名已存在。" }
+                    $enabled = [bool]$body.enabled
+                    $invalidate = [bool]$user.enabled -and -not $enabled
+                    $user.username = $username
+                    $user.displayName = Assert-SimpleText -Value ([string]$body.displayName) -Name "显示名称" -MaxLength 64
+                    $user.enabled = $enabled
+                    if (-not [string]::IsNullOrWhiteSpace([string]$body.password)) {
+                        $password = Assert-PanelPassword ([string]$body.password)
+                        $salt = [byte[]]::new(32)
+                        $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+                        try { $rng.GetBytes($salt) } finally { $rng.Dispose() }
+                        $user.passwordSalt = [Convert]::ToBase64String($salt)
+                        $user.passwordHash = [Convert]::ToBase64String((Get-PasswordHash -Password $password -Salt $salt -Iterations $passwordIterations))
+                        $user.iterations = $passwordIterations
+                        $invalidate = $true
+                    }
+                    if ($invalidate) { $user.sessionVersion = [int]$user.sessionVersion + 1 }
+                    $user.updatedAt = (Get-Date).ToString("o")
+                    Save-CommunityUsers -Users $users
+                    Add-Audit -Remote "local" -Action "community-user-update" -Detail "username=$username enabled=$enabled" -Result "ok"
+                    Write-JsonResponse $context 200 @{ ok = $true; message = "专属聊天账号已更新。"; user = Get-PublicCommunityUser $user }
+                    continue
+                }
+                if ($request.HttpMethod -eq "DELETE") {
+                    $body = Get-RequestBody $request
+                    if ([string]$body.confirm -cne "DELETE_COMMUNITY_USER") { throw "删除账号需要二次确认。" }
+                    $users = @(Read-CommunityUsers)
+                    $user = $users | Where-Object { [string]$_.id -ceq [string]$body.id } | Select-Object -First 1
+                    if (-not $user) { throw "专属聊天账号不存在。" }
+                    Save-CommunityUsers -Users @($users | Where-Object { [string]$_.id -cne [string]$user.id })
+                    Add-Audit -Remote "local" -Action "community-user-delete" -Detail "username=$($user.username)" -Result "ok"
+                    Write-JsonResponse $context 200 @{ ok = $true; message = "专属聊天账号已删除。" }
+                    continue
+                }
+                Write-JsonResponse $context 405 @{ ok = $false; error = "不支持的请求方法。" }
                 continue
             }
             if ($path -like "/api/users*") {

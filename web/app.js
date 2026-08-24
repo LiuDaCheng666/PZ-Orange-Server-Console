@@ -7,7 +7,7 @@ let selectedId=qs.get('server')||localStorage.getItem('pz-server')||'',activeVie
 let cursor=0,paused=false,filter='all',logLines=[],lastStatus=null,statusBusy=false,logBusy=false;
 let profileConfig=null,editingProfileId='',playerDirectory=null,playersBusy=false,playerRequestServer='',playerRequestSerial=0,lastPlayersRefreshAt=0;
 let playerAdminSnapshot=null,playerAdminBusy=false,playerAdminSerial=0;
-let authSession=null,csrfToken='',appStarted=false,statusTimer=null,logTimer=null,systemTimer=null,userDirectory=[];
+let authSession=null,csrfToken='',appStarted=false,statusTimer=null,logTimer=null,systemTimer=null,userDirectory=[],communityUserDirectory=[];
 let itemSearchTimer=null,itemPollTimer=null,itemRequestSerial=0,itemIndexSnapshot=null,systemBusy=false,hostControlState=null;
 let itemCatalogTimer=null,itemCatalogSerial=0,itemCatalogPage=1,itemCatalogSnapshot=null,itemCatalogSelected=null;
 let chatCursor=0,chatFile='',chatMessages=[],chatFilter='all',chatBusy=false,chatTimer=null,chatFollowLatest=true,worldgenSerial=0;
@@ -332,7 +332,7 @@ function showView(name){
   if(name==='vault')refreshVault(false);else clearTimeout(vaultReceiptTimer);
   if(name==='disasters')refreshDisasters(false);else clearTimeout(disasterPollTimer);
   if(name==='system')pollSystem();
-  if(name==='users')refreshUsers();
+  if(name==='users'){refreshUsers();refreshCommunityUsers()}
   if(name==='ai')refreshAIPage();
   if(name==='anticheat'){refreshServerPatches();refreshAntiCheat(false)}
   if(name==='overview'||name==='console')pollLog();
@@ -1480,6 +1480,30 @@ userForm.onsubmit=async event=>{
 document.querySelector('#deleteUser').onclick=async()=>{
   const id=userForm.elements.id.value,user=userDirectory.find(item=>item.id===id);if(!user||!confirm(`确认删除 Web 用户“${user.username}”？`))return;
   try{const result=await api('/api/users',{method:'DELETE',body:JSON.stringify({id,confirm:'DELETE_USER'})});toast(result.message);fillUserForm();await refreshUsers()}catch(error){toast(error.message,true)}
+};
+
+const communityUserForm=document.querySelector('#communityUserForm');
+function fillCommunityUserForm(user=null){
+  communityUserForm.reset();communityUserForm.elements.id.value=user?.id||'';communityUserForm.elements.username.value=user?.username||'';communityUserForm.elements.displayName.value=user?.displayName||'';communityUserForm.elements.enabled.value=String(user?.enabled!==false);communityUserForm.elements.password.required=!user;
+  document.querySelector('#communityUserFormTitle').textContent=user?`编辑 ${user.username}`:'添加账号';document.querySelector('#communityUserModeBadge').textContent=user?'编辑':'新账号';document.querySelector('#deleteCommunityUser').disabled=!user;
+}
+function renderCommunityUsers(){
+  const list=document.querySelector('#communityUserList');
+  list.innerHTML=communityUserDirectory.map(user=>`<button type="button" class="user-list-item ${communityUserForm.elements.id.value===user.id?'selected':''}" data-community-user-id="${escapeHtml(user.id)}"><span class="server-icon test"><i data-lucide="message-square-user"></i></span><span><strong>${escapeHtml(user.displayName)}</strong><small>${escapeHtml(user.username)} · 仅专属聊天页面</small></span><b class="badge ${user.enabled?'running':'stopped'}">${user.enabled?'启用':'禁用'}</b></button>`).join('')||'<p class="empty-state">暂无专属聊天账号。</p>';
+  list.querySelectorAll('[data-community-user-id]').forEach(button=>button.onclick=()=>{fillCommunityUserForm(communityUserDirectory.find(user=>user.id===button.dataset.communityUserId));renderCommunityUsers()});lucide.createIcons();
+}
+async function refreshCommunityUsers(){
+  try{const result=await api('/api/community-users');communityUserDirectory=result.users||[];const selected=communityUserDirectory.find(user=>user.id===communityUserForm.elements.id.value);if(selected)fillCommunityUserForm(selected);renderCommunityUsers()}catch(error){document.querySelector('#communityUserList').innerHTML=`<p class="empty-state error-text">${escapeHtml(error.message)}</p>`}
+}
+document.querySelector('#newCommunityUser').onclick=()=>{fillCommunityUserForm();renderCommunityUsers()};
+document.querySelector('#openCommunityPage').onclick=()=>window.open('/community/','_blank','noopener');
+communityUserForm.onsubmit=async event=>{
+  event.preventDefault();const data=formData(communityUserForm),editing=Boolean(data.id),payload={id:data.id,username:data.username,displayName:data.displayName,password:data.password,enabled:data.enabled==='true'};
+  try{const result=await api('/api/community-users',{method:editing?'PUT':'POST',body:JSON.stringify(payload)});toast(result.message);fillCommunityUserForm(result.user);await refreshCommunityUsers()}catch(error){toast(error.message,true)}
+};
+document.querySelector('#deleteCommunityUser').onclick=async()=>{
+  const id=communityUserForm.elements.id.value,user=communityUserDirectory.find(item=>item.id===id);if(!user||!confirm(`确认删除专属聊天账号“${user.username}”？`))return;
+  try{const result=await api('/api/community-users',{method:'DELETE',body:JSON.stringify({id,confirm:'DELETE_COMMUNITY_USER'})});toast(result.message);fillCommunityUserForm();await refreshCommunityUsers()}catch(error){toast(error.message,true)}
 };
 
 const aiForm=document.querySelector('#aiConfigForm');

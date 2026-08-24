@@ -1,6 +1,6 @@
 ﻿param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "dist-public"),
-    [string]$Version = "0.9.7",
+    [string]$Version = "0.9.8",
     [string]$PackageName
 )
 
@@ -61,6 +61,7 @@ function Assert-PublicPackageContents {
         "ai-history.json",
         "ai-moderation-events.json",
         "users.json",
+        "community-users.json",
         "servers.json",
         "execution-history.json",
         "audit.log",
@@ -204,6 +205,7 @@ Copy-RequiredDirectory -Name "skill"
 foreach ($name in @("index.html", "app.css", "app.js", "lucide.min.js", "qrcode.min.js")) {
     Copy-RequiredFile -Name "web\$name"
 }
+Copy-RequiredDirectory -Name "web\community"
 
 $screenshots = [ordered]@{
     "pz-panel-control-features-desktop.png" = "docs\images\maintenance-and-history.png"

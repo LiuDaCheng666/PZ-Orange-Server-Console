@@ -1,5 +1,6 @@
 # Web users, sessions and local server profiles
 users.json
+community-users.json
 access-token.txt
 servers.json
 panel-state.json
