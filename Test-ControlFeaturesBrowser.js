@@ -77,11 +77,13 @@ async function handleApi(request, response, url) {
       sourceFiles: [{ path: 'patches/OrangeAntiCheat/manifest.json', present: true, sha256: 'a'.repeat(64) }],
     },
     components: [
-      { id: 'OrangeAntiCheat', name: '服务端危险命令鉴权', technicalName: 'OrangeAntiCheat', category: '安全鉴权', description: 'Java Agent 在 Lua 事件触发前拒绝普通玩家调用原版管理员或调试命令，不修改任何游戏 Lua 文件。', version: '2.0.0', compatibility: 'PZ 42.20.2（精确类哈希）', manageable: true, enabled: true, scopes: [{ runtimeRoot: 'D:\\PZ Test Server', filePath: 'D:\\PZ Test Server\\server-patches\\OrangeAntiCheat-agent.jar', filePresent: true, fileVersion: '2.0.0', buildTime: '2026-08-21 18:00', sha256: 'c'.repeat(64), pendingRestart: false, servers: [{ id: 'mock', name: '测试服务器', running: true, configured: true, active: true, activeVersion: '2.0.0', detail: 'Java Agent 已生效' }] }] },
-      { id: 'PZTimedActionIsolationFix', name: '多人长读条动作隔离', technicalName: 'PZTimedActionIsolationFix', category: '联机修复', description: '按玩家和动作实例精确停止制作、拆解、加油等动作，防止动作编号撞号误删其他玩家读条；这是一条故意较长的中文备注，用于验证表格会完整换行。', version: '', compatibility: 'PZ 42.20.x', manageable: false, enabled: true, scopes: [{ runtimeRoot: 'D:\\PZ Test Server', filePath: 'D:\\PZ Test Server\\server-patches\\PZTimedActionIsolationFix-agent.jar', filePresent: true, fileVersion: '', buildTime: '2026-08-20 11:50', sha256: 'b'.repeat(64), pendingRestart: false, servers: [{ id: 'mock', name: '测试服务器', running: true, configured: true, active: true, activeVersion: '', detail: '启动日志已确认 ACTIVE' }] }] },
+      { id: 'OrangeAntiCheat', name: '服务端危险命令鉴权', technicalName: 'OrangeAntiCheat', category: '安全鉴权', description: 'Java Agent 在 Lua 事件触发前拒绝普通玩家调用原版管理员或调试命令，不修改任何游戏 Lua 文件。', target: 'LuaEventManager / TransactionManager', risk: '精确类哈希门禁，不修改存档。', version: '2.0.0', compatibility: 'PZ 42.20.2（精确类哈希）', manageable: true, enabled: true, scopes: [{ runtimeRoot: 'D:\\PZ Test Server', filePath: 'D:\\PZ Test Server\\server-patches\\OrangeAntiCheat-agent.jar', filePresent: true, fileVersion: '2.0.0', buildTime: '2026-08-21 18:00', sha256: 'c'.repeat(64), pendingRestart: false, servers: [{ id: 'mock', name: '测试服务器', running: true, configured: true, active: true, activeVersion: '2.0.0', detail: 'Java Agent 已生效' }] }] },
+      { id: 'PZTimedActionIsolationFix', name: '多人长读条动作隔离', technicalName: 'PZTimedActionIsolationFix', category: '联机修复', description: '按玩家和动作实例精确停止制作、拆解、加油等动作，防止动作编号撞号误删其他玩家读条；这是一条故意较长的中文备注，用于验证表格会完整换行。', target: 'ActionManager.stop(Action)', risk: '不能与长读条诊断探针同时加载。', version: '', compatibility: 'PZ 42.20.x', manageable: false, enabled: true, scopes: [{ runtimeRoot: 'D:\\PZ Test Server', filePath: 'D:\\PZ Test Server\\server-patches\\PZTimedActionIsolationFix-agent.jar', filePresent: true, fileVersion: '', buildTime: '2026-08-20 11:50', sha256: 'b'.repeat(64), pendingRestart: false, servers: [{ id: 'mock', name: '测试服务器', running: true, configured: true, processMounted: true, active: false, activeVersion: '', detail: '当前 Java 进程已确认挂载；ACTIVE 在 PZ 日志初始化前输出，server-console 不会收录' }] }] },
     ],
+    jarInventory: [{ name: 'OrangeAntiCheat-agent.jar', registered: true, componentId: 'OrangeAntiCheat', classification: 'registered', modifiedAt: '2026-08-24 12:00' }],
   });
-  if (url.pathname === '/api/anticheat' && request.method === 'GET') return sendJson(response, 200, {
+  if ((url.pathname === '/api/anticheat' && request.method === 'GET') || (url.pathname === '/api/anticheat/scan' && request.method === 'POST')) {
+    const result = {
     ok: true, serverId: 'mock', generatedAt: new Date().toISOString(), hours: 168, canBan: true,
     patch: { installed: true, active: true, pendingRestart: false, version: '2.0.0' },
     summary: { suspiciousPlayers: 2, criticalPlayers: 0, protectedCalls: 0, blockedCalls: 0, nativeSignals: 2, speedNoiseSignals: 1, checksumSignals: 0, bannedPlayers: 1 },
@@ -97,7 +99,13 @@ async function handleApi(request, response, url) {
       { time: new Date().toISOString(), severity: 'low', type: 'native-anticheat', code: 'Speed', speed: 24, noiseLikely: true, steamId: '76561198000000003', username: 'LagPlayer', detail: 'speed=24 > limit=20', sourceFile: 'Logs/example_DebugLog-server.txt', lineNumber: 13 },
     ],
     banSummary: { count: 1, targets: [{ id: 'server2', name: '2服' }] },
-  });
+    };
+    return sendJson(response, 200, url.pathname === '/api/anticheat/scan' ? {
+      ok: true, id: 'b'.repeat(32), status: 'complete', serverId: 'mock', hours: 168,
+      progress: { status: 'complete', phase: 'cached', percent: 100, message: '已命中分析缓存', filesDone: 12, filesTotal: 12, bytesDone: 1048576, bytesTotal: 1048576, linesScanned: 3200 },
+      result,
+    } : result);
+  }
   if (url.pathname === '/api/anticheat/bans/sync' && request.method === 'POST') {
     requests.banSync = await readBody(request);
     return sendJson(response, 200, { ok: true, sourceServerId: 'mock', sourceCount: 1, added: 1, message: '封禁名单合并同步已提交，共补充 1 条。', results: [{ serverId: 'server2', name: '2服', status: 'queued', added: 1, mode: 'server-command', message: '1 条封禁已进入运行中服务器的命令队列。' }] });
@@ -274,11 +282,8 @@ async function clickMobileView(page, view) {
     const aiLayout = await layout(desktop, ['#view-ai .page-heading', '#view-ai .heading-actions', '.ai-layout', '.ai-bridge-log', '.ai-policy-section', '#aiPolicyForm', '#aiPolicyList']);
 
     await desktop.click('.nav-item[data-view="anticheat"]');
-    await desktop.waitForFunction(() => document.querySelectorAll('.anticheat-player-row').length === 2 && document.querySelector('.ban-state-badge')?.textContent.includes('已封禁') && document.querySelectorAll('#serverPatchComponents tr').length === 2);
+    await desktop.waitForFunction(() => document.querySelectorAll('.anticheat-player-row').length === 2 && document.querySelector('.ban-state-badge')?.textContent.includes('已封禁'));
     await desktop.waitForFunction(() => document.querySelector('#antiCheatEvents').textContent.includes('权限或数据包模式异常') && document.querySelector('#antiCheatEvents').textContent.includes('健康操作回传'));
-    const patchInitiallyCollapsed = await desktop.evaluate(() => !document.querySelector('#serverPatchDisclosure').open);
-    await desktop.click('#serverPatchDisclosure > summary');
-    await desktop.waitForFunction(() => document.querySelector('#serverPatchDisclosure').open);
     await desktop.check('#antiCheatHideBanned');
     await desktop.waitForFunction(() => document.querySelectorAll('.anticheat-player-row').length === 1);
     await desktop.uncheck('#antiCheatHideBanned');
@@ -293,17 +298,25 @@ async function clickMobileView(page, view) {
     await desktop.locator('.anticheat-player-row').filter({ hasText: 'Alice' }).click();
     await desktop.click('#analyzeAntiCheatPlayer');
     await desktop.waitForFunction(() => document.querySelector('.anticheat-ai-report.completed')?.textContent.includes('需要观察'));
-    const antiCheatLayout = await layout(desktop, ['.server-patch-table-wrap', '.server-patch-table', '.anticheat-layout', '.anticheat-player-list', '.anticheat-detail', '.anticheat-ai-report', '.anticheat-events']);
-    const antiCheatLocalization = await desktop.evaluate(initiallyCollapsed => ({
-      patchText: document.querySelector('#serverPatchComponents').textContent,
-      patchInitiallyCollapsed: initiallyCollapsed,
+    const antiCheatLayout = await layout(desktop, ['.anticheat-scan-progress', '.anticheat-layout', '.anticheat-player-list', '.anticheat-detail', '.anticheat-ai-report', '.anticheat-events']);
+    const antiCheatLocalization = await desktop.evaluate(() => ({
       signalGuideText: document.querySelector('#antiCheatSignalGuide').textContent,
       eventText: document.querySelector('#antiCheatEvents').textContent,
       commandText: document.querySelector('.anticheat-command-summary').textContent,
       actionWhiteSpace: getComputedStyle(document.querySelector('.anticheat-event-action p')).whiteSpace,
       actionOverflow: getComputedStyle(document.querySelector('.anticheat-event-action p')).overflow,
-    }), patchInitiallyCollapsed);
+    }));
     await desktop.screenshot({ path: path.join(__dirname, 'pz-panel-player-ai-audit-desktop.png'), fullPage: true });
+
+    await desktop.click('.nav-item[data-view="patches"]');
+    await desktop.waitForFunction(() => document.querySelectorAll('#serverPatchComponents tr').length === 2 && document.querySelector('#serverPatchComponents').textContent.includes('多人长读条动作隔离'));
+    const patchLayout = await layout(desktop, ['#view-patches .page-heading', '.patch-summary-band', '.server-patch-mount', '.server-patch-table-wrap', '.server-patch-table']);
+    const patchLocalization = await desktop.evaluate(() => ({
+      componentText: document.querySelector('#serverPatchComponents').textContent,
+      summaryText: document.querySelector('.patch-summary-band').textContent,
+      inventoryText: document.querySelector('#serverPatchInventory').textContent,
+    }));
+    await desktop.screenshot({ path: path.join(__dirname, 'pz-panel-java-patches-desktop.png'), fullPage: true });
 
     await desktop.click('.nav-item[data-view="players"]');
     await desktop.waitForFunction(() => document.querySelectorAll('#grantForm .online-player-select option').length === 3);
@@ -395,8 +408,13 @@ async function clickMobileView(page, view) {
     await mobile.locator('.anticheat-player-row').filter({ hasText: 'Alice' }).click();
     await mobile.click('#analyzeAntiCheatPlayer');
     await mobile.waitForFunction(() => document.querySelector('.anticheat-ai-report.completed')?.textContent.includes('需要观察'));
-    const mobileAntiCheatLayout = await layout(mobile, ['.mobile-nav', '#mobileMenuToggle', '.server-patch-disclosure', '.anticheat-signal-guide', '.anticheat-layout', '.anticheat-player-list', '.anticheat-detail', '.anticheat-ai-report', '.anticheat-events']);
+    const mobileAntiCheatLayout = await layout(mobile, ['.mobile-nav', '#mobileMenuToggle', '.anticheat-scan-progress', '.anticheat-signal-guide', '.anticheat-layout', '.anticheat-player-list', '.anticheat-detail', '.anticheat-ai-report', '.anticheat-events']);
     await mobile.screenshot({ path: path.join(__dirname, 'pz-panel-player-ai-audit-mobile.png'), fullPage: true });
+
+    await clickMobileView(mobile, 'patches');
+    await mobile.waitForFunction(() => document.querySelectorAll('#serverPatchComponents tr').length === 2 && document.querySelector('#serverPatchComponents').textContent.includes('多人长读条动作隔离'));
+    const mobilePatchLayout = await layout(mobile, ['.mobile-nav', '#mobileMenuToggle', '#view-patches .page-heading', '.patch-summary-band', '.server-patch-mount', '.server-patch-table-wrap', '.server-patch-table']);
+    await mobile.screenshot({ path: path.join(__dirname, 'pz-panel-java-patches-mobile.png'), fullPage: true });
 
     await clickMobileView(mobile, 'ai');
     await mobile.waitForFunction(() => document.querySelector('#aiPolicyList').textContent.includes('76561198000000001'));
@@ -416,7 +434,7 @@ async function clickMobileView(page, view) {
     const mobileHistoryLayout = await layout(mobile, ['.execution-history', '#executionHistoryList']);
     await mobile.screenshot({ path: path.join(__dirname, 'pz-panel-execution-history-mobile.png'), fullPage: true });
 
-    const result = { requests, policyCount: policies.length, scheduleCount: schedules.length, historyCount: history.length, antiCheatLocalization, playerHistoryRefresh, mobilePlayerHistoryRefresh, desktop: { ai: aiLayout, anticheat: antiCheatLayout, itemGrant: itemGrantLayout, chat: chatLayout, history: historyLayout }, mobile: { access: mobileAccess, chat: mobileChatLayout, itemGrant: mobileItemGrantLayout, anticheat: mobileAntiCheatLayout, ai: mobileAiLayout, history: mobileHistoryLayout }, browserErrors: errors };
+    const result = { requests, policyCount: policies.length, scheduleCount: schedules.length, historyCount: history.length, antiCheatLocalization, patchLocalization, playerHistoryRefresh, mobilePlayerHistoryRefresh, desktop: { ai: aiLayout, anticheat: antiCheatLayout, patches: patchLayout, itemGrant: itemGrantLayout, chat: chatLayout, history: historyLayout }, mobile: { access: mobileAccess, chat: mobileChatLayout, itemGrant: mobileItemGrantLayout, anticheat: mobileAntiCheatLayout, patches: mobilePatchLayout, ai: mobileAiLayout, history: mobileHistoryLayout }, browserErrors: errors };
     console.log(JSON.stringify(result, null, 2));
     if (errors.length) process.exitCode = 2;
     if (!requests.policy || requests.policy.serverId !== 'mock' || requests.policy.username !== 'Alice' || requests.policy.steamId !== '76561198000000001' || requests.policy.trustedAll || requests.policy.allowedOperations.length !== 2) process.exitCode = 3;
@@ -426,14 +444,15 @@ async function clickMobileView(page, view) {
     if (!requests.runNow || requests.runNow.id !== 'schedule-1' || history.length !== 2) process.exitCode = 5;
     if (!requests.itemGrant || requests.itemGrant.notificationChannel !== 'both' || requests.itemGrant.notificationDuration !== 25 || requests.itemGrant.usernames[0] !== 'Alice' || requests.itemGrant.count !== 2 || !/^[a-f0-9]{32}$/.test(requests.itemGrant.submissionId)) process.exitCode = 7;
     if (requests.itemResultQueries !== 0 || requests.itemSubmissionQueries !== 0) process.exitCode = 10;
-    if (!mobileAccess.aiVisible || !mobileAccess.antiCheatVisible || mobileAccess.pageCount !== 15 || !mobileAccess.usersHidden || mobileAccess.activeView !== 'view-ai') process.exitCode = 8;
+    if (!mobileAccess.aiVisible || !mobileAccess.antiCheatVisible || mobileAccess.pageCount !== 16 || !mobileAccess.usersHidden || mobileAccess.activeView !== 'view-ai') process.exitCode = 8;
     if (!requests.aiRuntime || requests.aiRuntime.action !== 'restart') process.exitCode = 9;
     if (!requests.playerAudit || requests.playerAudit.serverId !== 'mock' || requests.playerAudit.steamId !== '76561198000000001' || requests.playerAudit.username !== 'Alice' || requests.playerAudit.hours !== 168) process.exitCode = 15;
     if (!requests.banSync || requests.banSync.sourceServerId !== 'mock' || requests.banSync.targetServerIds[0] !== 'server2' || requests.banSync.confirm !== 'SYNC_BANNED_STEAM_IDS') process.exitCode = 16;
-    if (!antiCheatLocalization.patchInitiallyCollapsed || !antiCheatLocalization.signalGuideText.includes('权限或数据包模式异常') || !antiCheatLocalization.signalGuideText.includes('移动速度信号') || !antiCheatLocalization.signalGuideText.includes('Lua / 脚本完整性不一致') || !antiCheatLocalization.patchText.includes('多人长读条动作隔离') || !antiCheatLocalization.patchText.includes('未声明语义版本') || !antiCheatLocalization.eventText.includes('命令鉴权') || !antiCheatLocalization.eventText.includes('原版只记录日志，未自动处罚') || !antiCheatLocalization.commandText.includes('查询奔跑者僵尸状态') || !antiCheatLocalization.commandText.includes('常规确认回执') || !antiCheatLocalization.commandText.includes('同步多人睡眠状态') || !antiCheatLocalization.commandText.includes('已配对记录不计风险') || antiCheatLocalization.actionWhiteSpace !== 'normal' || antiCheatLocalization.actionOverflow === 'hidden') process.exitCode = 17;
+    if (!antiCheatLocalization.signalGuideText.includes('权限或数据包模式异常') || !antiCheatLocalization.signalGuideText.includes('移动速度信号') || !antiCheatLocalization.signalGuideText.includes('Lua / 脚本完整性不一致') || !antiCheatLocalization.eventText.includes('命令鉴权') || !antiCheatLocalization.eventText.includes('原版只记录日志，未自动处罚') || !antiCheatLocalization.commandText.includes('查询奔跑者僵尸状态') || !antiCheatLocalization.commandText.includes('常规确认回执') || !antiCheatLocalization.commandText.includes('同步多人睡眠状态') || !antiCheatLocalization.commandText.includes('已配对记录不计风险') || antiCheatLocalization.actionWhiteSpace !== 'normal' || antiCheatLocalization.actionOverflow === 'hidden') process.exitCode = 17;
+    if (!patchLocalization.componentText.includes('多人长读条动作隔离') || !patchLocalization.componentText.includes('独立构建') || !patchLocalization.componentText.includes('目标：ActionManager.stop(Action)') || !patchLocalization.componentText.includes('边界：不能与长读条诊断探针同时加载') || !patchLocalization.componentText.includes('进程已确认挂载') || !patchLocalization.componentText.includes('server-console 不会收录') || !patchLocalization.summaryText.includes('运行已验证') || !patchLocalization.inventoryText.includes('OrangeAntiCheat-agent.jar')) process.exitCode = 20;
     if (!playerHistoryRefresh.before.open || !playerHistoryRefresh.after.open || playerHistoryRefresh.before.scrollY < 300 || playerHistoryRefresh.scrollDelta > 2) process.exitCode = 18;
     if (!mobilePlayerHistoryRefresh.before.open || !mobilePlayerHistoryRefresh.after.open || mobilePlayerHistoryRefresh.before.scrollY < 300 || mobilePlayerHistoryRefresh.scrollDelta > 2) process.exitCode = 19;
-    for (const state of [aiLayout, antiCheatLayout, itemGrantLayout, chatLayout, historyLayout, mobileChatLayout, mobileItemGrantLayout, mobileAntiCheatLayout, mobileAiLayout, mobileHistoryLayout]) {
+    for (const state of [aiLayout, antiCheatLayout, patchLayout, itemGrantLayout, chatLayout, historyLayout, mobileChatLayout, mobileItemGrantLayout, mobileAntiCheatLayout, mobilePatchLayout, mobileAiLayout, mobileHistoryLayout]) {
       if (state.scrollWidth > state.clientWidth || state.clippedButtons.length || Object.values(state.bounds).some(rect => rect.left < -1 || rect.right > state.clientWidth + 1)) process.exitCode = 6;
     }
   } finally {

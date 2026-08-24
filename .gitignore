@@ -55,3 +55,8 @@ managed/*/
 pz-panel-*.png
 Test-*.result.json
 __pycache__/
+
+# Reproducible Java Agent build output
+patches/*/build/
+patches/*/testlab/
+patches/*/.last-deployment-backup.txt

@@ -1,6 +1,6 @@
 ﻿param(
     [string]$OutputDirectory = (Join-Path $PSScriptRoot "dist-public"),
-    [string]$Version = "0.9.8",
+    [string]$Version = "0.10.0",
     [string]$PackageName
 )
 
@@ -178,6 +178,7 @@ $rootFiles = @(
     "Test-DisasterCenterBackend.ps1",
     "Test-PlayerAuditAI.ps1",
     "Test-PlayerAuditAIRetry.ps1",
+    "Test-AntiCheatIdentity.js",
     "CHANGELOG.md",
     "SECURITY.md",
     "panel-config.json",
@@ -188,7 +189,7 @@ $rootFiles = @(
 foreach ($name in $rootFiles) {
     Copy-RequiredFile -Name $name
 }
-Copy-RequiredFile -Name "README-GitHub.zh-CN.md" -DestinationName "README.md"
+Copy-RequiredFile -Name "README.md"
 Copy-RequiredFile -Name "managed\Run-ManagedPZHost.ps1"
 Copy-RequiredFile -Name "managed\Invoke-ManagedPZLifecycle.ps1"
 Copy-RequiredDirectory -Name "patches"
@@ -202,17 +203,18 @@ foreach ($name in @(
     Copy-RequiredFile -Name "tools\PZSelectiveWorldReset\$name"
 }
 Copy-RequiredDirectory -Name "skill"
+Copy-RequiredDirectory -Name "tests"
 foreach ($name in @("index.html", "app.css", "app.js", "lucide.min.js", "qrcode.min.js")) {
     Copy-RequiredFile -Name "web\$name"
 }
 Copy-RequiredDirectory -Name "web\community"
 
 $screenshots = [ordered]@{
-    "pz-panel-control-features-desktop.png" = "docs\images\maintenance-and-history.png"
-    "pz-panel-item-catalog-playwright.png" = "docs\images\item-catalog.png"
-    "pz-panel-ai-policy-mobile.png" = "docs\images\ai-bridge-and-policy.png"
-    "pz-panel-host-control-desktop.png" = "docs\images\host-control.png"
-    "pz-panel-control-features-mobile.png" = "docs\images\mobile-console.png"
+    "docs\images\maintenance-and-history.png" = "docs\images\maintenance-and-history.png"
+    "docs\images\item-catalog.png" = "docs\images\item-catalog.png"
+    "docs\images\ai-bridge-and-policy.png" = "docs\images\ai-bridge-and-policy.png"
+    "docs\images\host-control.png" = "docs\images\host-control.png"
+    "docs\images\mobile-console.png" = "docs\images\mobile-console.png"
 }
 foreach ($entry in $screenshots.GetEnumerator()) {
     Copy-RequiredFile -Name $entry.Key -DestinationName $entry.Value

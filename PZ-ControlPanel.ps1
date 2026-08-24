@@ -29,6 +29,8 @@ $playerDataManagerPath = Join-Path $root "Manage-PZPlayerData.js"
 $banListManagerPath = Join-Path $root "Manage-PZBanList.js"
 $antiCheatReaderPath = Join-Path $root "Read-PZAntiCheatEvents.js"
 $antiCheatReviewStatePath = Join-Path $root "anticheat-review-state.json"
+$antiCheatScanRoot = Join-Path $root ".tmp\anticheat-scans"
+$antiCheatCacheRoot = Join-Path $root ".tmp\anticheat-cache"
 $playerAuditReaderPath = Join-Path $root "Build-PZPlayerAuditEvidence.js"
 $playerAuditSopPath = Join-Path $root "PLAYER-AUDIT-SOP.zh-CN.md"
 $serverPatchesConfigPath = Join-Path $root "server-patches.json"
@@ -61,6 +63,7 @@ $processCpuSamples = @{}
 $networkSamples = @{}
 $jvmMemoryCache = @{}
 $antiCheatCache = @{}
+$antiCheatScanJobs = @{}
 $playerAuditEvidenceCache = @{}
 $playerAuditAnalyses = @{}
 $commandRequests = @{}
@@ -215,6 +218,27 @@ function New-RandomToken {
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
     try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     return ConvertTo-Base64Url $bytes
+}
+
+function Get-FileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $stream = $null
+    $sha = $null
+    try {
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        $stream = [IO.FileStream]::new(
+            $fullPath,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::ReadWrite
+        )
+        $sha = [Security.Cryptography.SHA256]::Create()
+        return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        if ($sha) { $sha.Dispose() }
+        if ($stream) { $stream.Dispose() }
+    }
 }
 
 function Get-PasswordHash {
@@ -1166,6 +1190,25 @@ function Set-OrangeAntiCheatAgentArguments {
     )
 }
 
+function Set-KnownServerPatchAgentArguments {
+    param([string]$Arguments, $Profile, $Configuration)
+    $result = $Arguments
+    foreach ($definition in @(Get-KnownServerPatchDefinitions | Where-Object { $_.manageable })) {
+        $fileName = [string]$definition.fileName
+        $pattern = '(?i)(?:^|\s)-javaagent:(?:"?)[^\s"]*' + [regex]::Escape($fileName) + '(?:=[^\s"]+)?'
+        $result = ([regex]::Replace($result, $pattern, ' ') -replace '\s+', ' ').Trim()
+        $record = $Configuration.patches.PSObject.Properties[[string]$definition.id].Value
+        if (-not $record -or -not [bool]$record.enabled) { continue }
+        $jarPath = Join-Path ([string]$Profile.runtimeRoot) "server-patches\$fileName"
+        if (-not (Test-Path -LiteralPath $jarPath -PathType Leaf)) { throw "$([string]$definition.name) Java Agent 文件缺失：$jarPath" }
+        if ($result -notmatch '(?i)(?:^|\s)zombie\.network\.GameServer(?:\s|$)') { throw "Java 启动参数中缺少 zombie.network.GameServer。" }
+        $agent = "-javaagent:server-patches/$fileName"
+        if (-not [string]::IsNullOrWhiteSpace([string]$definition.arguments)) { $agent += "=$([string]$definition.arguments)" }
+        $result = [regex]::Replace($result, '(?i)(?=zombie\.network\.GameServer(?:\s|$))', "$agent ")
+    }
+    return $result
+}
+
 function Install-OrangeAntiCheatAgent {
     param([string]$RuntimeRoot)
     if (-not (Test-Path -LiteralPath $serverPatchEmbeddedAgentPath -PathType Leaf)) {
@@ -1176,16 +1219,16 @@ function Install-OrangeAntiCheatAgent {
     $targetPath = Join-Path $patchDirectory $serverPatchAgentFileName
     New-Item -ItemType Directory -Path $patchDirectory -Force | Out-Null
 
-    $sourceHash = (Get-FileHash -LiteralPath $serverPatchEmbeddedAgentPath -Algorithm SHA256).Hash
+    $sourceHash = Get-FileSha256 -Path $serverPatchEmbeddedAgentPath
     if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
-        $targetHash = (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash
+        $targetHash = Get-FileSha256 -Path $targetPath
         if ($sourceHash -eq $targetHash) { return $targetPath }
     }
 
     $tempPath = "$targetPath.$([guid]::NewGuid().ToString('N')).tmp"
     try {
         Copy-Item -LiteralPath $serverPatchEmbeddedAgentPath -Destination $tempPath -Force
-        $copiedHash = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256).Hash
+        $copiedHash = Get-FileSha256 -Path $tempPath
         if ($copiedHash -ne $sourceHash) { throw "OrangeAntiCheat Java Agent 部署校验失败：$targetPath" }
         Move-Item -LiteralPath $tempPath -Destination $targetPath -Force
     }
@@ -1229,6 +1272,7 @@ function Ensure-ManagedProfile {
     $arguments = Enable-JvmGcTelemetry -Arguments $arguments
     $arguments = Set-StreamingStabilityAgentArguments -Arguments $arguments -Profile $Profile
     $patchConfiguration = Get-ServerPatchConfiguration
+    $arguments = Set-KnownServerPatchAgentArguments -Arguments $arguments -Profile $Profile -Configuration $patchConfiguration
     if ([bool]$patchConfiguration.patches.OrangeAntiCheat.enabled) {
         [void](Install-OrangeAntiCheatAgent -RuntimeRoot ([string]$Profile.runtimeRoot))
     }
@@ -3513,36 +3557,40 @@ function Sync-PZBanList {
 }
 
 function Get-AntiCheatPayload {
-    param($Profile, [int]$Hours = 168, [switch]$Force)
+    param($Profile, [int]$Hours = 168, [switch]$Force, $RawPayload = $null)
     if ($Hours -notin @(24, 72, 168, 720)) { throw "反作弊查询范围无效。" }
     if (-not $nodeRuntimePath -or -not (Test-Path -LiteralPath $antiCheatReaderPath -PathType Leaf)) {
         throw "缺少反作弊日志分析运行环境。"
     }
 
     $cacheKey = "$([string]$Profile.id):$Hours"
-    $cached = $antiCheatCache[$cacheKey]
-    if (-not $Force -and $cached -and ((Get-Date) - [datetime]$cached.generatedAt).TotalSeconds -lt 30) {
-        return $cached.payload
-    }
+    if ($null -eq $RawPayload) {
+        $cached = $antiCheatCache[$cacheKey]
+        if (-not $Force -and $cached -and ((Get-Date) - [datetime]$cached.generatedAt).TotalSeconds -lt 180) {
+            return $cached.payload
+        }
 
-    $output = @(& $nodeRuntimePath --no-warnings $antiCheatReaderPath ([string]$Profile.dataRoot) ([string]$Profile.runtimeRoot) $Hours $antiCheatReviewStatePath ([string]$Profile.id) 2>&1 |
-        ForEach-Object { [string]$_ })
-    if ($LASTEXITCODE -ne 0) {
-        throw "反作弊日志分析失败：$(@($output | Select-Object -Last 12) -join "`n")"
+        $cacheFile = Join-Path $antiCheatCacheRoot "$([string]$Profile.id)-$Hours.json"
+        $output = @(& $nodeRuntimePath --no-warnings $antiCheatReaderPath ([string]$Profile.dataRoot) ([string]$Profile.runtimeRoot) $Hours $antiCheatReviewStatePath ([string]$Profile.id) "-" "-" $cacheFile $(if ($Force) { "1" } else { "0" }) 2>&1 |
+            ForEach-Object { [string]$_ })
+        if ($LASTEXITCODE -ne 0) {
+            throw "反作弊日志分析失败：$(@($output | Select-Object -Last 12) -join "`n")"
+        }
+        $json = $output -join "`n"
+        if ([string]::IsNullOrWhiteSpace($json)) { throw "反作弊日志分析器没有返回结果。" }
+        try { $payload = $json | ConvertFrom-Json }
+        catch { throw "反作弊日志分析器返回了无效结果：$($_.Exception.Message)" }
     }
-    $json = $output -join "`n"
-    if ([string]::IsNullOrWhiteSpace($json)) { throw "反作弊日志分析器没有返回结果。" }
-    try { $payload = $json | ConvertFrom-Json }
-    catch { throw "反作弊日志分析器返回了无效结果：$($_.Exception.Message)" }
+    else { $payload = $RawPayload }
     try {
         $manifest = Get-ServerPatchManifest
         $configuration = Get-ServerPatchConfiguration
         $targetAgent = Join-Path ([string]$Profile.runtimeRoot) ("server-patches\" + $serverPatchAgentFileName)
         $targetHash = if (Test-Path -LiteralPath $targetAgent -PathType Leaf) {
-            (Get-FileHash -LiteralPath $targetAgent -Algorithm SHA256).Hash
+            Get-FileSha256 -Path $targetAgent
         } else { "" }
         $embeddedHash = if (Test-Path -LiteralPath $serverPatchEmbeddedAgentPath -PathType Leaf) {
-            (Get-FileHash -LiteralPath $serverPatchEmbeddedAgentPath -Algorithm SHA256).Hash
+            Get-FileSha256 -Path $serverPatchEmbeddedAgentPath
         } else { "" }
         $activeVersion = [string]$payload.patch.version
         $desiredVersion = [string]$manifest.version
@@ -3592,31 +3640,179 @@ function Get-AntiCheatPayload {
     return $payload
 }
 
-function Get-ServerPatchConfiguration {
-    $default = [pscustomobject][ordered]@{
-        version = 1
-        patches = [pscustomobject][ordered]@{
-            OrangeAntiCheat = [pscustomobject][ordered]@{ enabled = $true; updatedAt = "" }
+function ConvertTo-NativeProcessArgument {
+    param([string]$Value)
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+function Start-AntiCheatScan {
+    param($Profile, [int]$Hours = 168, [switch]$Force)
+    if ($Hours -notin @(24, 72, 168, 720)) { throw "反作弊查询范围无效。" }
+    if (-not $nodeRuntimePath -or -not (Test-Path -LiteralPath $antiCheatReaderPath -PathType Leaf)) {
+        throw "缺少反作弊日志分析运行环境。"
+    }
+    $cacheKey = "$([string]$Profile.id):$Hours"
+    $cached = $antiCheatCache[$cacheKey]
+    if (-not $Force -and $cached -and ((Get-Date) - [datetime]$cached.generatedAt).TotalSeconds -lt 180) {
+        $id = [guid]::NewGuid().ToString('N')
+        $job = [pscustomobject]@{
+            id = $id; key = $cacheKey; serverId = [string]$Profile.id; hours = $Hours
+            status = 'complete'; startedAt = Get-Date; completedAt = Get-Date
+            process = $null; progressPath = ''; outputPath = ''; payload = $cached.payload
+        }
+        $antiCheatScanJobs[$id] = $job
+        return $job
+    }
+    if (-not $Force) {
+        $existing = @($antiCheatScanJobs.Values | Where-Object { $_.key -eq $cacheKey -and $_.status -eq 'running' } | Select-Object -First 1)
+        if ($existing.Count -gt 0) { return $existing[0] }
+    }
+
+    New-Item -ItemType Directory -Path $antiCheatScanRoot, $antiCheatCacheRoot -Force | Out-Null
+    foreach ($old in @($antiCheatScanJobs.Values | Where-Object { $_.status -ne 'running' -and ((Get-Date) - [datetime]$_.startedAt).TotalHours -gt 1 })) {
+        $antiCheatScanJobs.Remove([string]$old.id)
+        foreach ($file in @([string]$old.progressPath, [string]$old.outputPath)) {
+            if ($file) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
         }
     }
-    if (-not (Test-Path -LiteralPath $serverPatchesConfigPath -PathType Leaf)) { return $default }
-    try { $configuration = Get-Content -LiteralPath $serverPatchesConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json }
-    catch { throw "服务端补丁配置无效：$($_.Exception.Message)" }
-    if (-not $configuration.patches -or -not $configuration.patches.OrangeAntiCheat) { return $default }
-    return $configuration
+
+    $id = [guid]::NewGuid().ToString('N')
+    $progressPath = Join-Path $antiCheatScanRoot "$id-progress.json"
+    $outputPath = Join-Path $antiCheatScanRoot "$id-result.json"
+    $cachePath = Join-Path $antiCheatCacheRoot "$([string]$Profile.id)-$Hours.json"
+    $arguments = @(
+        '--no-warnings', $antiCheatReaderPath, [string]$Profile.dataRoot, [string]$Profile.runtimeRoot,
+        [string]$Hours, $antiCheatReviewStatePath, [string]$Profile.id, $progressPath, $outputPath,
+        $cachePath, $(if ($Force) { '1' } else { '0' })
+    ) | ForEach-Object { ConvertTo-NativeProcessArgument -Value ([string]$_) }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $nodeRuntimePath
+    $startInfo.Arguments = $arguments -join ' '
+    $startInfo.WorkingDirectory = $root
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $process = [Diagnostics.Process]::Start($startInfo)
+    if (-not $process) { throw "无法启动反作弊后台分析进程。" }
+    $job = [pscustomobject]@{
+        id = $id; key = $cacheKey; serverId = [string]$Profile.id; hours = $Hours
+        status = 'running'; startedAt = Get-Date; completedAt = $null
+        process = $process; progressPath = $progressPath; outputPath = $outputPath; payload = $null
+    }
+    $antiCheatScanJobs[$id] = $job
+    return $job
+}
+
+function Get-AntiCheatScanPayload {
+    param([string]$Id, $Session)
+    if ($Id -notmatch '^[a-f0-9]{32}$' -or -not $antiCheatScanJobs.ContainsKey($Id)) { throw "反作弊扫描任务不存在或已经过期。" }
+    $job = $antiCheatScanJobs[$Id]
+    $progress = $null
+    if ($job.progressPath -and (Test-Path -LiteralPath $job.progressPath -PathType Leaf)) {
+        try { $progress = Get-Content -LiteralPath $job.progressPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+        catch { }
+    }
+    if ($job.status -eq 'running' -and (Test-Path -LiteralPath $job.outputPath -PathType Leaf)) {
+        try {
+            $raw = Get-Content -LiteralPath $job.outputPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $profile = Get-ServerProfile -Id ([string]$job.serverId)
+            $job.payload = Get-AntiCheatPayload -Profile $profile -Hours ([int]$job.hours) -RawPayload $raw
+            $job.status = 'complete'
+            $job.completedAt = Get-Date
+        }
+        catch {
+            $job.status = 'failed'
+            $job.completedAt = Get-Date
+            $progress = [pscustomobject]@{ status = 'failed'; phase = 'failed'; percent = 99; message = "反作弊结果整理失败：$($_.Exception.Message)" }
+        }
+    }
+    elseif ($job.status -eq 'running' -and $job.process.HasExited) {
+        $job.status = 'failed'
+        $job.completedAt = Get-Date
+        if (-not $progress) { $progress = [pscustomobject]@{ status = 'failed'; phase = 'failed'; percent = 99; message = "反作弊分析进程异常退出，未生成结果。" } }
+    }
+
+    $result = $job.payload
+    if ($result) {
+        $result | Add-Member -NotePropertyName serverId -NotePropertyValue ([string]$job.serverId) -Force
+        $result | Add-Member -NotePropertyName canBan -NotePropertyValue ([bool](Test-PlayerDataPermission -Session $Session)) -Force
+        $result | Add-Member -NotePropertyName canReview -NotePropertyValue ([bool](Test-PlayerDataPermission -Session $Session)) -Force
+    }
+    return [pscustomobject][ordered]@{
+        ok = $job.status -ne 'failed'
+        id = [string]$job.id
+        status = [string]$job.status
+        serverId = [string]$job.serverId
+        hours = [int]$job.hours
+        startedAt = ([datetime]$job.startedAt).ToString('o')
+        completedAt = if ($job.completedAt) { ([datetime]$job.completedAt).ToString('o') } else { '' }
+        progress = if ($progress) { $progress } elseif ($job.status -eq 'complete') {
+            [pscustomobject]@{ status = 'complete'; phase = 'cached'; percent = 100; message = '已从面板内存缓存读取。' }
+        } else { [pscustomobject]@{ status = 'running'; phase = 'starting'; percent = 1; message = '正在启动日志分析器。' } }
+        result = $result
+    }
+}
+
+function Get-KnownServerPatchDefinitions {
+    return @(
+        [pscustomobject][ordered]@{ id = "PZGlassRemovalGuard"; name = "玻璃附件死循环防护"; category = "稳定性修复"; fileName = "PZGlassRemovalGuard-agent.jar"; arguments = ""; activePattern = '\[PZGlassRemovalGuard\] ACTIVE'; activeEvidence = "pre-pz-stdout"; compatibility = "PZ 42.20.2 - 42.20.3"; manageable = $true; target = "IsoGridSquare.removeGlassAttachments"; risk = "仅替换已审核类；哈希不符时拒绝注入。停用不改档。"; description = "把砸窗附件清理改为有界快照处理，避免对象移除失败时主线程永久循环。" },
+        [pscustomobject][ordered]@{ id = "PZItemContainerCycleGuard"; name = "物品容器循环防护"; category = "稳定性修复"; fileName = "PZItemContainerCycleGuard-agent.jar"; arguments = ""; activePattern = '\[PZItemContainerCycleGuard\] ACTIVE'; activeEvidence = "pre-pz-stdout"; compatibility = "PZ 42.20.x"; manageable = $true; target = "ItemContainer.getCharacter"; risk = "异常容器链返回无所属角色；不删除物品、不写存档。"; description = "阻断异常物品或尸体容器的自身回指与循环链，避免无限递归和栈溢出。" },
+        [pscustomobject][ordered]@{ id = "PZEntityRegistrationGuard"; name = "重复实体注册防护"; category = "稳定性修复"; fileName = "PZEntityRegistrationGuard-agent.jar"; arguments = ""; activePattern = '\[PZEntityRegistrationGuard\] ACTIVE'; compatibility = "PZ 42.20.2"; manageable = $true; target = "EngineEntityManager.addEntityInternal"; risk = "仅忽略同一对象、状态一致的幂等重复注册；其他异常保留原版报错。"; description = "避免区块加载时同一实体被重复注册并连续中断 ServerCell 加载。" },
+        [pscustomobject][ordered]@{ id = "PZItemPickInfoContainerFix"; name = "尸体容器 ID 注册修复"; category = "掉落兼容"; fileName = "PZItemPickInfoContainerFix-agent.jar"; arguments = ""; activePattern = '\[PZItemPickInfoContainerFix\] ACTIVE'; compatibility = "PZ 42.20 已审核构建"; manageable = $true; target = "ItemConfigurator.Preprocess"; risk = "只补注册 inventorymale 与 inventoryfemale，不改变掉落表或物品内容。"; description = "在 ItemConfig 建桶前补充两个原版尸体容器 ID，消除高频 cannot get ID 日志。" },
+        [pscustomobject][ordered]@{ id = "PZTimedActionIsolationFix"; name = "多人长读条动作隔离"; category = "联机修复"; fileName = "PZTimedActionIsolationFix-agent.jar"; arguments = ""; activePattern = '\[PZTimedActionIsolationFix\] ACTIVE'; compatibility = "PZ 42.20.x"; manageable = $true; target = "ActionManager.stop(Action)"; risk = "不能与 PZTimedActionTrace 同时加载；不强制动作完成，不改配方和物品。"; description = "按玩家动作实例停止读条，防止不同玩家相同一字节动作编号互相取消。" },
+        [pscustomobject][ordered]@{ id = "PZSpriteConfigAliasPatch"; name = "动态贴图映射兼容"; category = "区块兼容"; fileName = "PZSpriteConfigAliasPatch-agent.jar"; arguments = "enabled=true"; activePattern = '\[PZSpriteAlias\].*(?:ACTIVE|agent installed)'; compatibility = "PZ 42.20.x"; manageable = $true; target = "SpriteConfigManager / TileInfo.verifyObject"; risk = "只映射 24 个已确认贴图；不能与旧 PZSpriteConfigGuard 同时启用。"; description = "把 Open All Containers、Wooden_Windows 与 Lifestyle 的合法动态贴图映射回实体原贴图后执行完整原版初始化。" },
+        [pscustomobject][ordered]@{ id = "PZPlayerStateFiniteGuard"; name = "玩家状态有限数防护"; category = "数值安全"; fileName = "PZPlayerStateFiniteGuard-agent.jar"; arguments = ""; activePattern = '\[PZPlayerStateFiniteGuard\] ACTIVE'; compatibility = "PZ 42.20.x"; manageable = $true; target = "Stats / Nutrition / Thermoregulator"; risk = "只拒绝 NaN 和 Infinity；不会自动修复已经保存的最低值。"; description = "在原生 setter 入口拒绝非有限数，避免食物或温度计算污染角色状态并保存。" },
+        [pscustomobject][ordered]@{ id = "PZServerStreamingStability"; name = "对象数据流式同步防护"; category = "网络稳定性"; fileName = "PZServerStreamingStability-agent.jar"; arguments = ""; activePattern = '\[PZStreaming\] ACTIVE'; compatibility = "PZ 42.20.2 - 42.20.3"; manageable = $false; target = "ObjectModDataPacket / ServerMap.preupdate"; risk = "由服务器 streamingStabilityOptions 参数单独管理；错误参数可能丢弃过期同步。"; description = "丢弃确定无效的 ObjectModData，并对目标方格未加载的数据做有界排队与主线程重放。" },
+        [pscustomobject][ordered]@{ id = "PZSafehouseVisitorAccess"; name = "安全屋访客权限兼容"; category = "权限兼容"; fileName = "PZSafehouseVisitorAccess-agent.jar"; arguments = ""; activePattern = '\[PZSafehouseVisitorAccess\] ACTIVE'; compatibility = "PZ 42.20.x"; manageable = $true; target = "SafeHouse visitor access"; risk = "仅建议在确认访客权限需求时启用；需要完整重启验证。"; description = "修正安全屋访客访问判断，使受授权的协同访问不被原版路径错误拒绝。" },
+        [pscustomobject][ordered]@{ id = "PZLuaSamplerProbe"; name = "Lua 主线程采样探针"; category = "临时诊断"; fileName = "PZLuaSamplerProbe-agent.jar"; arguments = ""; activePattern = '\[PZLuaSamplerProbe\] ACTIVE'; compatibility = "诊断工具"; manageable = $false; target = "Kahlua / Lua 调用采样"; risk = "仅用于限时性能采样，诊断完成后不应常驻。"; description = "聚合 Lua 调用热点，用于定位主线程中高频 Mod 回调。" },
+        [pscustomobject][ordered]@{ id = "PZObjectModDataTrace"; name = "ObjectModData 归因探针"; category = "临时诊断"; fileName = "PZObjectModDataTrace-agent.jar"; arguments = ""; activePattern = '\[PZObjectModDataTrace\] ACTIVE'; compatibility = "PZ 42.20.2"; manageable = $false; target = "ObjectModDataPacket.parse"; risk = "只读聚合探针，默认限时；不应作为常驻修复加载。"; description = "按对象类型、失效原因和发送连接归因无效 ObjectModData。" },
+        [pscustomobject][ordered]@{ id = "PZServerPipelineProbe"; name = "区块流水线探针"; category = "临时诊断"; fileName = "PZServerPipelineProbe-agent.jar"; arguments = "interval=60"; activePattern = '\[PZServerPipelineProbe\] ACTIVE'; compatibility = "PZ 42.20.2"; manageable = $false; target = "ServerMap / ServerCell / IsoChunk"; risk = "只读计时探针，有极小调用计时开销；诊断后停用。"; description = "区分区块磁盘读取、方格初始化、Loader/Recalc 队列和主线程接入瓶颈。" },
+        [pscustomobject][ordered]@{ id = "PZSpriteConfigGuard"; name = "旧 SpriteConfig 失败缓存"; category = "已弃用"; fileName = "PZSpriteConfigGuard-agent.jar"; arguments = "enabled=true,maxKeys=1024,topKeys=8,reportSeconds=30"; activePattern = '\[PZSpriteConfigGuard\] ACTIVE'; compatibility = "已由 AliasPatch 替代"; manageable = $false; target = "SpriteConfig failure cache"; risk = "可能跳过后续初始化并导致建筑缺格；禁止与 AliasPatch 同时启用。"; description = "旧方案缓存失败组合并跳过重复初始化，仅保留文件用于审计，不应挂载。" },
+        [pscustomobject][ordered]@{ id = "PZTimedActionTrace"; name = "长读条动作诊断探针"; category = "临时诊断"; fileName = "PZTimedActionTrace-agent-v2.jar"; arguments = "lateMs=500,reportSeconds=60,maxActive=2048,ttlSeconds=900"; activePattern = '\[PZTimedActionTrace\] ACTIVE'; compatibility = "PZ 42.20.x"; manageable = $false; target = "ActionManager / NetTimedAction"; risk = "与 PZTimedActionIsolationFix 修改同一类，不能同时加载。"; description = "记录动作接受、超时、完成、拒绝与异常链路，用于临时复现长读条失效。" }
+    )
+}
+
+function Test-ManagedPatchConfigured {
+    param([string]$FileName)
+    foreach ($profile in $serverProfiles) {
+        $paths = Get-ManagedProfilePaths -Id ([string]$profile.id)
+        if (-not (Test-Path -LiteralPath $paths.profilePath -PathType Leaf)) { continue }
+        try { $arguments = [string](Get-Content -LiteralPath $paths.profilePath -Raw -Encoding UTF8 | ConvertFrom-Json).arguments }
+        catch { continue }
+        if ([regex]::IsMatch($arguments, '(?i)(?:^|\s)-javaagent:(?:"?)[^\s"]*' + [regex]::Escape($FileName) + '(?:=[^\s"]+)?')) { return $true }
+    }
+    return $false
+}
+
+function Get-ServerPatchConfiguration {
+    $existing = $null
+    if (Test-Path -LiteralPath $serverPatchesConfigPath -PathType Leaf) {
+        try { $existing = Get-Content -LiteralPath $serverPatchesConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+        catch { throw "服务端补丁配置无效：$($_.Exception.Message)" }
+    }
+    $patches = [ordered]@{}
+    $orangeExisting = if ($existing -and $existing.patches) { $existing.patches.OrangeAntiCheat } else { $null }
+    $patches.OrangeAntiCheat = [pscustomobject][ordered]@{
+        enabled = if ($null -ne $orangeExisting) { [bool]$orangeExisting.enabled } else { $true }
+        updatedAt = if ($null -ne $orangeExisting) { [string]$orangeExisting.updatedAt } else { "" }
+    }
+    foreach ($definition in @(Get-KnownServerPatchDefinitions | Where-Object { $_.manageable })) {
+        $record = $null
+        if ($existing -and $existing.patches) { $record = $existing.patches.PSObject.Properties[[string]$definition.id].Value }
+        $patches[[string]$definition.id] = [pscustomobject][ordered]@{
+            enabled = if ($null -ne $record) { [bool]$record.enabled } else { Test-ManagedPatchConfigured -FileName ([string]$definition.fileName) }
+            updatedAt = if ($null -ne $record) { [string]$record.updatedAt } else { "" }
+        }
+    }
+    return [pscustomobject][ordered]@{ version = 2; patches = [pscustomobject]$patches }
 }
 
 function Save-ServerPatchConfiguration {
-    param([bool]$Enabled)
-    $configuration = [pscustomobject][ordered]@{
-        version = 1
-        patches = [pscustomobject][ordered]@{
-            OrangeAntiCheat = [pscustomobject][ordered]@{
-                enabled = $Enabled
-                updatedAt = (Get-Date).ToString("o")
-            }
-        }
-    }
+    param([string]$PatchId, [bool]$Enabled)
+    $configuration = Get-ServerPatchConfiguration
+    $record = $configuration.patches.PSObject.Properties[$PatchId].Value
+    if ($null -eq $record) { throw "未知或不可管理的 Java 补丁。" }
+    $record.enabled = $Enabled
+    $record.updatedAt = (Get-Date).ToString("o")
     $tempPath = "$serverPatchesConfigPath.$([guid]::NewGuid().ToString('N')).tmp"
     if (Test-Path -LiteralPath $serverPatchesConfigPath -PathType Leaf) {
         Copy-Item -LiteralPath $serverPatchesConfigPath -Destination "$serverPatchesConfigPath.bak" -Force
@@ -3665,7 +3861,7 @@ function Get-ServerPatchPayload {
     $configuration = Get-ServerPatchConfiguration
     $enabled = [bool]$configuration.patches.OrangeAntiCheat.enabled
     $embeddedAgentHash = if (Test-Path -LiteralPath $serverPatchEmbeddedAgentPath -PathType Leaf) {
-        (Get-FileHash -LiteralPath $serverPatchEmbeddedAgentPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Get-FileSha256 -Path $serverPatchEmbeddedAgentPath
     } else { "" }
     $runtimeScopes = [ordered]@{}
     foreach ($profile in $serverProfiles) {
@@ -3679,9 +3875,11 @@ function Get-ServerPatchPayload {
 
     $serverPatchSnapshots = @{}
     foreach ($profile in $serverProfiles) {
+        $processInfo = Get-RunningProfileProcessInfo -Profile $profile
         $serverPatchSnapshots[[string]$profile.id] = [pscustomobject]@{
             state = Get-ServerState -Profile $profile
             consoleText = Read-ServerPatchConsoleTail -Path ([string]$profile.consoleLog)
+            processCommandLine = if ($processInfo) { [string]$processInfo.CommandLine } else { "" }
         }
     }
 
@@ -3689,7 +3887,7 @@ function Get-ServerPatchPayload {
         $scope = $_
         $target = Join-Path ([string]$scope.runtimeRoot) ("server-patches\" + $serverPatchAgentFileName)
         $jar = Get-Item -LiteralPath $target -ErrorAction SilentlyContinue
-        $targetHash = if ($jar) { (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() } else { "" }
+        $targetHash = if ($jar) { Get-FileSha256 -Path $target } else { "" }
         $currentJar = $jar -and -not [string]::IsNullOrWhiteSpace($embeddedAgentHash) -and $targetHash -eq $embeddedAgentHash
         $serverStates = @($scope.profiles | ForEach-Object {
             $profile = $_
@@ -3753,7 +3951,7 @@ function Get-ServerPatchPayload {
         [pscustomobject][ordered]@{
             path = $relative.Replace('\', '/')
             present = Test-Path -LiteralPath $path -PathType Leaf
-            sha256 = if (Test-Path -LiteralPath $path -PathType Leaf) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() } else { "" }
+            sha256 = if (Test-Path -LiteralPath $path -PathType Leaf) { Get-FileSha256 -Path $path } else { "" }
         }
     })
 
@@ -3788,41 +3986,12 @@ function Get-ServerPatchPayload {
         }
     })
 
-    $agentDefinitions = @(
-        [pscustomobject][ordered]@{
-            id = "PZGlassRemovalGuard"; name = "玻璃附件死循环防护"; category = "稳定性修复"
-            fileName = "PZGlassRemovalGuard-agent.jar"; activePattern = '\[PZGlassRemovalGuard\] ACTIVE'
-            compatibility = "PZ 42.20.2 - 42.20.3"
-            description = "防止砸窗清理窗帘、百叶窗等附件时反复处理同一对象，避免世界主线程单核满载。"
-        },
-        [pscustomobject][ordered]@{
-            id = "PZItemContainerCycleGuard"; name = "物品容器循环防护"; category = "稳定性修复"
-            fileName = "PZItemContainerCycleGuard-agent.jar"; activePattern = '\[PZItemContainerCycleGuard\] ACTIVE'
-            compatibility = "PZ 42.20.x"
-            description = "阻断异常物品或尸体容器的自身回指与循环链，避免 getCharacter 无限递归和栈溢出。"
-        },
-        [pscustomobject][ordered]@{
-            id = "PZEntityRegistrationGuard"; name = "重复实体注册防护"; category = "稳定性修复"
-            fileName = "PZEntityRegistrationGuard-agent.jar"; activePattern = '\[PZEntityRegistrationGuard\] ACTIVE'
-            compatibility = "PZ 42.20.2"
-            description = "忽略同一个实体对象的幂等重复注册，避免连续异常中断区块载入或冻结主线程。"
-        },
-        [pscustomobject][ordered]@{
-            id = "PZTimedActionIsolationFix"; name = "多人长读条动作隔离"; category = "联机修复"
-            fileName = "PZTimedActionIsolationFix-agent.jar"; activePattern = '\[PZTimedActionIsolationFix\] ACTIVE'
-            compatibility = "PZ 42.20.x"
-            description = "按玩家和动作实例精确停止制作、拆解、加油等动作，防止动作编号撞号误删其他玩家读条。"
-        },
-        [pscustomobject][ordered]@{
-            id = "PZServerStreamingStability"; name = "对象数据流式同步防护"; category = "网络稳定性"
-            fileName = "PZServerStreamingStability-agent.jar"; activePattern = '\[PZStreaming\] ACTIVE'
-            compatibility = "PZ 42.20.2 - 42.20.3"
-            description = "丢弃无效 ObjectModData，并对目标区块未加载的数据进行有界排队和主线程重放，降低同步刷屏与卡顿。"
-        }
-    )
+    $agentDefinitions = @(Get-KnownServerPatchDefinitions)
 
     $agentComponents = @($agentDefinitions | ForEach-Object {
         $definition = $_
+        $definitionRecord = $configuration.patches.PSObject.Properties[[string]$definition.id].Value
+        $definitionEnabled = if ([bool]$definition.manageable) { [bool]$definitionRecord.enabled } else { $null }
         $componentScopes = @($runtimeScopes.Values | ForEach-Object {
             $scope = $_
             $jarPath = Join-Path ([string]$scope.runtimeRoot) ("server-patches\" + [string]$definition.fileName)
@@ -3831,20 +4000,32 @@ function Get-ServerPatchPayload {
                 $profile = $_
                 $snapshot = $serverPatchSnapshots[[string]$profile.id]
                 $state = $snapshot.state
-                $configured = [regex]::IsMatch([string]$profile.arguments, '(?i)(?:^|\s)-javaagent:(?:"?)[^\s"]*' + [regex]::Escape([string]$definition.fileName) + '(?:=[^\s"]+)?')
+                $managedArguments = ""
+                $managedPaths = Get-ManagedProfilePaths -Id ([string]$profile.id)
+                if (Test-Path -LiteralPath $managedPaths.profilePath -PathType Leaf) {
+                    try { $managedArguments = [string](Get-Content -LiteralPath $managedPaths.profilePath -Raw -Encoding UTF8 | ConvertFrom-Json).arguments }
+                    catch { }
+                }
+                $agentPattern = '(?i)(?:^|\s)-javaagent:(?:"?)[^\s"]*' + [regex]::Escape([string]$definition.fileName) + '(?:=[^\s"]+)?'
+                $configured = [regex]::IsMatch($managedArguments, $agentPattern)
+                $processMounted = [bool]$state.alive -and [regex]::IsMatch([string]$snapshot.processCommandLine, $agentPattern)
                 $consoleText = [string]$snapshot.consoleText
                 $active = [bool]$state.alive -and [regex]::IsMatch($consoleText, [string]$definition.activePattern)
+                $earlyMarker = [string]$definition.activeEvidence -eq 'pre-pz-stdout'
                 $detail = if (-not $state.alive) {
                     if ($configured) { "已配置，服务器停止中" } else { "未配置，服务器停止中" }
                 }
                 elseif ($active) { "启动日志已确认 ACTIVE" }
-                elseif ($configured) { "JVM 启动参数已加载，未捕捉到 ACTIVE 启动标记" }
+                elseif ($processMounted -and $earlyMarker) { "当前 Java 进程已确认挂载；ACTIVE 在 PZ 日志初始化前输出，server-console 不会收录" }
+                elseif ($processMounted) { "当前 Java 进程已确认挂载，但 PZ 日志未捕捉到 ACTIVE；请核对启动原始输出和版本兼容性" }
+                elseif ($configured) { "启动配置已写入，当前 Java 进程未检测到该 Agent，需完整重启" }
                 else { "当前启动参数未配置" }
                 [pscustomobject][ordered]@{
                     id = [string]$profile.id
                     name = [string]$profile.name
                     running = [bool]$state.alive
                     configured = [bool]$configured
+                    processMounted = [bool]$processMounted
                     active = [bool]$active
                     activeVersion = ""
                     detail = $detail
@@ -3856,8 +4037,14 @@ function Get-ServerPatchPayload {
                 filePresent = [bool]$jar
                 fileVersion = ""
                 buildTime = if ($jar) { $jar.LastWriteTime.ToString("yyyy-MM-dd HH:mm") } else { "" }
-                sha256 = if ($jar) { (Get-FileHash -LiteralPath $jarPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { "" }
-                pendingRestart = @($serverStates | Where-Object { $_.running -and -not $_.configured }).Count -gt 0
+                sha256 = if ($jar) { Get-FileSha256 -Path $jarPath } else { "" }
+                pendingRestart = if ([bool]$definition.manageable) {
+                    if ($definitionEnabled) {
+                        @($serverStates | Where-Object { -not $_.configured -or ($_.running -and -not $_.processMounted) }).Count -gt 0
+                    } else {
+                        @($serverStates | Where-Object { $_.configured -or ($_.running -and $_.processMounted) }).Count -gt 0
+                    }
+                } else { $false }
                 servers = $serverStates
             }
         })
@@ -3869,8 +4056,11 @@ function Get-ServerPatchPayload {
             description = [string]$definition.description
             version = ""
             compatibility = [string]$definition.compatibility
-            manageable = $false
-            enabled = $true
+            manageable = [bool]$definition.manageable
+            enabled = if ([bool]$definition.manageable) { [bool]$definitionEnabled } else { $null }
+            target = [string]$definition.target
+            risk = [string]$definition.risk
+            arguments = [string]$definition.arguments
             scopes = $componentScopes
         }
     })
@@ -3886,14 +4076,39 @@ function Get-ServerPatchPayload {
             compatibility = "PZ 42.20.2（精确类哈希）"
             manageable = $true
             enabled = [bool]$enabled
+            target = "LuaEventManager / TransactionManager / PlayerHealthPacket"
+            risk = "精确类哈希门禁；不修改 Lua 和存档，版本不符时自动拒绝注入。"
+            arguments = ""
             scopes = $orangeComponentScopes
         }
     ) + $agentComponents
+
+    $knownJarLookup = @{}
+    $knownJarLookup[$serverPatchAgentFileName.ToLowerInvariant()] = 'OrangeAntiCheat'
+    foreach ($definition in $agentDefinitions) { $knownJarLookup[([string]$definition.fileName).ToLowerInvariant()] = [string]$definition.id }
+    $jarInventory = @($runtimeScopes.Values | ForEach-Object {
+        $runtimeRoot = [string]$_.runtimeRoot
+        $patchRoot = Join-Path $runtimeRoot 'server-patches'
+        Get-ChildItem -LiteralPath $patchRoot -File -Filter '*.jar' -ErrorAction SilentlyContinue | ForEach-Object {
+            $key = $_.Name.ToLowerInvariant()
+            [pscustomobject][ordered]@{
+                runtimeRoot = $runtimeRoot
+                name = $_.Name
+                path = $_.FullName
+                size = [long]$_.Length
+                modifiedAt = $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+                registered = $knownJarLookup.ContainsKey($key)
+                componentId = if ($knownJarLookup.ContainsKey($key)) { [string]$knownJarLookup[$key] } else { '' }
+                classification = if ($knownJarLookup.ContainsKey($key)) { 'registered' } elseif ($_.Name -match '(?i)backup|retry|TimedActionTrace-agent\.jar$') { 'archive' } else { 'unregistered' }
+            }
+        }
+    })
 
     return [pscustomobject][ordered]@{
         ok = $true
         canManage = [bool]($Session -and [string]$Session.user.username -ieq "admin")
         components = $components
+        jarInventory = $jarInventory
         patch = [pscustomobject][ordered]@{
             id = [string]$manifest.id
             name = [string]$manifest.name
@@ -3911,22 +4126,43 @@ function Get-ServerPatchPayload {
 }
 
 function Set-ServerPatchEnabled {
-    param([bool]$Enabled)
+    param([string]$PatchId, [bool]$Enabled)
+    $definition = if ($PatchId -eq 'OrangeAntiCheat') { $null } else {
+        @(Get-KnownServerPatchDefinitions | Where-Object { [string]$_.id -ceq $PatchId } | Select-Object -First 1)
+    }
+    if ($PatchId -ne 'OrangeAntiCheat' -and ($definition.Count -eq 0 -or -not [bool]$definition[0].manageable)) {
+        throw "未知或不可由面板挂载的 Java 补丁。"
+    }
     $runtimeRoots = @($serverProfiles | ForEach-Object { [IO.Path]::GetFullPath([string]$_.runtimeRoot).TrimEnd('\', '/') } | Sort-Object -Unique)
-    if ($Enabled) {
+    if ($Enabled -and $PatchId -eq 'OrangeAntiCheat') {
         foreach ($runtimeRoot in $runtimeRoots) {
             [void](Install-OrangeAntiCheatAgent -RuntimeRoot $runtimeRoot)
         }
     }
-    [void](Save-ServerPatchConfiguration -Enabled $Enabled)
+    elseif ($Enabled) {
+        foreach ($runtimeRoot in $runtimeRoots) {
+            $jarPath = Join-Path $runtimeRoot ("server-patches\" + [string]$definition[0].fileName)
+            if (-not (Test-Path -LiteralPath $jarPath -PathType Leaf)) { throw "Java Agent 文件缺失，未修改配置：$jarPath" }
+        }
+    }
+    $backupRoot = Join-Path $root ("backups\server-patch-mount-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    foreach ($profile in $serverProfiles) {
+        $paths = Get-ManagedProfilePaths -Id ([string]$profile.id)
+        if (Test-Path -LiteralPath $paths.profilePath -PathType Leaf) {
+            Copy-Item -LiteralPath $paths.profilePath -Destination (Join-Path $backupRoot "$([string]$profile.id)-profile.json") -Force
+        }
+    }
+    [void](Save-ServerPatchConfiguration -PatchId $PatchId -Enabled $Enabled)
     $results = @($serverProfiles | ForEach-Object {
         $profile = $_
         Ensure-ManagedProfile -Profile $profile
         $paths = Get-ManagedProfilePaths -Id ([string]$profile.id)
         $managedProfile = Get-Content -LiteralPath $paths.profilePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $fileName = if ($PatchId -eq 'OrangeAntiCheat') { $serverPatchAgentFileName } else { [string]$definition[0].fileName }
         $configured = [regex]::IsMatch(
             [string]$managedProfile.arguments,
-            '(?i)(?:^|\s)-javaagent:server-patches[/\\]OrangeAntiCheat-agent\.jar(?:=[^\s"]+)?'
+            '(?i)(?:^|\s)-javaagent:(?:"?)[^\s"]*' + [regex]::Escape($fileName) + '(?:=[^\s"]+)?'
         )
         [pscustomobject]@{
             serverId = [string]$profile.id
@@ -3935,7 +4171,7 @@ function Set-ServerPatchEnabled {
         }
     })
     $script:antiCheatCache.Clear()
-    return $results
+    return [pscustomobject]@{ results = $results; backupPath = $backupRoot }
 }
 
 function Clear-AntiCheatCache {
@@ -7713,23 +7949,24 @@ try {
             if ($request.HttpMethod -eq "POST" -and $path -eq "/api/server-patches") {
                 Assert-HostControlAdministrator -Session $session
                 $body = Get-RequestBody $request
-                if ([string]$body.patchId -cne "OrangeAntiCheat") { throw "未知的内置补丁。" }
+                $patchId = Assert-SimpleText -Value ([string]$body.patchId) -Name "补丁 ID" -MaxLength 64
                 if ($body.confirm -cne "CHANGE_SERVER_PATCH_MOUNT") { throw "修改补丁挂载状态需要二次确认。" }
                 if ($body.enabled -isnot [bool]) { throw "补丁挂载状态必须是布尔值。" }
                 $enabled = [bool]$body.enabled
-                $results = @(Set-ServerPatchEnabled -Enabled $enabled)
+                $change = Set-ServerPatchEnabled -PatchId $patchId -Enabled $enabled
                 $action = if ($enabled) { "mount" } else { "unmount" }
                 Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "server-patch-$action" `
-                    -Detail "patch=OrangeAntiCheat enabled=$enabled runtimes=$($results.Count) requestedBy=$($session.user.username)" -Result "ok"
+                    -Detail "patch=$patchId enabled=$enabled servers=$(@($change.results).Count) backup=$($change.backupPath) requestedBy=$($session.user.username)" -Result "ok"
                 [void](Add-ExecutionHistoryRecord -ServerId "all" -Category "patch" -Action "server-patch-$action" -Source "web" `
-                    -Summary "OrangeAntiCheat $($(if ($enabled) { '挂载' } else { '卸载' }))" -Status "success" `
-                    -Message "三个托管配置的 Java Agent 参数已更新；运行中的服务器需要重启后切换实际行为。" -Detail ($results | ConvertTo-Json -Depth 4 -Compress))
+                    -Summary "$patchId $($(if ($enabled) { '挂载' } else { '卸载' }))" -Status "success" `
+                    -Message "三个托管配置的 Java Agent 参数已更新；运行中的服务器需要重启后切换实际行为。" -Detail ($change | ConvertTo-Json -Depth 4 -Compress))
                 $payload = Get-ServerPatchPayload -Session $session
                 $payload | Add-Member -NotePropertyName message -NotePropertyValue $(if ($enabled) {
-                    "OrangeAntiCheat Java Agent 已挂载到三个托管配置；运行中的服务器重启后生效。"
+                    "$patchId 已挂载到三个托管配置；运行中的服务器重启后生效。"
                 } else {
-                    "OrangeAntiCheat Java Agent 参数已从三个托管配置移除；运行中的服务器重启后停用。"
+                    "$patchId 已从三个托管配置移除；运行中的服务器重启后停用。"
                 }) -Force
+                $payload | Add-Member -NotePropertyName backupPath -NotePropertyValue ([string]$change.backupPath) -Force
                 Write-JsonResponse $context 200 $payload
                 continue
             }
@@ -7762,6 +7999,22 @@ try {
                 [void](Add-ExecutionHistoryRecord -ServerId ([string]$source.id) -Category "command" -Action "anticheat-ban-sync" -Source "web" `
                     -Summary "同步 SteamID 封禁名单" -Status $(if ($result.ok) { "success" } else { "warning" }) -Message ([string]$result.message) -Detail ($result.results | ConvertTo-Json -Depth 5 -Compress))
                 Write-JsonResponse $context 200 $result
+                continue
+            }
+            if ($request.HttpMethod -eq "POST" -and $path -eq "/api/anticheat/scan") {
+                $body = Get-RequestBody $request
+                $profile = Get-ServerProfile -Id ([string]$body.serverId)
+                $hours = [int]$body.hours
+                if ($hours -notin @(24, 72, 168, 720)) { throw "反作弊查询范围无效。" }
+                $force = [bool]$body.force
+                $job = Start-AntiCheatScan -Profile $profile -Hours $hours -Force:$force
+                $payload = Get-AntiCheatScanPayload -Id ([string]$job.id) -Session $session
+                Write-JsonResponse $context $(if ($payload.status -eq 'complete') { 200 } else { 202 }) $payload
+                continue
+            }
+            if ($request.HttpMethod -eq "GET" -and $path -eq "/api/anticheat/scan") {
+                $payload = Get-AntiCheatScanPayload -Id ([string]$request.QueryString["id"]) -Session $session
+                Write-JsonResponse $context 200 $payload
                 continue
             }
             if ($request.HttpMethod -eq "GET" -and $path -eq "/api/anticheat") {

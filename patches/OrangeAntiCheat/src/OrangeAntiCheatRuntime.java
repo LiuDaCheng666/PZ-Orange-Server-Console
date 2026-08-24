@@ -1,11 +1,20 @@
 package cn.zombiecommunity.orangeanticheat;
 
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicLong;
+import zombie.ZomboidFileSystem;
 import zombie.characters.Capability;
 import zombie.characters.IsoPlayer;
 import zombie.characters.BodyDamage.BodyDamage;
@@ -17,7 +26,7 @@ import zombie.network.IConnection;
 import zombie.network.fields.character.PlayerID;
 
 public final class OrangeAntiCheatRuntime {
-    private static final String VERSION = "2.4.1";
+    private static final String VERSION = "2.5.0";
     private static final String EVENT = "OnClientCommand";
     private static final String OWN_PLAYER_ONLY = "OwnPlayerOnly";
     private static final String HEALTH_REQUEST = "player.onHealthCheat";
@@ -33,6 +42,14 @@ public final class OrangeAntiCheatRuntime {
     private static final ThreadLocal<HealthSnapshot> HEALTH_SNAPSHOT = new ThreadLocal<>();
     private static final float HEALTH_INCREASE_EPSILON = 1.0f;
     private static final long HEALTH_LOG_INTERVAL_NANOS = 5_000_000_000L;
+    private static final long EVENT_LOG_MAX_BYTES = 8L * 1024L * 1024L;
+    private static final int EVENT_LOG_ROTATIONS = 5;
+    private static final Object EVENT_LOG_LOCK = new Object();
+    private static final DateTimeFormatter EVENT_TIME_FORMAT =
+            DateTimeFormatter.ofPattern("dd-MM-yy HH:mm:ss.SSS");
+    private static final String EVENT_INSTANCE = Long.toUnsignedString(System.currentTimeMillis(), 36);
+    private static final AtomicLong EVENT_SEQUENCE = new AtomicLong();
+    private static volatile long lastEventLogErrorNanos;
     private static final Map<String, Capability> ADMIN_COMMANDS = Map.ofEntries(
             Map.entry("object.addFireOnSquare", Capability.UseDebugContextMenu),
             Map.entry("object.addSmokeOnSquare", Capability.UseDebugContextMenu),
@@ -483,7 +500,7 @@ public final class OrangeAntiCheatRuntime {
         int x = player == null ? 0 : player.getXi();
         int y = player == null ? 0 : player.getYi();
         int z = player == null ? 0 : player.getZi();
-        System.out.println("[OrangeAntiCheat] event=blocked_client_command severity=critical"
+        emitEvent("[OrangeAntiCheat] event=blocked_client_command severity=critical"
                 + " version=" + VERSION
                 + " mode=javaagent"
                 + " steamId=" + steamId
@@ -505,7 +522,7 @@ public final class OrangeAntiCheatRuntime {
             int allowedCount,
             String route,
             String reason) {
-        System.out.println("[OrangeAntiCheat] event=blocked_item_transform severity=critical"
+        emitEvent("[OrangeAntiCheat] event=blocked_item_transform severity=critical"
                 + " version=" + VERSION
                 + " mode=javaagent"
                 + " steamId=" + (player == null ? 0L : player.getSteamID())
@@ -534,7 +551,7 @@ public final class OrangeAntiCheatRuntime {
         if (previous != null && now - previous < HEALTH_LOG_INTERVAL_NANOS) {
             return;
         }
-        System.out.println("[OrangeAntiCheat] event=observed_health_sync severity=warning"
+        emitEvent("[OrangeAntiCheat] event=observed_health_sync severity=warning"
                 + " version=" + VERSION
                 + " mode=javaagent"
                 + " steamId=" + steamId
@@ -548,6 +565,73 @@ public final class OrangeAntiCheatRuntime {
                 + " x=" + (player == null ? 0 : player.getXi())
                 + " y=" + (player == null ? 0 : player.getYi())
                 + " z=" + (player == null ? 0 : player.getZi()));
+    }
+
+    private static void emitEvent(String message) {
+        String eventMessage = message + " eventId=" + EVENT_INSTANCE + "-" + EVENT_SEQUENCE.incrementAndGet();
+        System.out.println(eventMessage);
+        try {
+            persistEvent(eventMessage);
+        } catch (Throwable failure) {
+            long now = System.nanoTime();
+            if (now - lastEventLogErrorNanos >= 60_000_000_000L) {
+                lastEventLogErrorNanos = now;
+                System.err.println("[OrangeAntiCheat] event=persistence_warning version=" + VERSION
+                        + " reason=" + token(failure.getClass().getSimpleName()));
+            }
+        }
+    }
+
+    private static void persistEvent(String message) throws Exception {
+        synchronized (EVENT_LOG_LOCK) {
+            String cacheDir = ZomboidFileSystem.instance.getCacheDir();
+            Path directory = Path.of(cacheDir, "Lua");
+            Files.createDirectories(directory);
+            Path current = directory.resolve("OrangeAntiCheat-events.jsonl");
+            if (Files.exists(current) && Files.size(current) >= EVENT_LOG_MAX_BYTES) {
+                rotateEventLogs(directory, current);
+            }
+            String time = LocalDateTime.now().format(EVENT_TIME_FORMAT);
+            String record = "{\"time\":\"" + jsonEscape(time) + "\",\"message\":\""
+                    + jsonEscape(message) + "\"}" + System.lineSeparator();
+            Files.writeString(current, record, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        }
+    }
+
+    private static void rotateEventLogs(Path directory, Path current) throws Exception {
+        Files.deleteIfExists(directory.resolve("OrangeAntiCheat-events." + EVENT_LOG_ROTATIONS + ".jsonl"));
+        for (int index = EVENT_LOG_ROTATIONS - 1; index >= 1; index--) {
+            Path source = directory.resolve("OrangeAntiCheat-events." + index + ".jsonl");
+            if (Files.exists(source)) {
+                Files.move(source, directory.resolve("OrangeAntiCheat-events." + (index + 1) + ".jsonl"),
+                        StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
+        Files.move(current, directory.resolve("OrangeAntiCheat-events.1.jsonl"),
+                StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    private static String jsonEscape(String value) {
+        StringBuilder result = new StringBuilder(value.length() + 16);
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            switch (character) {
+                case '\\' -> result.append("\\\\");
+                case '"' -> result.append("\\\"");
+                case '\r' -> result.append("\\r");
+                case '\n' -> result.append("\\n");
+                case '\t' -> result.append("\\t");
+                default -> {
+                    if (character < 0x20) {
+                        result.append(String.format("\\u%04x", (int) character));
+                    } else {
+                        result.append(character);
+                    }
+                }
+            }
+        }
+        return result.toString();
     }
 
     private static final class HealthSnapshot {

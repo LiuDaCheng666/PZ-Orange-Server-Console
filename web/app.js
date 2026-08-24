@@ -1,8 +1,8 @@
 const qs=new URLSearchParams(location.search);
-const views=['overview','console','chat','players','anticheat','items','vault','disasters','world','commands','system','profiles','ai','users','map-reset','maintenance'];
+const views=['overview','console','chat','players','anticheat','patches','items','vault','disasters','world','commands','system','profiles','ai','users','map-reset','maintenance'];
 const initialView=views.includes(qs.get('view'))?qs.get('view'):'overview';
 
-const titles={overview:'服务器总览',console:'实时日志',chat:'游戏聊天',players:'玩家管理',anticheat:'反作弊审计',items:'物品资料库',vault:'管理员物品保险库',disasters:'灾难与全服事件中心',world:'世界控制',commands:'命令中心',system:'本机资源监控',profiles:'服务器配置',ai:'游戏内 AI 助手',users:'Web 登录用户','map-reset':'地图刷新',maintenance:'维护与审计'};
+const titles={overview:'服务器总览',console:'实时日志',chat:'游戏聊天',players:'玩家管理',anticheat:'反作弊审计',patches:'Java 补丁管理',items:'物品资料库',vault:'管理员物品保险库',disasters:'灾难与全服事件中心',world:'世界控制',commands:'命令中心',system:'本机资源监控',profiles:'服务器配置',ai:'游戏内 AI 助手',users:'Web 登录用户','map-reset':'地图刷新',maintenance:'维护与审计'};
 let selectedId=qs.get('server')||localStorage.getItem('pz-server')||'',activeView=initialView;
 let cursor=0,paused=false,filter='all',logLines=[],lastStatus=null,statusBusy=false,logBusy=false;
 let profileConfig=null,editingProfileId='',playerDirectory=null,playersBusy=false,playerRequestServer='',playerRequestSerial=0,lastPlayersRefreshAt=0;
@@ -18,7 +18,7 @@ let aiConfig=null,aiBusy=false,aiKnowledgeBuild=null,aiKnowledgeTimer=null;
 let broadcastSchedules=[],broadcastScheduleBusy=false,executionHistory=[],executionHistoryPage=1,executionHistoryPageSize=30,executionHistoryTotal=0,executionHistoryTotalPages=1;
 let aiPolicies=[],aiOperations=[],aiPolicyPlayers=[],aiModerationEvents=[];
 let mapResetSnapshot=null,mapResetBusy=false,mapResetPollTimer=null,mapResetSerial=0,mapResetServerId='';
-let antiCheatSnapshot=null,antiCheatBusy=false,antiCheatSerial=0,antiCheatSelected='',antiCheatSeverity='all';
+let antiCheatSnapshot=null,antiCheatBusy=false,antiCheatSerial=0,antiCheatSelected='',antiCheatSeverity='all',antiCheatScanTimer=null;
 let antiCheatAIReports=new Map();
 let antiCheatHideSpeedNoise=true,antiCheatHideBanned=false,antiCheatBanSyncBusy=false;
 let serverPatchSnapshot=null,serverPatchBusy=false;
@@ -334,7 +334,8 @@ function showView(name){
   if(name==='system')pollSystem();
   if(name==='users'){refreshUsers();refreshCommunityUsers()}
   if(name==='ai')refreshAIPage();
-  if(name==='anticheat'){refreshServerPatches();refreshAntiCheat(false)}
+  if(name==='anticheat')refreshAntiCheat(false);
+  if(name==='patches')refreshServerPatches();
   if(name==='overview'||name==='console')pollLog();
 }
 document.querySelectorAll('[data-view]').forEach(button=>button.onclick=()=>showView(button.dataset.view));
@@ -390,7 +391,7 @@ function renderCurrentServer(){
 function selectServer(id){
   if(id===selectedId&&currentServer())return;
   closeAdminSetupDialog();
-  selectedId=id;localStorage.setItem('pz-server',id);cursor=0;logLines=[];chatCursor=0;chatFile='';chatMessages=[];chatFollowLatest=true;worldgenSerial+=1;commandResultSerial+=1;lifecycleSerial+=1;noticeSerial+=1;playerRequestSerial+=1;playerAdminSerial+=1;mapResetSerial+=1;clearTimeout(mapResetPollTimer);mapResetSnapshot=null;mapResetServerId='';playerAdminBusy=false;playerAdminSnapshot=null;playersBusy=false;playerRequestServer='';noticeStatusServer='';noticeChannel=null;noticeLastCheckedAt=0;noticeStatusError='';lifecycleOperation=null;executionHistory=[];executionHistoryPage=1;executionHistoryTotal=0;executionHistoryTotalPages=1;document.querySelector('#commandResultTray').hidden=true;renderChat(true);renderWorldgenResult('idle','尚未执行查询','已切换服务器，请重新执行世界生成查询','请选择操作并执行。');playerDirectory=null;document.querySelector('#playerSummary').textContent='正在读取在线玩家...';document.querySelector('#playerTable').innerHTML='<p class="empty-state">正在读取所选服务器玩家列表...</p>';document.querySelector('#playerAdminLookupForm').reset();renderPlayerAdmin();renderOnlinePlayerSelects();itemIndexSnapshot=null;renderItemIndexStatus({});itemRequestSerial+=1;clearTimeout(itemSearchTimer);clearTimeout(itemPollTimer);clearTimeout(itemCatalogTimer);resetItemCatalog();closeItemResults();itemSearchStatus.textContent='正在读取物品缓存状态...';
+  selectedId=id;localStorage.setItem('pz-server',id);cursor=0;logLines=[];chatCursor=0;chatFile='';chatMessages=[];chatFollowLatest=true;worldgenSerial+=1;commandResultSerial+=1;lifecycleSerial+=1;noticeSerial+=1;playerRequestSerial+=1;playerAdminSerial+=1;mapResetSerial+=1;antiCheatSerial+=1;antiCheatBusy=false;clearTimeout(antiCheatScanTimer);clearTimeout(mapResetPollTimer);mapResetSnapshot=null;mapResetServerId='';playerAdminBusy=false;playerAdminSnapshot=null;playersBusy=false;playerRequestServer='';noticeStatusServer='';noticeChannel=null;noticeLastCheckedAt=0;noticeStatusError='';lifecycleOperation=null;executionHistory=[];executionHistoryPage=1;executionHistoryTotal=0;executionHistoryTotalPages=1;document.querySelector('#commandResultTray').hidden=true;renderChat(true);renderWorldgenResult('idle','尚未执行查询','已切换服务器，请重新执行世界生成查询','请选择操作并执行。');playerDirectory=null;document.querySelector('#playerSummary').textContent='正在读取在线玩家...';document.querySelector('#playerTable').innerHTML='<p class="empty-state">正在读取所选服务器玩家列表...</p>';document.querySelector('#playerAdminLookupForm').reset();renderPlayerAdmin();renderOnlinePlayerSelects();itemIndexSnapshot=null;renderItemIndexStatus({});itemRequestSerial+=1;clearTimeout(itemSearchTimer);clearTimeout(itemPollTimer);clearTimeout(itemCatalogTimer);resetItemCatalog();closeItemResults();itemSearchStatus.textContent='正在读取物品缓存状态...';
   document.querySelector('#logOutput').textContent='正在读取所选服务器日志...';
   renderPicker();renderServerStrip();renderCurrentServer();pollLog();if(activeView==='chat'){pollChat();refreshNoticeStatus(true);refreshBroadcastSchedules()}if(activeView==='maintenance'){refreshLifecycleStatus();refreshSaveBackupPlan();refreshMaintenanceSchedule();refreshProgramUpdateStatus();refreshExecutionHistory()}if(activeView==='map-reset')refreshMapReset(true);if(activeView==='anticheat')refreshAntiCheat(false);if(activeView==='disasters')refreshDisasters(false);refreshPlayers();refreshItemStatus();if(activeView==='items')refreshItemCatalog();
 }
@@ -772,7 +773,7 @@ document.querySelector('#exportPlayers').onclick=()=>{if(!selectedId){toast('请
 document.querySelector('#playerAdminLookupForm').onsubmit=event=>{event.preventDefault();queryPlayerAdmin()};
 document.querySelector('#playerPasswordForm').onsubmit=async event=>{event.preventDefault();if(!playerAdminSnapshot)return;const form=event.currentTarget,values=formData(form);if(values.password!==values.passwordConfirm){toast('两次输入的新密码不一致。',true);return}if(!confirm(`确认修改账号 ${values.username} 的游戏密码？`))return;try{const result=await api('/api/player-admin/password',{method:'POST',body:JSON.stringify({serverId:selectedId,steamId:playerAdminSnapshot.steamId,username:values.username,password:values.password,passwordConfirm:values.passwordConfirm})});form.elements.password.value='';form.elements.passwordConfirm.value='';toast(result.message)}catch(error){toast(error.message,true)}};
 document.querySelector('#playerDeleteForm').onsubmit=async event=>{event.preventDefault();if(!playerAdminSnapshot)return;const confirmSteamId=event.currentTarget.elements.confirmSteamId.value.trim(),steamId=playerAdminSnapshot.steamId;if(confirmSteamId!==steamId){toast('确认 SteamID 与目标不一致。',true);return}if(!confirm(`永久删除 SteamID ${steamId} 的账号和角色数据？\n\n执行前会自动备份数据库；封禁记录和审计日志保留。`))return;try{const result=await api('/api/player-admin',{method:'DELETE',body:JSON.stringify({serverId:selectedId,steamId,confirmSteamId,confirm:'DELETE_PLAYER_DATA'}),timeoutMs:30000});toast(result.message);document.querySelector('#playerAdminMessage').textContent=`${result.message} 备份：${result.backupPath}`;await refreshPlayers();await queryPlayerAdmin(steamId)}catch(error){toast(error.message,true)}};
-document.querySelector('#refreshBtn').onclick=()=>{refreshStatus();pollLog();pollChat(true);if(activeView==='anticheat'){refreshServerPatches();refreshAntiCheat(true)}if(activeView==='disasters')refreshDisasters(false)};
+document.querySelector('#refreshBtn').onclick=()=>{refreshStatus();pollLog();pollChat(true);if(activeView==='anticheat')refreshAntiCheat(true);if(activeView==='patches')refreshServerPatches();if(activeView==='disasters')refreshDisasters(false)};
 document.querySelectorAll('#logFilters button').forEach(button=>button.onclick=()=>{document.querySelectorAll('#logFilters button').forEach(item=>item.classList.remove('active'));button.classList.add('active');filter=button.dataset.filter;renderLog()});
 document.querySelector('#pauseLog').onclick=()=>{paused=!paused;document.querySelector('#pauseLog').innerHTML=`<i data-lucide="${paused?'play':'pause'}"></i>`;lucide.createIcons();if(!paused)pollLog()};
 document.querySelector('#downloadLog').onclick=()=>{const blob=new Blob([logLines.join('\n')],{type:'text/plain;charset=utf-8'}),link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=`pz-${selectedId}-${new Date().toISOString().replace(/[:.]/g,'-')}.log`;link.click();URL.revokeObjectURL(link.href)};
@@ -784,7 +785,7 @@ document.querySelector('#grantForm').onsubmit=event=>{event.preventDefault();sub
 document.querySelector('#moderationForm').addEventListener('click',event=>{const button=event.target.closest('button[data-mode]');if(!button)return;event.preventDefault();const data=formData(document.querySelector('#moderationForm')),mode=button.dataset.mode;if(mode==='ban'&&!confirm(`确认封禁玩家 ${data.username}？`))return;command({action:mode,...data,confirm:mode==='ban'?'CONFIRM':undefined})});
 
 const antiCheatSeverityLabels={critical:'高危',high:'较高',warning:'需观察',low:'低风险',info:'辅助信息'};
-const antiCheatTypeLabels={'protected-command':'未鉴权调试命令','blocked-command':'危险命令已阻断','blocked-item-transform':'非法物品替换已阻断','blocked-health-overwrite':'非法健康回写已阻断（旧版）','observed-health-sync':'健康同步异常（仅记录）','authorized-admin-action':'管理员授权操作','native-anticheat':'原版反作弊','checksum':'Lua 校验异常','lua-checksum':'Lua 校验异常','permission':'权限模式异常','permission-mode':'权限模式异常','command-rate':'命令频率异常','pzai-server-snapshot':'PZAI 服务端可信快照','pzai-client-snapshot':'PZAI 客户端声明'};
+const antiCheatTypeLabels={'protected-command':'未鉴权调试命令','blocked-command':'危险命令已阻断','blocked-item-transform':'非法物品替换已阻断','blocked-health-overwrite':'非法健康回写已阻断（旧版）','observed-health-sync':'健康同步异常（仅记录）','authorized-admin-action':'管理员授权操作','historical-ban-audit':'历史封禁审计','native-anticheat':'原版反作弊','checksum':'Lua 校验异常','lua-checksum':'Lua 校验异常','permission':'权限模式异常','permission-mode':'权限模式异常','command-rate':'命令频率异常','pzai-server-snapshot':'PZAI 服务端可信快照','pzai-client-snapshot':'PZAI 客户端声明'};
 const antiCheatCommandMetadata={
   'object.addFireOnSquare':{label:'点燃地块',category:'危险调试命令',risk:'dangerous',explanation:'原版调试接口，可在指定地块生成火焰；普通玩家不应拥有调用权限。'},
   'object.addSmokeOnSquare':{label:'添加调试烟雾',category:'危险调试命令',risk:'dangerous',explanation:'原版调试接口，可在指定地块生成烟雾；普通玩家不应拥有调用权限。'},
@@ -821,10 +822,11 @@ const antiCheatCodeLabels={
   'debug-fire':'点燃地块','debug-smoke':'添加调试烟雾','debug-explosion':'制造调试爆炸','debug-fluid':'修改调试液体','container-refill':'重置容器探索状态',
   'debug-fluid-component':'修改液体容器组件','health-cheat':'修改玩家健康状态','weight-cheat':'修改玩家重量参数','erosion-cheat':'关闭地块侵蚀','debug-thunder':'触发雷声事件',
   'Power':'权限或数据包模式异常','Speed':'移动速度异常','PlayerUpdate':'玩家状态更新异常','SafeHouseMember':'安全屋成员操作异常','lua-checksum':'Lua / 脚本完整性不一致',
-  'server-authoritative':'服务端可信状态快照','client-declared':'客户端辅助状态声明','server-blocked':'服务端已拒绝危险命令','item-transform-blocked':'服务端已拒绝非法物品替换','health-overwrite-blocked':'服务端已拒绝非法健康回写','health-sync-observed':'健康同步异常（未阻断）','health-relay':'管理员健康操作回传','invalid-mode':'反作弊权限模式无效'
+  'server-authoritative':'服务端可信状态快照','client-declared':'客户端辅助状态声明','server-blocked':'服务端已拒绝危险命令','item-transform-blocked':'服务端已拒绝非法物品替换','health-overwrite-blocked':'服务端已拒绝非法健康回写','health-sync-observed':'健康同步异常（未阻断）','health-relay':'管理员健康操作回传','panel-ban-audit':'面板历史封禁记录','invalid-mode':'反作弊权限模式无效'
 };
 function getAntiCheatCategory(event={}){
   if(event.type==='authorized-admin-action')return{label:'合法管理操作',tone:'info'};
+  if(event.type==='historical-ban-audit')return{label:'处罚审计',tone:'info'};
   if(event.type==='blocked-item-transform')return{label:'物品交易鉴权',tone:'critical'};
   if(event.type==='blocked-health-overwrite')return{label:'健康同步鉴权',tone:'critical'};
   if(event.type==='observed-health-sync')return{label:'健康同步观察',tone:'warning'};
@@ -850,6 +852,7 @@ function getAntiCheatExplanation(event={}){
   const detail=String(event.detail||'').trim(),action=/action=Kick/i.test(detail)?'原版反作弊已踢出玩家':/action=Ban/i.test(detail)?'原版反作弊已封禁玩家':/action=Log/i.test(detail)?'原版只记录日志，未自动处罚':'';
   let explanation='';
   if(event.type==='authorized-admin-action')explanation=event.code==='health-relay'?'管理员先通过原版 UseHealthCheat 权限检查发起操作，随后目标客户端完成对应健康回传。这是正常管理链，保留审计但不增加风险分。':'服务端连接日志确认该玩家在操作发生时具有管理权限。本次操作保留在审计记录中，但不计入作弊风险。';
+  else if(event.type==='historical-ban-audit')explanation='面板确认该 SteamID 曾由管理员执行反作弊封禁。若当时的原始高危日志已轮转，本记录只证明封禁操作存在，不推断具体作弊命令。';
   else if(event.type==='protected-command')explanation='普通玩家客户端调用了仅应由管理员或调试权限使用的原版命令，属于需要重点核查的危险调用。';
   else if(event.type==='blocked-command')explanation='服务端鉴权补丁已经拒绝本次危险命令，游戏状态不应被该命令修改。';
   else if(event.type==='blocked-item-transform')explanation='客户端试图把一个合法载体替换成载体脚本未允许的物品类型。Java Agent 已在原版 ItemTransaction 执行前拒绝，因此本次请求不会生成目标物品。';
@@ -895,51 +898,54 @@ const antiCheatPlayerKey=player=>player?.steamId||`user:${(player?.usernames?.[0
 const antiCheatNames=player=>(player?.usernames||[]).join(' / ')||'未知玩家';
 function renderServerPatches(){
   const patch=serverPatchSnapshot?.patch;if(!patch)return;
-  const panel=document.querySelector('#serverPatchMount'),toggle=document.querySelector('#serverPatchEnabled'),button=document.querySelector('#applyServerPatch');
-  const scopes=patch.scopes||[],pending=scopes.some(scope=>scope.pendingRestart),installed=scopes.every(scope=>scope.installed),desired=Boolean(patch.enabled);
-  const state=pending?'pending':desired&&installed?'mounted':!desired&&!installed?'unmounted':'error';
-  panel.dataset.state=state;toggle.checked=desired;toggle.disabled=!serverPatchSnapshot.canManage;
-  document.querySelector('#serverPatchName').textContent=patch.name||patch.id||'OrangeAntiCheat';
-  document.querySelector('#serverPatchVersion').textContent=`内置 v${patch.version||'--'}`;
-  document.querySelector('#serverPatchVersion').className=`badge ${state==='mounted'?'running':state==='pending'?'warning':state==='error'?'stopped':'neutral'}`;
-  document.querySelector('#serverPatchMeta').textContent=`${Number(patch.protectedCommands||0)} 个命令守卫 · ${Number(patch.protectedTransactions||0)} 个交易守卫 · ${scopes.length} 个共享运行时 · ${pending?'等待相关游戏服重启':desired?'已按配置挂载':'已按配置卸载'}`;
-  const disclosureBadge=document.querySelector('#serverPatchDisclosureBadge');
-  document.querySelector('#serverPatchDisclosureMeta').textContent=pending?'自动挂载已开启，部分服务器等待完整重启':desired?'自动挂载已开启，展开查看各服务器状态':'自动挂载已关闭，展开可重新启用';
-  disclosureBadge.textContent=pending?'待重启':desired&&installed?'已配置':'未挂载';
-  disclosureBadge.className=`badge ${pending?'warning':desired&&installed?'running':'neutral'}`;
   const components=serverPatchSnapshot.components||[];
+  const pendingCount=components.filter(component=>(component.scopes||[]).some(scope=>scope.pendingRestart)).length;
+  const configuredCount=components.filter(component=>{const servers=(component.scopes||[]).flatMap(scope=>scope.servers||[]);return servers.length&&servers.every(server=>server.configured)}).length;
+  const activeCount=components.filter(component=>(component.scopes||[]).some(scope=>(scope.servers||[]).some(server=>server.active))).length;
+  document.querySelector('#serverPatchMount').dataset.state=pendingCount?'pending':'mounted';
+  document.querySelector('#serverPatchTotal').textContent=components.length.toLocaleString('zh-CN');
+  document.querySelector('#serverPatchConfigured').textContent=configuredCount.toLocaleString('zh-CN');
+  document.querySelector('#serverPatchActive').textContent=activeCount.toLocaleString('zh-CN');
+  document.querySelector('#serverPatchPending').textContent=pendingCount.toLocaleString('zh-CN');
+  document.querySelector('#serverPatchUpdatedAt').textContent=`状态时间 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`;
+  document.querySelector('#serverPatchName').textContent='Java Agent 组件';
+  document.querySelector('#serverPatchVersion').textContent=pendingCount?`${pendingCount} 项待重启`:`${activeCount} 项运行已验证`;
+  document.querySelector('#serverPatchVersion').className=`badge ${pendingCount?'warning':'running'}`;
+  document.querySelector('#serverPatchMeta').textContent=`共 ${components.length} 项白名单组件；可管理项会统一写入三个托管配置，运行中的游戏服不会热挂载。`;
+  const orange=components.find(component=>component.id==='OrangeAntiCheat');
+  if(orange){const servers=(orange.scopes||[]).flatMap(scope=>scope.servers||[]);renderAntiCheatGuard({active:servers.some(server=>server.active),installed:(orange.scopes||[]).every(scope=>scope.filePresent),pendingRestart:(orange.scopes||[]).some(scope=>scope.pendingRestart),version:orange.version})}
   document.querySelector('#serverPatchComponents').innerHTML=components.length?components.map(component=>{
     const componentScopes=component.scopes||[],filePresent=componentScopes.length&&componentScopes.every(scope=>scope.filePresent),pending=componentScopes.some(scope=>scope.pendingRestart);
     const fileLines=componentScopes.map(scope=>`<div class="server-patch-file"><b class="badge ${scope.filePresent?'running':'stopped'}">${scope.filePresent?'文件存在':'文件缺失'}</b><code>${escapeHtml(scope.filePath||scope.runtimeRoot||'')}</code>${scope.buildTime?`<small>构建时间 ${escapeHtml(scope.buildTime)}</small>`:''}${scope.sha256?`<small>SHA-256 ${escapeHtml(scope.sha256.slice(0,16))}...</small>`:''}</div>`).join('');
     const serverMap=new Map();componentScopes.forEach(scope=>(scope.servers||[]).forEach(server=>serverMap.set(server.id,server)));
-    const serverLines=[...serverMap.values()].map(server=>`<div class="server-patch-server ${server.active?'active':server.running&&server.configured?'pending':'stopped'}"><span><b>${escapeHtml(server.name)}</b><small>${escapeHtml(server.detail||'状态未知')}</small></span><b class="badge ${server.active?'running':server.running&&server.configured?'warning':'neutral'}">${server.active?'日志已验证':server.running&&server.configured?'JVM 已加载':server.configured?'已配置待启动':'未配置'}</b></div>`).join('');
-    const version=component.version?`v${component.version}`:'未声明语义版本';
-    return`<tr data-state="${pending?'pending':filePresent?'ready':'missing'}"><td data-label="补丁 / 组件"><b class="server-patch-component-name">${escapeHtml(component.name||component.id)}</b><code>${escapeHtml(component.technicalName||component.id||'')}</code><span class="server-patch-category">${escapeHtml(component.category||'服务端补丁')}</span></td><td data-label="中文用途备注"><p>${escapeHtml(component.description||'暂无说明')}</p></td><td data-label="版本与兼容"><b>${escapeHtml(version)}</b><small>${escapeHtml(component.compatibility||'兼容范围未注明')}</small></td><td data-label="文件状态">${fileLines||'<span class="badge stopped">未发现运行目录</span>'}</td><td data-label="服务器加载状态">${serverLines||'<span class="badge neutral">无服务器状态</span>'}</td></tr>`;
-  }).join(''):'<tr><td colspan="5"><p class="empty-state compact">没有可识别的补丁组件。</p></td></tr>';
+    const serverLines=[...serverMap.values()].map(server=>{const mounted=Boolean(server.processMounted);return`<div class="server-patch-server ${server.active?'active':mounted?'mounted':server.running&&server.configured?'pending':'stopped'}"><span><b>${escapeHtml(server.name)}</b><small>${escapeHtml(server.detail||'状态未知')}</small></span><b class="badge ${server.active?'running':mounted?'mounted':server.running&&server.configured?'warning':'neutral'}">${server.active?'日志已验证':mounted?'进程已确认挂载':server.running&&server.configured?'已配置待重启':server.configured?'已配置待启动':'未配置'}</b></div>`}).join('');
+    const version=component.version?`v${component.version}`:'独立构建',enabled=Boolean(component.enabled);
+    const action=component.manageable?`<button class="${enabled?'secondary-button':'primary-button'} patch-toggle-button" type="button" data-patch-id="${escapeHtml(component.id)}" data-enabled="${enabled?'false':'true'}" ${serverPatchBusy||(!filePresent&&!enabled)?'disabled':''}><i data-lucide="${enabled?'unplug':'plug-zap'}"></i>${enabled?'卸载':'挂载'}</button><small>${enabled?'配置目标：启用':'配置目标：停用'}</small>`:`<span class="badge neutral">只读状态</span><small>${component.category==='临时诊断'?'按维护计划手工挂载':'由服务器参数管理'}</small>`;
+    return`<tr data-state="${pending?'pending':filePresent?'ready':'missing'}"><td data-label="补丁 / 组件"><b class="server-patch-component-name">${escapeHtml(component.name||component.id)}</b><code>${escapeHtml(component.technicalName||component.id||'')}</code><span class="server-patch-category">${escapeHtml(component.category||'服务端补丁')}</span></td><td data-label="作用、目标与风险"><p>${escapeHtml(component.description||'暂无说明')}</p><small>目标：${escapeHtml(component.target||'未注明')}</small><small>边界：${escapeHtml(component.risk||'未注明')}</small></td><td data-label="版本与兼容"><b>${escapeHtml(version)}</b><small>${escapeHtml(component.compatibility||'兼容范围未注明')}</small>${component.arguments?`<code>参数 ${escapeHtml(component.arguments)}</code>`:''}</td><td data-label="文件状态">${fileLines||'<span class="badge stopped">未发现运行目录</span>'}</td><td data-label="服务器加载状态">${serverLines||'<span class="badge neutral">无服务器状态</span>'}</td><td data-label="挂载" class="server-patch-action">${action}</td></tr>`;
+  }).join(''):'<tr><td colspan="6"><p class="empty-state compact">没有可识别的补丁组件。</p></td></tr>';
   const sources=patch.sourceFiles||[];document.querySelector('#serverPatchSourceCount').textContent=`${sources.filter(item=>item.present).length} / ${sources.length}`;
   document.querySelector('#serverPatchSources').innerHTML=sources.map(item=>`<div><code>${escapeHtml(item.path)}</code><span class="${item.present?'':'error-text'}">${item.present?escapeHtml(item.sha256):'文件缺失'}</span></div>`).join('');
-  button.dataset.current=String(desired);updateServerPatchApplyState();
+  const inventory=serverPatchSnapshot.jarInventory||[],unregistered=inventory.filter(item=>!item.registered);
+  document.querySelector('#serverPatchInventoryCount').textContent=`${inventory.length} 个 · ${unregistered.length} 个旧版/未登记`;
+  document.querySelector('#serverPatchInventory').innerHTML=inventory.map(item=>`<div><code>${escapeHtml(item.name)}</code><span class="${item.classification==='unregistered'?'error-text':''}">${item.registered?`已登记 · ${escapeHtml(item.componentId)}`:item.classification==='archive'?'备份或旧版文件，不会自动加载':'未登记文件，不允许面板挂载'} · ${escapeHtml(item.modifiedAt||'')}</span></div>`).join('');
+  lucide.createIcons();
 }
 async function refreshServerPatches(){
-  try{serverPatchSnapshot=await api('/api/server-patches',{timeoutMs:15000});renderServerPatches()}catch(error){document.querySelector('#serverPatchMount').dataset.state='error';document.querySelector('#serverPatchMeta').textContent=error.message;document.querySelector('#serverPatchDisclosureMeta').textContent=`补丁状态读取失败：${error.message}`;document.querySelector('#serverPatchDisclosureBadge').textContent='读取失败';document.querySelector('#serverPatchDisclosureBadge').className='badge stopped'}
+  if(serverPatchBusy)return;document.querySelector('#refreshServerPatches').disabled=true;
+  try{serverPatchSnapshot=await api('/api/server-patches',{timeoutMs:30000});renderServerPatches()}catch(error){document.querySelector('#serverPatchMount').dataset.state='error';document.querySelector('#serverPatchMeta').textContent=error.message;toast(error.message,true)}finally{document.querySelector('#refreshServerPatches').disabled=false}
 }
-function updateServerPatchApplyState(){
-  const button=document.querySelector('#applyServerPatch'),toggle=document.querySelector('#serverPatchEnabled');
-  button.disabled=serverPatchBusy||!serverPatchSnapshot?.canManage||toggle.checked===Boolean(serverPatchSnapshot?.patch?.enabled);
-  button.innerHTML=`<i data-lucide="${toggle.checked?'plug-zap':'unplug'}"></i>${toggle.checked?'挂载到全部服务器':'从全部服务器卸载'}`;lucide.createIcons();
-}
-async function applyServerPatchState(){
+async function applyServerPatchState(patchId,enabled){
   if(serverPatchBusy||!serverPatchSnapshot?.canManage)return;
-  const enabled=document.querySelector('#serverPatchEnabled').checked,verb=enabled?'挂载':'卸载';
-  if(!confirm(`确认${verb} OrangeAntiCheat Java Agent？\n\n此操作会统一修改全部服务器的托管 Java 启动参数，不会修改游戏 Lua 文件。运行中的服务器需要完整重启后切换实际状态。`)){document.querySelector('#serverPatchEnabled').checked=Boolean(serverPatchSnapshot.patch.enabled);updateServerPatchApplyState();return}
-  serverPatchBusy=true;updateServerPatchApplyState();
-  try{serverPatchSnapshot=await api('/api/server-patches',{method:'POST',body:JSON.stringify({patchId:'OrangeAntiCheat',enabled,confirm:'CHANGE_SERVER_PATCH_MOUNT'}),timeoutMs:30000});renderServerPatches();toast(serverPatchSnapshot.message);antiCheatSnapshot=null;refreshAntiCheat(true)}catch(error){toast(error.message,true);await refreshServerPatches()}finally{serverPatchBusy=false;renderServerPatches()}
+  const component=(serverPatchSnapshot.components||[]).find(item=>item.id===patchId),verb=enabled?'挂载':'卸载';
+  if(!component||!confirm(`确认${verb} ${component.name||patchId}？\n\n面板会先备份三个托管配置，再统一修改 Java 启动参数。不会热挂载、不会修改存档；运行中的服务器需要完整重启后才切换实际行为。`))return;
+  serverPatchBusy=true;renderServerPatches();
+  try{serverPatchSnapshot=await api('/api/server-patches',{method:'POST',body:JSON.stringify({patchId,enabled,confirm:'CHANGE_SERVER_PATCH_MOUNT'}),timeoutMs:30000});renderServerPatches();toast(serverPatchSnapshot.message);if(patchId==='OrangeAntiCheat')antiCheatSnapshot=null}catch(error){toast(error.message,true);await refreshServerPatches()}finally{serverPatchBusy=false;renderServerPatches()}
 }
-document.querySelector('#serverPatchEnabled').onchange=updateServerPatchApplyState;
-document.querySelector('#applyServerPatch').onclick=applyServerPatchState;
+document.querySelector('#serverPatchComponents').onclick=event=>{const button=event.target.closest('[data-patch-id]');if(button)applyServerPatchState(button.dataset.patchId,button.dataset.enabled==='true')};
+document.querySelector('#refreshServerPatches').onclick=refreshServerPatches;
 function antiCheatMatchesPlayer(event,player){
   if(!event||!player)return false;
-  if(player.steamId&&event.steamId===player.steamId)return true;
+  if(event.steamId)return Boolean(player.steamId&&event.steamId===player.steamId);
   const names=new Set((player.usernames||[]).map(value=>String(value).toLowerCase()));
   return names.has(String(event.username||'').toLowerCase());
 }
@@ -962,12 +968,6 @@ function renderAntiCheatGuard(patch={}){
   document.querySelector('#antiCheatGuardText').textContent=patch.active&&patch.pendingRestart?`当前进程仍运行 OrangeAntiCheat ${patch.activeVersion||patch.version||''}；磁盘已部署 ${patch.installedVersion||'新版'}，完整重启后启用物品防护与健康同步审计。`:patch.active?`OrangeAntiCheat ${patch.version||''} Java Agent 正在校验危险命令和物品替换，并只读审计健康同步。`:patch.disabledReason?`OrangeAntiCheat Java Agent 已安全停用：${patch.disabledReason}。请更新兼容补丁后重启。`:patch.pendingRestart?'Agent JAR 已部署，当前进程尚未加载；下次完整重启后生效。':patch.installed?'Agent JAR 已部署，但当前日志中没有启动标记。':'未检测到 OrangeAntiCheat Agent JAR。';
   badge.textContent=patch.pendingRestart?'待重启':patch.active?'已生效':patch.installed?'待确认':'未安装';
   badge.className=`badge ${patch.pendingRestart?'warning':patch.active?'running':'stopped'}`;
-  const disclosureBadge=document.querySelector('#serverPatchDisclosureBadge');
-  const disabledLabels={unsupported_lua_event_manager:'游戏类版本不兼容',setup_failed:'Agent 初始化失败',unexpected_hook_count:'注入点数量异常',transform_failed:'字节码注入失败'};
-  const disabledLabel=disabledLabels[patch.disabledReason]||patch.disabledReason||'';
-  document.querySelector('#serverPatchDisclosureMeta').textContent=patch.active?`当前服务器已加载 OrangeAntiCheat ${patch.version||''}`:disabledLabel?`当前服务器 Agent 已安全停用：${disabledLabel}`:patch.pendingRestart?'当前服务器已配置，等待完整重启后加载':patch.installed?'补丁文件存在，当前进程尚未验证生效':'当前服务器未检测到 OrangeAntiCheat Agent';
-  disclosureBadge.textContent=patch.active?'已生效':disabledLabel?'已停用':patch.pendingRestart?'待重启':patch.installed?'待确认':'未安装';
-  disclosureBadge.className=`badge ${patch.active?'running':patch.pendingRestart?'warning':'stopped'}`;
 }
 function renderAntiCheatPlayers(){
   const rows=antiCheatFilteredPlayers(),container=document.querySelector('#antiCheatPlayers');
@@ -1046,14 +1046,34 @@ function renderAntiCheat(){
   document.querySelector('#openAntiCheatBanSync').disabled=!antiCheatSnapshot.canBan||!(antiCheatSnapshot.banSummary?.targets||[]).length;
   renderAntiCheatSignalGuide();renderAntiCheatPlayers();renderAntiCheatEvents();lucide.createIcons();
 }
+function renderAntiCheatScanProgress(progress={},visible=true){
+  const panel=document.querySelector('#antiCheatScanProgress'),percent=Math.max(0,Math.min(100,Number(progress.percent||0)));
+  panel.hidden=!visible;panel.dataset.state=progress.status||'running';
+  document.querySelector('#antiCheatProgressBar').value=percent;
+  document.querySelector('#antiCheatProgressPercent').textContent=`${Math.round(percent)}%`;
+  document.querySelector('#antiCheatProgressTitle').textContent=progress.message||'正在扫描服务端日志';
+  const files=Number(progress.filesTotal||0)?`${Number(progress.filesDone||0).toLocaleString('zh-CN')} / ${Number(progress.filesTotal).toLocaleString('zh-CN')} 个任务`:'';
+  const bytes=Number(progress.bytesTotal||0)?`${(Number(progress.bytesDone||0)/1048576).toFixed(1)} / ${(Number(progress.bytesTotal)/1048576).toFixed(1)} MiB`:'';
+  const lines=Number(progress.linesScanned||0)?`${Number(progress.linesScanned).toLocaleString('zh-CN')} 行`:'';
+  document.querySelector('#antiCheatProgressDetail').textContent=[files,bytes,lines].filter(Boolean).join(' · ')||'正在准备文件清单';
+}
 async function refreshAntiCheat(force=false){
   if(!selectedId||antiCheatBusy)return;
   const serverId=selectedId,serial=++antiCheatSerial,hours=document.querySelector('#antiCheatHours').value;
-  antiCheatBusy=true;document.querySelector('#refreshAntiCheat').disabled=true;document.querySelector('#antiCheatScanMeta').textContent='正在扫描服务端日志...';
+  antiCheatBusy=true;clearTimeout(antiCheatScanTimer);document.querySelector('#refreshAntiCheat').disabled=true;document.querySelector('#antiCheatScanMeta').textContent='正在启动后台扫描...';renderAntiCheatScanProgress({status:'running',percent:1,message:'正在启动日志分析器'},true);
   try{
-    const data=await api(`/api/anticheat?serverId=${encodeURIComponent(serverId)}&hours=${encodeURIComponent(hours)}${force?'&force=1':''}`,{timeoutMs:30000});
+    let job=await api('/api/anticheat/scan',{method:'POST',body:JSON.stringify({serverId,hours:Number(hours),force:Boolean(force)}),timeoutMs:15000});
+    while(job.status==='running'){
+      if(serial!==antiCheatSerial||serverId!==selectedId)return;
+      renderAntiCheatScanProgress(job.progress||{},true);document.querySelector('#antiCheatScanMeta').textContent=job.progress?.message||'正在扫描服务端日志...';
+      await new Promise(resolve=>setTimeout(resolve,350));
+      job=await api(`/api/anticheat/scan?id=${encodeURIComponent(job.id)}`,{timeoutMs:15000});
+    }
     if(serial!==antiCheatSerial||serverId!==selectedId)return;
-    antiCheatSnapshot=data;renderAntiCheat();
+    if(!job.result)throw new Error(job.progress?.message||'反作弊扫描未返回结果。');
+    renderAntiCheatScanProgress(job.progress||{status:'complete',percent:100,message:'扫描完成'},true);
+    antiCheatSnapshot=job.result;renderAntiCheat();
+    antiCheatScanTimer=setTimeout(()=>{if(serial===antiCheatSerial)renderAntiCheatScanProgress({},false)},1400);
   }catch(error){if(activeView==='anticheat'){document.querySelector('#antiCheatScanMeta').textContent='扫描失败';document.querySelector('#antiCheatPlayers').innerHTML=`<p class="empty-state error-text">${escapeHtml(error.message)}</p>`;toast(error.message,true)}}
   finally{if(serial===antiCheatSerial){antiCheatBusy=false;document.querySelector('#refreshAntiCheat').disabled=false}}
 }

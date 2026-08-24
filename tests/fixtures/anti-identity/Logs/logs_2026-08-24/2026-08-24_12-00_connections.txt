@@ -1,0 +1,6 @@
+[24-08-26 12:00:00.000] > Connection steam-id="76561198000000001" role="banned" username="null" ip="10.0.0.1"
+[24-08-26 12:00:01.000] > Connection steam-id="76561198000000001" role="none" username="Alice" ip="10.0.0.1"
+[24-08-26 12:00:02.000] > Connection steam-id="76561198000000002" role="banned" username="null" ip="10.0.0.2"
+[24-08-26 12:00:03.000] > Connection steam-id="76561198000000002" role="none" username="Bob" ip="10.0.0.2"
+[24-08-26 12:00:04.000] > Connection steam-id="76561198000000001" role="none" username="SharedName" ip="10.0.0.1"
+[24-08-26 12:00:05.000] > Connection steam-id="76561198000000002" role="none" username="SharedName" ip="10.0.0.2"

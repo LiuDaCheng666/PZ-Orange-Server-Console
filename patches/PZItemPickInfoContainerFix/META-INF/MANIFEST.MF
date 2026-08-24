@@ -1,0 +1,4 @@
+Manifest-Version: 1.0
+Premain-Class: cn.zombiecommunity.pzitempickfix.PZItemPickInfoContainerFixAgent
+Can-Redefine-Classes: false
+Can-Retransform-Classes: false

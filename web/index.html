@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>PZ橙子服务器控制台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/app.css?v=20260823-mobile-menu-1">
+  <link rel="stylesheet" href="/app.css?v=20260824-anticheat-progress-patches-1">
 </head>
 <body>
   <div class="auth-screen" id="authScreen">
@@ -37,6 +37,7 @@
         <button class="nav-item" data-view="chat"><i data-lucide="messages-square"></i><span>游戏聊天</span></button>
         <button class="nav-item" data-view="players"><i data-lucide="users"></i><span>玩家管理</span></button>
         <button class="nav-item" data-view="anticheat"><i data-lucide="shield-alert"></i><span>反作弊</span></button>
+        <button class="nav-item" data-view="patches"><i data-lucide="plug-zap"></i><span>Java 补丁</span></button>
         <button class="nav-item" data-view="items"><i data-lucide="package-search"></i><span>物品库</span></button>
         <button class="nav-item" data-view="vault"><i data-lucide="archive-restore"></i><span>物品保险库</span></button>
         <button class="nav-item" data-view="disasters"><i data-lucide="cloud-lightning"></i><span>灾难中心</span></button>
@@ -217,6 +218,11 @@
             <button class="secondary-button" id="refreshAntiCheat" type="button"><i data-lucide="refresh-cw"></i>重新扫描</button>
           </div>
         </div>
+        <div class="anticheat-scan-progress" id="antiCheatScanProgress" data-state="idle" hidden>
+          <div><span><i data-lucide="scan-line"></i><strong id="antiCheatProgressTitle">准备扫描日志</strong></span><b id="antiCheatProgressPercent">0%</b></div>
+          <progress id="antiCheatProgressBar" max="100" value="0"></progress>
+          <small id="antiCheatProgressDetail">等待后台分析任务</small>
+        </div>
         <div class="anticheat-metrics">
           <div><span>高危待处理</span><strong id="antiCheatCritical">--</strong><small id="antiCheatCriticalMeta">未封禁玩家</small></div>
           <div><span>危险命令</span><strong id="antiCheatProtected">--</strong><small>历史调用</small></div>
@@ -258,39 +264,6 @@
           <div class="anticheat-event-head"><span>时间 / 玩家</span><span>动作分类</span><span>可疑操作与中文说明</span><span>位置 / 日志来源</span><span>程度</span></div>
           <div id="antiCheatEvents"><p class="empty-state compact">尚未读取事件。</p></div>
         </section>
-        <details class="server-patch-disclosure" id="serverPatchDisclosure">
-          <summary>
-            <span class="server-patch-disclosure-icon"><i data-lucide="puzzle"></i></span>
-            <span><strong>补丁与运行状态</strong><small id="serverPatchDisclosureMeta">正在读取自动挂载状态...</small></span>
-            <b class="badge neutral" id="serverPatchDisclosureBadge">检查中</b>
-            <i class="server-patch-disclosure-chevron" data-lucide="chevron-down"></i>
-          </summary>
-          <div class="server-patch-disclosure-body">
-            <div class="anticheat-guard" id="antiCheatGuard" data-state="loading">
-              <span class="anticheat-guard-icon"><i data-lucide="shield-check"></i></span>
-              <div><strong id="antiCheatGuardTitle">正在检查服务端防护</strong><p id="antiCheatGuardText">读取补丁安装状态和当前 Java 进程加载记录。</p></div>
-              <span class="badge neutral" id="antiCheatGuardBadge">检查中</span>
-            </div>
-            <section class="server-patch-mount" id="serverPatchMount" data-state="loading">
-              <div class="server-patch-mount-head">
-                <span class="server-patch-icon"><i data-lucide="package-check"></i></span>
-                <div><p class="eyebrow">面板内置补丁</p><h2 id="serverPatchName">OrangeAntiCheat</h2><p id="serverPatchMeta">正在读取补丁清单与共享运行时状态...</p></div>
-                <span class="badge neutral" id="serverPatchVersion">版本 --</span>
-              </div>
-              <div class="server-patch-mount-control">
-                <label class="switch-control"><input id="serverPatchEnabled" type="checkbox"><span aria-hidden="true"></span><b>所有面板服务器自动挂载</b></label>
-                <button class="primary-button" id="applyServerPatch" type="button" disabled><i data-lucide="plug-zap"></i>应用挂载状态</button>
-              </div>
-              <div class="server-patch-table-wrap">
-                <table class="server-patch-table">
-                  <thead><tr><th>补丁 / 组件</th><th>中文用途备注</th><th>版本与兼容</th><th>文件状态</th><th>服务器加载状态</th></tr></thead>
-                  <tbody id="serverPatchComponents"><tr><td colspan="5"><p class="empty-state compact">正在识别补丁组件...</p></td></tr></tbody>
-                </table>
-              </div>
-              <details class="server-patch-source"><summary><span>内置源文件</span><b id="serverPatchSourceCount">--</b></summary><div id="serverPatchSources"></div></details>
-            </section>
-          </div>
-        </details>
         <dialog class="help-dialog anticheat-ban-sync-dialog" id="antiCheatBanSyncDialog">
           <form id="antiCheatBanSyncForm">
             <div class="help-dialog-head"><div><p class="eyebrow">只合并，不自动解封</p><h2>同步 SteamID 封禁名单</h2></div><button class="icon-button" id="closeAntiCheatBanSync" type="button" title="关闭"><i data-lucide="x"></i></button></div>
@@ -300,6 +273,36 @@
             <div class="help-actions"><button class="secondary-button" id="cancelAntiCheatBanSync" type="button">取消</button><button class="danger-button" type="submit"><i data-lucide="copy-check"></i>确认合并同步</button></div>
           </form>
         </dialog>
+      </section>
+
+      <section class="view" id="view-patches">
+        <div class="section-heading page-heading"><div><p class="eyebrow">托管 JVM 启动参数</p><h2>Java 补丁管理</h2></div><div class="heading-actions"><span class="sample-time" id="serverPatchUpdatedAt">正在读取...</span><button class="secondary-button" id="refreshServerPatches" type="button"><i data-lucide="refresh-cw"></i>刷新状态</button></div></div>
+        <div class="patch-summary-band">
+          <div><span>已登记组件</span><strong id="serverPatchTotal">--</strong><small>修复与诊断 Agent</small></div>
+          <div><span>当前已配置</span><strong id="serverPatchConfigured">--</strong><small>三个托管启动配置</small></div>
+          <div><span>运行已验证</span><strong id="serverPatchActive">--</strong><small>启动日志 ACTIVE</small></div>
+          <div><span>等待重启</span><strong id="serverPatchPending">--</strong><small>仅重启对应游戏服后切换</small></div>
+        </div>
+        <div class="anticheat-guard" id="antiCheatGuard" data-state="loading">
+          <span class="anticheat-guard-icon"><i data-lucide="shield-check"></i></span>
+          <div><strong id="antiCheatGuardTitle">正在检查服务端防护</strong><p id="antiCheatGuardText">读取 OrangeAntiCheat 安装状态和当前 Java 进程加载记录。</p></div>
+          <span class="badge neutral" id="antiCheatGuardBadge">检查中</span>
+        </div>
+        <section class="server-patch-mount" id="serverPatchMount" data-state="loading">
+          <div class="server-patch-mount-head">
+            <span class="server-patch-icon"><i data-lucide="package-check"></i></span>
+            <div><p class="eyebrow">严格白名单管理</p><h2 id="serverPatchName">Java Agent 组件</h2><p id="serverPatchMeta">只允许切换已登记补丁；操作前校验 JAR，并自动备份托管配置。</p></div>
+            <span class="badge neutral" id="serverPatchVersion">状态 --</span>
+          </div>
+          <div class="server-patch-table-wrap">
+            <table class="server-patch-table">
+              <thead><tr><th>补丁 / 组件</th><th>作用、目标与风险</th><th>版本与兼容</th><th>文件状态</th><th>服务器加载状态</th><th>挂载</th></tr></thead>
+              <tbody id="serverPatchComponents"><tr><td colspan="6"><p class="empty-state compact">正在识别补丁组件...</p></td></tr></tbody>
+            </table>
+          </div>
+          <details class="server-patch-source"><summary><span>运行目录 JAR 清单</span><b id="serverPatchInventoryCount">--</b></summary><div id="serverPatchInventory"></div></details>
+          <details class="server-patch-source"><summary><span>OrangeAntiCheat 内置源文件</span><b id="serverPatchSourceCount">--</b></summary><div id="serverPatchSources"></div></details>
+        </section>
       </section>
 
       <section class="view" id="view-items">
@@ -698,7 +701,7 @@
 
   <nav class="mobile-nav" id="mobileNav" aria-label="手机功能导航">
     <div class="mobile-nav-menu" id="mobileNavMenu" aria-hidden="true">
-      <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="anticheat"><i data-lucide="shield-alert"></i><span>反作弊</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="vault"><i data-lucide="archive-restore"></i><span>保险库</span></button><button data-view="disasters"><i data-lucide="cloud-lightning"></i><span>灾难</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="map-reset"><i data-lucide="map-pinned"></i><span>刷新</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
+      <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="anticheat"><i data-lucide="shield-alert"></i><span>反作弊</span></button><button data-view="patches"><i data-lucide="plug-zap"></i><span>补丁</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="vault"><i data-lucide="archive-restore"></i><span>保险库</span></button><button data-view="disasters"><i data-lucide="cloud-lightning"></i><span>灾难</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="map-reset"><i data-lucide="map-pinned"></i><span>刷新</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
     </div>
     <div class="mobile-nav-bar">
       <div class="mobile-current-view"><small>当前页面</small><strong id="mobileCurrentTitle">服务器总览</strong></div>
@@ -719,6 +722,6 @@
   <dialog class="help-dialog" id="helpDialog"><div class="help-dialog-head"><div><p class="eyebrow">当前服务器 B42.20 内置 help</p><h2 id="helpTitle">命令帮助</h2></div><button class="icon-button" id="closeHelp" type="button" title="关闭"><i data-lucide="x"></i></button></div><div id="helpBody" class="help-body"></div><div class="help-actions"><a class="secondary-button" href="https://pzwiki.net/wiki/Admin_commands" target="_blank" rel="noreferrer">PZ Wiki 命令资料</a><button class="secondary-button" id="queryHelp" type="button"><i data-lucide="terminal"></i>向服务器查询 help</button></div></dialog>
   <script src="/lucide.min.js?v=20260810-2"></script>
   <script src="/qrcode.min.js?v=20260810-2"></script>
-  <script src="/app.js?v=20260823-lifecycle-recovery-1"></script>
+  <script src="/app.js?v=20260824-anticheat-progress-patches-1"></script>
 </body>
 </html>

@@ -145,7 +145,20 @@ function isPrivilegedRole(role) {
   return ['admin', 'moderator', 'overseer', 'gm'].includes(String(role || '').toLowerCase());
 }
 
+function isPlaceholderUsername(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return !normalized || ['null', 'unknown', 'none', 'undefined', '(null)'].includes(normalized);
+}
+
 function readLogLines(file) {
+  if (/^OrangeAntiCheat-events(?:\.\d+)?\.jsonl$/i.test(path.basename(file))) {
+    return fs.readFileSync(file, 'utf8').split(/\r?\n/).map(line => {
+      try {
+        const record = JSON.parse(line);
+        return record?.time && record?.message ? `[${record.time}] ${record.message}` : '';
+      } catch { return ''; }
+    });
+  }
   if (path.basename(file).toLowerCase() !== 'server-console.txt') {
     return fs.readFileSync(file, 'utf8').split(/\r?\n/);
   }
@@ -161,16 +174,26 @@ function readLogLines(file) {
 }
 
 function matchesIdentity(line, names, steamId) {
-  if (steamId && line.includes(steamId)) return true;
-  const lower = line.toLowerCase();
-  return [...names].some(name => name && lower.includes(name.toLowerCase()));
+  const lineSteamIds = String(line).match(/7656119\d{10}/g) || [];
+  if (lineSteamIds.length) return Boolean(steamId && lineSteamIds.includes(steamId));
+  const lower = String(line).toLowerCase();
+  return [...names].some(name => {
+    if (isPlaceholderUsername(name)) return false;
+    const escaped = String(name).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9_])${escaped}([^a-z0-9_]|$)`, 'i').test(lower);
+  });
 }
 
 function readLogEvidence() {
   const allowed = /(_cmd|_user|_admin|_connections|_item|_pvp|_map|_DebugLog-server)\.txt$/i;
   const files = walk(logsRoot).filter(file => allowed.test(path.basename(file)) && fs.statSync(file).mtimeMs >= cutoff - 3600000);
   if (fs.existsSync(consoleLogPath) && fs.statSync(consoleLogPath).mtimeMs >= cutoff - 3600000) files.push(consoleLogPath);
-  const names = new Set(requestedUsername ? [requestedUsername] : []);
+  const luaRoot = path.join(dataRoot, 'Lua');
+  if (fs.existsSync(luaRoot)) {
+    files.push(...walk(luaRoot).filter(file => /^OrangeAntiCheat-events(?:\.\d+)?\.jsonl$/i.test(path.basename(file))
+      && fs.statSync(file).mtimeMs >= cutoff - 3600000));
+  }
+  const names = new Set(!isPlaceholderUsername(requestedUsername) ? [requestedUsername] : []);
   const steamIds = new Set(requestedSteamId ? [requestedSteamId] : []);
   const ips = new Set();
   const roles = new Set();
@@ -183,13 +206,18 @@ function readLogEvidence() {
       const parsed = lineTime(line);
       if (parsed.date && parsed.date.getTime() < cutoff) continue;
       const connection = /steam-id="(\d{17})"[^\n]*role="([^"]+)" username="([^"]+)"/i.exec(line);
-      if (connection && (steamIds.has(connection[1]) || [...names].some(name => name.toLowerCase() === connection[3].toLowerCase()))) {
-        steamIds.add(connection[1]); names.add(connection[3]); roles.add(connection[2]);
+      const connectionName = connection && !isPlaceholderUsername(connection[3]) ? connection[3] : '';
+      const connectionMatches = connection && (steamIds.has(connection[1])
+        || (!steamIds.size && connectionName && [...names].some(name => name.toLowerCase() === connectionName.toLowerCase())));
+      if (connectionMatches) {
+        steamIds.add(connection[1]); if (connectionName) names.add(connectionName); roles.add(connection[2]);
         const ip = /ip="([^"]+)"/i.exec(line); if (ip) ips.add(maskIp(ip[1]));
       }
       const ban = /banned SteamID (7656119\d{10})\(([^,)]*)/i.exec(line);
-      if (ban && (steamIds.has(ban[1]) || [...names].some(name => name.toLowerCase() === ban[2].toLowerCase()))) {
-        steamIds.add(ban[1]); names.add(ban[2]); banned.add(ban[1]);
+      const banName = ban && !isPlaceholderUsername(ban[2]) ? ban[2] : '';
+      if (ban && (steamIds.has(ban[1]) || (!steamIds.size && banName
+          && [...names].some(name => name.toLowerCase() === banName.toLowerCase())))) {
+        steamIds.add(ban[1]); if (banName) names.add(banName); banned.add(ban[1]);
       }
     }
   }
@@ -218,11 +246,14 @@ function readLogEvidence() {
   function keep(target, row, maximum = 80) { if (target.length < maximum) target.push(row); }
   function keepProtected(row) {
     const sequence = /\bf:(\d+)\s+st:([0-9,]+)>/.exec(row.text);
+    const eventId = /\beventId=([^\s]+)/.exec(row.text)?.[1] || '';
     const steamId = /\bsteamId=([^\s]+)/.exec(row.text)?.[1] || '';
     const moduleName = /\bmodule=([^\s]+)/.exec(row.text)?.[1] || '';
     const commandName = /\bcommand=([^\s]+)/.exec(row.text)?.[1] || '';
     const reason = /\breason=([^\s]+)/.exec(row.text)?.[1] || '';
-    const key = sequence
+    const key = eventId
+      ? `orange-guard-id|${eventId}`
+      : sequence
       ? ['orange-guard', sequence[1], sequence[2], steamId, moduleName, commandName, reason].join('|')
       : row.text;
     if (protectedEvidenceKeys.has(key)) return;
@@ -282,7 +313,7 @@ function readLogEvidence() {
           }
           else keep(relevantDebug, row);
         }
-      } else if (/^server-console\.txt$/i.test(name)) {
+      } else if (/^server-console\.txt$/i.test(name) || /^OrangeAntiCheat-events(?:\.\d+)?\.jsonl$/i.test(name)) {
         categoryCounts.agent += 1;
         if (/\[OrangeAntiCheat\][^\r\n]*event=(?:blocked_client_command|blocked_item_transform|blocked_health_overwrite|observed_health_sync)/i.test(line)) keepProtected(row);
       } else categoryCounts.user += 1;

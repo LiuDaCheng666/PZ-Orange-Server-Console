@@ -14,7 +14,7 @@ import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
 public final class OrangeAntiCheatAgent {
-    private static final String VERSION = "2.4.1";
+    private static final String VERSION = "2.5.0";
     private static final String LUA_EVENT_CLASS = "zombie/Lua/LuaEventManager";
     private static final String LUA_EVENT_METHOD = "triggerEvent";
     private static final String LUA_EVENT_DESCRIPTOR =
