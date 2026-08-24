@@ -2484,10 +2484,11 @@ function Assert-MapResetInteger {
 function Get-DefaultMapResetConfig {
     param($Profile)
     return [pscustomobject][ordered]@{
-        version = 1
+        version = 2
         serverId = [string]$Profile.id
         safehouseMarginChunks = 2
         playerMarginChunks = 8
+        animalMarginChunks = 2
         manualAreas = @()
         updatedAt = $null
     }
@@ -2502,6 +2503,10 @@ function Get-MapResetConfig {
     try {
         $config = Get-Content -LiteralPath $paths.configPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ([string]$config.serverId -cne [string]$Profile.id) { throw "配置所属服务器不匹配。" }
+        if (-not $config.PSObject.Properties["animalMarginChunks"]) {
+            $config | Add-Member -NotePropertyName "animalMarginChunks" -NotePropertyValue 2
+        }
+        $config.version = 2
         return $config
     }
     catch { throw "地图刷新配置损坏：$($_.Exception.Message)" }
@@ -2511,6 +2516,7 @@ function ConvertTo-NormalizedMapResetConfig {
     param($Profile, $Body)
     $safehouseMargin = Assert-MapResetInteger -Value $Body.safehouseMarginChunks -Name "安全屋边距" -Minimum 0 -Maximum 64
     $playerMargin = Assert-MapResetInteger -Value $Body.playerMarginChunks -Name "人物边距" -Minimum 0 -Maximum 64
+    $animalMargin = Assert-MapResetInteger -Value $Body.animalMarginChunks -Name "畜牧区边距" -Minimum 0 -Maximum 64
     $rawAreas = @($Body.manualAreas)
     if ($rawAreas.Count -gt 500) { throw "手动保护区域最多允许 500 项。" }
     $areas = @()
@@ -2526,10 +2532,11 @@ function ConvertTo-NormalizedMapResetConfig {
         }
     }
     return [pscustomobject][ordered]@{
-        version = 1
+        version = 2
         serverId = [string]$Profile.id
         safehouseMarginChunks = $safehouseMargin
         playerMarginChunks = $playerMargin
+        animalMarginChunks = $animalMargin
         manualAreas = $areas
         updatedAt = (Get-Date).ToString("o")
     }
@@ -2550,10 +2557,11 @@ function Save-MapResetConfig {
 function Get-MapResetConfigHash {
     param($Config)
     $relevant = [ordered]@{
-        version = 1
+        version = 2
         serverId = [string]$Config.serverId
         safehouseMarginChunks = [int]$Config.safehouseMarginChunks
         playerMarginChunks = [int]$Config.playerMarginChunks
+        animalMarginChunks = [int]$Config.animalMarginChunks
         manualAreas = @($Config.manualAreas | ForEach-Object {
             [ordered]@{ name = [string]$_.name; x = [int]$_.x; y = [int]$_.y; w = [int]$_.w; h = [int]$_.h; marginChunks = [int]$_.marginChunks }
         })
@@ -2626,13 +2634,43 @@ function Complete-MapResetStatus {
         $history = $executionHistory | Where-Object { [string]$_.clientRequestId -ceq "map-reset:$($status.operationId)" } | Select-Object -First 1
         if ($history -and [string]$history.status -in @("queued", "running")) {
             $historyStatus = if ([string]$status.state -eq "completed") { "success" } else { "failed" }
-            $operationLabel = if ([string]$status.mode -eq "audit") { "审计" } else { "执行" }
+            $operationLabel = switch ([string]$status.mode) { "audit" { "审计" } "rollback" { "回滚" } default { "执行" } }
             $historyMessage = if ([string]$status.state -eq "completed") { "地图刷新$operationLabel 已完成。" } else { [string]$status.error }
             Set-ExecutionHistoryResult -Record $history -Status $historyStatus -ResultCode "map-reset-$($status.state)" -Message $historyMessage -Detail ([string]$status.reportPath)
             Save-ExecutionHistory
         }
     }
     return $status
+}
+
+function Get-MapResetRollbackPoints {
+    param($Profile)
+    $saveRoot = Join-Path ([string]$Profile.dataRoot) "Saves\Multiplayer\$($Profile.serverName)"
+    $saveParent = Split-Path -Parent $saveRoot
+    if (-not (Test-Path -LiteralPath $saveParent -PathType Container)) { return @() }
+    $prefix = "$($Profile.serverName)-selective-reset-quarantine-"
+    return @(Get-ChildItem -LiteralPath $saveParent -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name.StartsWith($prefix, [StringComparison]::Ordinal) } |
+        ForEach-Object {
+            $manifestPath = Join-Path $_.FullName "full-save-backup-manifest.json"
+            $archivePath = Join-Path $_.FullName "full-save-backup.zip"
+            $rollbackResultPath = Join-Path $_.FullName "rollback-result.json"
+            $manifest = Read-MapResetJson -Path $manifestPath
+            if (-not $manifest -or -not $manifest.verifiedAt -or -not (Test-Path -LiteralPath $archivePath -PathType Leaf)) { return }
+            $archive = Get-Item -LiteralPath $archivePath
+            if ([long]$manifest.archiveBytes -ne [long]$archive.Length) { return }
+            $rollbackResult = Read-MapResetJson -Path $rollbackResultPath
+            [pscustomobject][ordered]@{
+                id = $_.Name
+                createdAt = [string]$manifest.createdAt
+                verifiedAt = [string]$manifest.verifiedAt
+                fileCount = [long]$manifest.fileCount
+                sourceBytes = [long]$manifest.sourceBytes
+                archiveBytes = [long]$archive.Length
+                path = $_.FullName
+                previouslyRestoredAt = if ($rollbackResult) { [string]$rollbackResult.restoredAt } else { $null }
+            }
+        } | Sort-Object createdAt -Descending)
 }
 
 function Get-MapResetPayload {
@@ -2646,6 +2684,7 @@ function Get-MapResetPayload {
     } else { $null }
     $serverState = Get-ServerState -Profile $Profile
     $configHash = Get-MapResetConfigHash -Config $config
+    $progress = if ($status -and $status.progressPath) { Read-MapResetJson -Path ([string]$status.progressPath) } else { $null }
     return [ordered]@{
         ok = $true
         serverId = [string]$Profile.id
@@ -2659,8 +2698,10 @@ function Get-MapResetPayload {
         config = $config
         configHash = $configHash
         status = $status
+        progress = $progress
         lastAudit = $lastAudit
         lastAuditSummary = $lastAuditSummary
+        rollbackPoints = @(Get-MapResetRollbackPoints -Profile $Profile)
         auditMatchesConfig = [bool]($lastAudit -and [string]$lastAudit.configHash -ceq $configHash -and (Test-Path -LiteralPath ([string]$lastAudit.summaryPath) -PathType Leaf))
     }
 }
@@ -2671,7 +2712,7 @@ function ConvertTo-MapResetProcessArgument {
 }
 
 function Start-MapResetOperation {
-    param($Profile, $Config, [ValidateSet("audit", "apply")][string]$Mode, [string]$Confirmation)
+    param($Profile, $Config, [ValidateSet("audit", "apply", "rollback")][string]$Mode, [string]$Confirmation, [string]$BackupId = "")
     if (-not $pythonRuntimePath) { throw "未找到 Python 运行环境，无法启动地图刷新工具。" }
     if (-not (Test-Path -LiteralPath $mapResetToolPath -PathType Leaf) -or -not (Test-Path -LiteralPath $mapResetRunnerPath -PathType Leaf)) {
         throw "控制台内置地图刷新工具不完整。"
@@ -2680,17 +2721,25 @@ function Start-MapResetOperation {
     $current = Complete-MapResetStatus -Profile $Profile
     if ($current -and [string]$current.state -in @("running", "finalizing")) { throw "当前已有地图刷新任务正在执行。" }
     $saveRoot = Join-Path ([string]$Profile.dataRoot) "Saves\Multiplayer\$($Profile.serverName)"
-    if (-not (Test-Path -LiteralPath (Join-Path $saveRoot "map_meta.bin") -PathType Leaf)) { throw "没有找到 B42 存档：$saveRoot" }
+    if ($Mode -ne "rollback" -and -not (Test-Path -LiteralPath (Join-Path $saveRoot "map_meta.bin") -PathType Leaf)) { throw "没有找到 B42 存档：$saveRoot" }
     $configHash = Get-MapResetConfigHash -Config $Config
-    if ($Mode -eq "apply") {
+    $quarantinePath = ""
+    if ($Mode -in @("apply", "rollback")) {
         $serverState = Get-ServerState -Profile $Profile
-        if ($serverState.alive) { throw "正式执行前必须先保存并停止所选游戏服务器。" }
+        if ($serverState.alive) { throw "正式执行或回滚前必须先保存并停止所选游戏服务器。" }
         if (Get-ActiveLifecycleOperation -Profile $Profile) { throw "服务器生命周期操作仍在执行，请等待其结束。" }
         if ($Confirmation -cne [string]$Profile.serverName) { throw "确认文字必须与 serverName 完全一致：$($Profile.serverName)" }
+    }
+    if ($Mode -eq "apply") {
         $lastAudit = Read-MapResetJson -Path $paths.lastAuditPath
         if (-not $lastAudit -or [string]$lastAudit.configHash -cne $configHash -or -not (Test-Path -LiteralPath ([string]$lastAudit.summaryPath) -PathType Leaf)) {
             throw "当前配置没有匹配的成功审计，请先保存配置并重新运行只读审计。"
         }
+    }
+    elseif ($Mode -eq "rollback") {
+        $rollbackPoint = Get-MapResetRollbackPoints -Profile $Profile | Where-Object { [string]$_.id -ceq $BackupId } | Select-Object -First 1
+        if (-not $rollbackPoint) { throw "没有找到经过校验的完整存档备份：$BackupId" }
+        $quarantinePath = [string]$rollbackPoint.path
     }
     New-Item -ItemType Directory -Path $paths.operationsRoot -Force | Out-Null
     $operationId = [guid]::NewGuid().ToString("N")
@@ -2700,10 +2749,11 @@ function Start-MapResetOperation {
     $manualAreasPath = Join-Path $operationRoot "manual-areas.json"
     Write-MapResetJson -Path $manualAreasPath -Value ([ordered]@{ protectAreas = @($Config.manualAreas) })
     Write-MapResetJson -Path (Join-Path $operationRoot "request.json") -Value ([ordered]@{
-        operationId = $operationId; mode = $Mode; configHash = $configHash; config = $Config; createdAt = (Get-Date).ToString("o")
+        operationId = $operationId; mode = $Mode; configHash = $configHash; config = $Config; backupId = $BackupId; quarantinePath = $quarantinePath; createdAt = (Get-Date).ToString("o")
     })
     $stdoutPath = Join-Path $operationRoot "stdout.log"
     $stderrPath = Join-Path $operationRoot "stderr.log"
+    $progressPath = Join-Path $operationRoot "progress.json"
     $runnerArguments = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (ConvertTo-MapResetProcessArgument $mapResetRunnerPath),
         "-PythonPath", (ConvertTo-MapResetProcessArgument $pythonRuntimePath),
@@ -2713,20 +2763,23 @@ function Start-MapResetOperation {
         "-ManualAreas", (ConvertTo-MapResetProcessArgument $manualAreasPath),
         "-SafehouseMargin", [string]$Config.safehouseMarginChunks,
         "-PlayerMargin", [string]$Config.playerMarginChunks,
+        "-AnimalMargin", [string]$Config.animalMarginChunks,
         "-ReportRoot", (ConvertTo-MapResetProcessArgument $reportRoot),
-        "-Mode", $Mode
+        "-Mode", $Mode,
+        "-ProgressPath", (ConvertTo-MapResetProcessArgument $progressPath)
     )
-    if ($Mode -eq "apply") { $runnerArguments += @("-Confirmation", (ConvertTo-MapResetProcessArgument $Confirmation)) }
+    if ($Mode -in @("apply", "rollback")) { $runnerArguments += @("-Confirmation", (ConvertTo-MapResetProcessArgument $Confirmation)) }
+    if ($Mode -eq "rollback") { $runnerArguments += @("-Quarantine", (ConvertTo-MapResetProcessArgument $quarantinePath)) }
     $process = Start-Process -FilePath "powershell.exe" -ArgumentList ($runnerArguments -join " ") -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     $status = [pscustomobject][ordered]@{
         operationId = $operationId; serverId = [string]$Profile.id; mode = $Mode; state = "running"; pid = $process.Id
         configHash = $configHash; startedAt = (Get-Date).ToString("o"); finishedAt = $null; exitCode = $null
         operationRoot = $operationRoot; reportRoot = $reportRoot; reportPath = $null; summaryPath = $null
-        stdoutPath = $stdoutPath; stderrPath = $stderrPath; summary = $null; error = $null
+        stdoutPath = $stdoutPath; stderrPath = $stderrPath; progressPath = $progressPath; summary = $null; error = $null
     }
     Write-MapResetJson -Path $paths.statusPath -Value $status
     [void](Add-ExecutionHistoryRecord -ServerId ([string]$Profile.id) -Category "lifecycle" -Action "map-reset-$Mode" -Source "web" `
-        -Summary $(if ($Mode -eq "audit") { "选择性区块刷新只读审计" } else { "选择性区块刷新正式执行" }) -Status "running" `
+        -Summary $(switch ($Mode) { "audit" { "选择性区块刷新只读审计" } "rollback" { "选择性区块刷新完整回滚" } default { "选择性区块刷新正式执行" } }) -Status "running" `
         -Message "后台任务已启动。" -ClientRequestId "map-reset:$operationId")
     return $status
 }
@@ -3180,8 +3233,10 @@ function Get-DisasterProfilePaths {
     param($Profile)
     $luaRoot = Join-Path ([string]$Profile.dataRoot) "Lua"
     return [pscustomobject]@{
-        command = Join-Path $luaRoot "OrangeCommunityEconomy-disaster-commands.jsonl"
-        receipt = Join-Path $luaRoot "OrangeCommunityEconomy-disaster-receipts.jsonl"
+        command = Join-Path $luaRoot "OrangeCommunityEconomy-disaster-commands.txt"
+        legacyCommand = Join-Path $luaRoot "OrangeCommunityEconomy-disaster-commands.jsonl"
+        receipt = Join-Path $luaRoot "OrangeCommunityEconomy-disaster-receipts.txt"
+        legacyReceipt = Join-Path $luaRoot "OrangeCommunityEconomy-disaster-receipts.jsonl"
         state = Join-Path $luaRoot "OrangeCommunityEconomy-disaster-state.json"
     }
 }
@@ -3247,7 +3302,15 @@ function Add-DisasterCommand {
         createdMs = $now
         expiresMs = $now + [timespan]::FromMinutes(10).TotalMilliseconds
     }
-    Add-AdminItemVaultJsonLine -Path (Get-DisasterProfilePaths $Profile).command -Value $row
+    $paths = Get-DisasterProfilePaths $Profile
+    Add-AdminItemVaultJsonLine -Path $paths.command -Value $row
+    $runtime = Read-DisasterRuntimeState $Profile
+    $bridgeV2Fresh = $runtime -and [int]$runtime.schema -ge 2 -and
+        [double]$runtime.updatedMs -ge ($now - [timespan]::FromMinutes(1).TotalMilliseconds)
+    if (-not $bridgeV2Fresh) {
+        # Keep old Mod builds operational only during the Workshop rollout.
+        Add-AdminItemVaultJsonLine -Path $paths.legacyCommand -Value $row
+    }
     return [pscustomobject][ordered]@{
         requestId = $requestId
         serverId = [string]$Profile.id
@@ -3278,14 +3341,17 @@ function Sync-DisasterReceipts {
     param($Store)
     $latest = @{}
     foreach ($profile in $serverProfiles) {
-        foreach ($row in @(Read-AdminItemVaultJsonLines -Path (Get-DisasterProfilePaths $profile).receipt)) {
-            if (-not $row.valid) { continue }
-            $receipt = $row.value
-            $id = [string]$receipt.requestId
-            if ($id -notmatch '^disaster-[a-zA-Z0-9]+$') { continue }
-            $receipt | Add-Member -NotePropertyName serverId -NotePropertyValue ([string]$profile.id) -Force
-            if (-not $latest[$id] -or [double]$receipt.updatedMs -ge [double]$latest[$id].updatedMs) {
-                $latest[$id] = $receipt
+        $paths = Get-DisasterProfilePaths $profile
+        foreach ($receiptPath in @([string]$paths.legacyReceipt, [string]$paths.receipt) | Select-Object -Unique) {
+            foreach ($row in @(Read-AdminItemVaultJsonLines -Path $receiptPath)) {
+                if (-not $row.valid) { continue }
+                $receipt = $row.value
+                $id = [string]$receipt.requestId
+                if ($id -notmatch '^disaster-[a-zA-Z0-9]+$') { continue }
+                $receipt | Add-Member -NotePropertyName serverId -NotePropertyValue ([string]$profile.id) -Force
+                if (-not $latest[$id] -or [double]$receipt.updatedMs -ge [double]$latest[$id].updatedMs) {
+                    $latest[$id] = $receipt
+                }
             }
         }
     }
@@ -3354,8 +3420,8 @@ function Get-DisasterCenterPayload {
     $state = Read-DisasterRuntimeState $profile
     $now = Get-Date
     $lastQuery = $disasterQueryAt[[string]$profile.id]
-    if (-not $state -or [double]$state.updatedMs -lt ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - 10000)) {
-        if (-not $lastQuery -or ($now - $lastQuery).TotalSeconds -ge 5) {
+    if (-not $state -or [double]$state.updatedMs -lt ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - 30000)) {
+        if (-not $lastQuery -or ($now - $lastQuery).TotalSeconds -ge 30) {
             try {
                 $request = Add-DisasterCommand -Profile $profile -Operation query -Arguments @{} -RequestedBy $RequestedBy
                 $store.requests += $request
@@ -7584,24 +7650,28 @@ try {
                 $config = ConvertTo-NormalizedMapResetConfig -Profile $profile -Body $body
                 Save-MapResetConfig -Profile $profile -Config $config
                 Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "map-reset-config-save" `
-                    -Detail "server=$($profile.id) safehouseMargin=$($config.safehouseMarginChunks) playerMargin=$($config.playerMarginChunks) manualAreas=$(@($config.manualAreas).Count) requestedBy=$($session.user.username)" -Result "ok"
+                    -Detail "server=$($profile.id) safehouseMargin=$($config.safehouseMarginChunks) playerMargin=$($config.playerMarginChunks) animalMargin=$($config.animalMarginChunks) manualAreas=$(@($config.manualAreas).Count) requestedBy=$($session.user.username)" -Result "ok"
                 $payload = Get-MapResetPayload -Profile $profile -Session $session
                 $payload.message = "地图刷新保护配置已保存；修改后需要重新运行只读审计。"
                 Write-JsonResponse $context 200 $payload
                 continue
             }
-            if ($request.HttpMethod -eq "POST" -and $path -in @("/api/map-reset/audit", "/api/map-reset/apply")) {
+            if ($request.HttpMethod -eq "POST" -and $path -in @("/api/map-reset/audit", "/api/map-reset/apply", "/api/map-reset/rollback")) {
                 Assert-HostControlAdministrator -Session $session
                 $body = Get-RequestBody $request
                 $profile = Get-ServerProfile -Id ([string]$body.serverId)
                 $config = Get-MapResetConfig -Profile $profile
-                $mode = if ($path -eq "/api/map-reset/apply") { "apply" } else { "audit" }
-                $confirmation = if ($mode -eq "apply") { [string]$body.confirmation } else { "" }
-                $operation = Start-MapResetOperation -Profile $profile -Config $config -Mode $mode -Confirmation $confirmation
+                $mode = if ($path -eq "/api/map-reset/apply") { "apply" } elseif ($path -eq "/api/map-reset/rollback") { "rollback" } else { "audit" }
+                $confirmation = if ($mode -in @("apply", "rollback")) { [string]$body.confirmation } else { "" }
+                $operation = Start-MapResetOperation -Profile $profile -Config $config -Mode $mode -Confirmation $confirmation -BackupId ([string]$body.backupId)
                 Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "map-reset-$mode" `
-                    -Detail "server=$($profile.id) operation=$($operation.operationId) configHash=$($operation.configHash) requestedBy=$($session.user.username)" -Result "queued"
+                    -Detail "server=$($profile.id) operation=$($operation.operationId) configHash=$($operation.configHash) backupId=$([string]$body.backupId) requestedBy=$($session.user.username)" -Result "queued"
                 $payload = Get-MapResetPayload -Profile $profile -Session $session
-                $payload.message = if ($mode -eq "audit") { "只读审计已在后台启动。" } else { "选择性区块刷新已在后台启动；完成后不会自动启动服务器。" }
+                $payload.message = switch ($mode) {
+                    "audit" { "只读审计已在后台启动。" }
+                    "rollback" { "完整存档回滚已在后台启动；回滚前的当前世界也会保留。" }
+                    default { "完整存档备份和选择性区块刷新已在后台启动；完成后不会自动启动服务器。" }
+                }
                 Write-JsonResponse $context 202 $payload
                 continue
             }

@@ -450,11 +450,24 @@
         <div class="section-heading page-heading"><div><p class="eyebrow">B42 选择性区块刷新</p><h2>地图刷新与保护区域</h2></div><span class="badge neutral" id="mapResetStateBadge">尚未审计</span></div>
         <div class="map-reset-alert" id="mapResetAlert" data-state="neutral"><i data-lucide="shield-check"></i><div><strong id="mapResetAlertTitle">只读工具已就绪</strong><p id="mapResetAlertText">审计不会修改存档。正式执行只会移动未保护区块到隔离目录。</p></div></div>
 
+        <details class="map-reset-guide">
+          <summary><span><i data-lucide="book-open-check"></i><strong>地图重置须知</strong></span><small>流程、保护规则、数据影响与回滚边界</small></summary>
+          <div class="map-reset-guide-grid">
+            <article><h3>完整流程</h3><ol><li>选择服务器并保存保护配置。</li><li>运行只读审计，核对拟刷新区块、容量和车辆数量。</li><li>在游戏内保存并正常停止目标服。</li><li>输入 serverName 正式执行。</li><li>工具先创建整个存档的 ZIP64 完整备份，并逐文件校验 CRC。</li><li>校验通过后，未保护的地图区块才会移入隔离目录。</li><li>手动启动服务器；发现异常时停服并选择对应备份点完整回滚。</li></ol></article>
+            <article><h3>工作原理</h3><p>工具不清空数据库，只移动未保护的 <code>map/X/Y.bin</code>。每个文件对应一个 8×8 格区块；游戏下次访问缺失区块时按当前地图和 Mod 重新生成。保护区块文件保持原样，所有楼层一起保留。</p><p>重新生成在玩家接近时按需发生，不会提前生成全图，因此首次进入大量新区仍可能出现短时加载压力。</p></article>
+            <article><h3>自动保护</h3><p>保护范围由原版安全屋、全部未死亡角色最后位置、<code>AnimalZone</code> 畜牧区及手动保护矩形组成。边距单位是区块；人物边距设为 0 时，脚下的一个区块仍会保留。</p><p>动物存档会全量保留，但畜牧区外的动物数据不保护地图。车辆数据库保留，车辆所在区块当前只统计、不自动保护。</p></article>
+            <article><h3>会刷新与会保留</h3><p>未保护区会重新生成地形、建筑、容器、门窗和世界对象；其中的玩家建筑、落地物、尸体及摆设会消失。人物背包、装备、车辆数据库、全局 Mod 数据、动物数据及派生目录不会主动删除。</p><p>重要停车场、公共设施、未申领基地和跨区块建筑应手动加入保护区域。</p></article>
+            <article><h3>完整备份</h3><p>正式执行前会无压缩归档整个多人存档，校验文件数、总字节数及每个 ZIP 条目的 CRC。磁盘空间不足或任何文件校验失败都会取消刷新，不移动地图区块。</p><p>完整备份与隔离目录位于目标存档同级目录，正式执行和回滚均不会自动启动游戏服务器。</p></article>
+            <article><h3>完整回滚</h3><p>回滚会再次校验备份，先解压到临时目录，再将当前存档整体改名保留，最后原子替换为刷新前存档。人物、车辆、动物、交易数据和地图会一起回到同一时间点。</p><p>刷新后产生的角色进度和世界变化不会合并；它们保存在 <code>*-before-rollback-*</code> 目录，需要人工确认后再清理。</p></article>
+          </div>
+        </details>
+
         <form class="map-reset-config" id="mapResetConfigForm">
           <div class="section-heading"><div><p class="eyebrow">保护规则</p><h2>自动保护范围</h2></div><button class="primary-button map-reset-admin" type="submit"><i data-lucide="save"></i>保存配置</button></div>
           <div class="map-reset-margin-grid">
             <label>安全屋外扩（区块）<input name="safehouseMarginChunks" type="number" min="0" max="64" step="1" value="2" required><small>每个区块为 8×8 格。默认外扩 2 区块。</small></label>
             <label>存活人物外扩（区块）<input name="playerMarginChunks" type="number" min="0" max="64" step="1" value="8" required><small>默认外扩 8 区块，降低上线位置出现黑边的风险。</small></label>
+            <label>畜牧区外扩（区块）<input name="animalMarginChunks" type="number" min="0" max="64" step="1" value="2" required><small>只保护 AnimalZone 畜牧划区。区外动物数据会保留，但不会保护地图区块。</small></label>
           </div>
           <div class="map-reset-area-head"><div><strong>手动保护区域</strong><span>坐标和宽高单位均为游戏格；边距单位为区块。</span></div><button class="secondary-button map-reset-admin" id="addMapResetArea" type="button"><i data-lucide="plus"></i>添加区域</button></div>
           <div class="map-reset-area-table" id="mapResetAreaTable"><p class="empty-state compact">没有手动保护区域。</p></div>
@@ -465,6 +478,8 @@
           <dl class="map-reset-stats">
             <div><dt>原版安全屋</dt><dd id="mapResetSafehouses">--</dd></div>
             <div><dt>存活角色</dt><dd id="mapResetPlayers">--</dd></div>
+            <div><dt>畜牧划区</dt><dd id="mapResetLivestockZones">--</dd></div>
+            <div><dt>动物数据（仅保留）</dt><dd id="mapResetAnimalCells">--</dd></div>
             <div><dt>保护区块</dt><dd id="mapResetProtected">--</dd></div>
             <div><dt>拟刷新区块</dt><dd id="mapResetChunks">--</dd></div>
             <div><dt>拟隔离容量</dt><dd id="mapResetBytes">--</dd></div>
@@ -475,9 +490,16 @@
         </section>
 
         <section class="map-reset-apply">
-          <div><p class="eyebrow">不可在线执行</p><h2>正式刷新未保护区块</h2><p>必须先保存并停止所选服务器。执行后区块文件进入隔离目录，不会自动重启服务器。</p></div>
+          <div><p class="eyebrow">不可在线执行</p><h2>正式刷新未保护区块</h2><p>停服后先创建并校验完整存档 ZIP；只有校验成功才隔离未保护区块，完成后不会自动重启。</p></div>
           <label>输入 serverName 确认<input id="mapResetConfirmation" autocomplete="off" spellcheck="false" placeholder="等待读取 serverName"></label>
-          <button class="danger-button map-reset-admin" id="applyMapReset" type="button" disabled><i data-lucide="archive-restore"></i>执行并隔离区块</button>
+          <button class="danger-button map-reset-admin" id="applyMapReset" type="button" disabled><i data-lucide="archive"></i>完整备份并执行</button>
+        </section>
+
+        <section class="map-reset-rollback">
+          <div><p class="eyebrow">完整存档恢复</p><h2>回滚一次地图刷新</h2><p id="mapResetRollbackHint">选择经过 CRC 校验的完整备份。当前世界会先整体保留，回滚不会合并刷新后的进度。</p></div>
+          <label>完整备份点<select id="mapResetRollbackPoint"><option value="">没有可用备份</option></select></label>
+          <label>输入 serverName 确认<input id="mapResetRollbackConfirmation" autocomplete="off" spellcheck="false" placeholder="等待读取 serverName"></label>
+          <button class="danger-button map-reset-admin" id="rollbackMapReset" type="button" disabled><i data-lucide="history"></i>校验并完整回滚</button>
         </section>
       </section>
 
