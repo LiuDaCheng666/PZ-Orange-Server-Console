@@ -40,18 +40,22 @@ $receiptDir = Join-Path $controlRoot "receipts"
 $statePath = Join-Path $controlRoot "state.json"
 $operationPath = Join-Path $controlRoot "lifecycle-operation.json"
 $lockPath = Join-Path $controlRoot "lifecycle.lock"
+$managedRoot = Split-Path -Parent $controlRoot
+$globalLifecycleLockPath = Join-Path $managedRoot "lifecycle-global.lock"
 $startScript = Join-Path $controlRoot "Start-ManagedPZ.ps1"
 $profile = Get-Content -LiteralPath $ProfilePath -Raw -Encoding UTF8 | ConvertFrom-Json
 $operationStartedAt = Get-Date
 $oldJavaPid = $null
 $newJavaPid = $null
 $lockStream = $null
+$globalLifecycleLockStream = $null
 $steamLockStream = $null
 $operationWarnings = @()
 $countdownUntil = $null
 $stabilizationUntil = $null
 $operationDetail = ""
 $serverWasRunning = $false
+$shutdownTimeoutSeconds = 900
 
 function Write-Operation {
     param(
@@ -76,6 +80,7 @@ function Write-Operation {
         warningSeconds = if ($Action -in @("restart", "update")) { $WarningSeconds } else { 0 }
         countdownUntil = $countdownUntil
         restartStabilizationSeconds = if ($Action -in @("restart", "update")) { $RestartStabilizationSeconds } else { 0 }
+        shutdownTimeoutSeconds = $shutdownTimeoutSeconds
         stabilizationUntil = $stabilizationUntil
         targetBuildId = if ($Action -eq "update") { $RemoteBuildId } else { $null }
         installDirectory = if ($Action -eq "update") { $InstallDirectory } else { $null }
@@ -91,6 +96,27 @@ function Write-Operation {
         Move-Item -LiteralPath $tempPath -Destination $operationPath -Force
     }
     finally { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue }
+}
+
+function Wait-GlobalLifecycleLock {
+    $waitStartedAt = Get-Date
+    $lastStatusAt = [datetime]::MinValue
+    while ($true) {
+        try {
+            return [IO.File]::Open($globalLifecycleLockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        }
+        catch [IO.IOException] {
+            $nativeErrorCode = $_.Exception.HResult -band 0xFFFF
+            if ($nativeErrorCode -notin @(32, 33)) { throw }
+            $now = Get-Date
+            if (($now - $lastStatusAt).TotalSeconds -ge 30) {
+                $waitedSeconds = [math]::Max(0, [int]($now - $waitStartedAt).TotalSeconds)
+                Write-Operation -Status "running" -Stage "waiting-lifecycle-lock" -Message "另一台服务器正在维护，已等待 $waitedSeconds 秒；本服务器将在前一项完成后自动继续。"
+                $lastStatusAt = $now
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
 }
 
 function Read-State {
@@ -226,6 +252,9 @@ try {
     }
     catch { throw "已有另一个服务器生命周期操作正在运行。" }
 
+    $globalLifecycleLockStream = Wait-GlobalLifecycleLock
+    Write-Operation -Status "running" -Stage "locking" -Message "已取得整机生命周期操作锁，正在开始维护。"
+
     if ($Action -eq "update") {
         if (-not (Test-Path -LiteralPath $SteamCmdPath -PathType Leaf)) { throw "找不到 SteamCMD：$SteamCmdPath" }
         $steamLockPath = Join-Path (Split-Path -Parent $SteamCmdPath) "pz-app-380870-update.lock"
@@ -261,18 +290,25 @@ try {
         [void](Submit-Command -Command "quit" -TimeoutSeconds 20)
 
         Write-Operation -Status "running" -Stage "waiting-stop" -Message "退出命令已送达，正在等待旧 Java 进程完全结束。"
-        $stopDeadline = (Get-Date).AddMinutes(3)
+        $stopStartedAt = Get-Date
+        $stopDeadline = $stopStartedAt.AddSeconds($shutdownTimeoutSeconds)
+        $lastStopStatusAt = $stopStartedAt
         $stopped = $false
         do {
             Start-Sleep -Milliseconds 500
-            $state = Read-State
             $oldProcessAlive = $oldJavaPid -and [bool](Get-Process -Id $oldJavaPid -ErrorAction SilentlyContinue)
-            if ($state -and [string]$state.status -in @("stopped", "failed") -and -not $state.javaPid -and -not $oldProcessAlive) {
+            if (-not $oldProcessAlive) {
                 $stopped = $true
                 break
             }
+            $now = Get-Date
+            if (($now - $lastStopStatusAt).TotalSeconds -ge 30) {
+                $elapsedSeconds = [math]::Max(0, [int]($now - $stopStartedAt).TotalSeconds)
+                Write-Operation -Status "running" -Stage "waiting-stop" -Message "旧 Java PID $oldJavaPid 正在正常保存并退出，已等待 $elapsedSeconds 秒，最长等待 15 分钟。"
+                $lastStopStatusAt = $now
+            }
         } while ((Get-Date) -lt $stopDeadline)
-        if (-not $stopped) { throw "执行 quit 后 Java 未在 3 分钟内结束；为避免更新运行中的文件，操作已中止。" }
+        if (-not $stopped) { throw "执行 quit 后 Java 未在 15 分钟内结束；为避免强制终止造成坏档，操作已中止。" }
     }
 
     if ($Action -eq "stop") {
@@ -356,6 +392,7 @@ catch {
 }
 finally {
     if ($steamLockStream) { $steamLockStream.Dispose() }
+    if ($globalLifecycleLockStream) { $globalLifecycleLockStream.Dispose() }
     if ($lockStream) { $lockStream.Dispose() }
     Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
 }
