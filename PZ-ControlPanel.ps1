@@ -2893,6 +2893,7 @@ function New-AdminItemVaultStore {
         templates = @()
         tombstones = @()
         sourceCursors = @()
+        deployments = @()
         grants = @()
         updatedAt = (Get-Date).ToString("o")
     }
@@ -2914,6 +2915,7 @@ function Read-AdminItemVaultStore {
         templates = @($store.templates)
         tombstones = @($store.tombstones | ForEach-Object { [string]$_ } | Where-Object { $_ } | Select-Object -Unique)
         sourceCursors = @($store.sourceCursors)
+        deployments = @($store.deployments)
         grants = @($store.grants)
         updatedAt = [string]$store.updatedAt
     }
@@ -3053,6 +3055,54 @@ function Import-AdminItemVaultTemplates {
     return [pscustomobject]@{ store = $store; imported = $imported; invalid = $invalid }
 }
 
+function Publish-AdminItemVaultTemplates {
+    param(
+        $Store,
+        [switch]$Force
+    )
+    $known = @{}
+    foreach ($deployment in @($Store.deployments)) {
+        $key = '{0}|{1}|{2}' -f [string]$deployment.profileId,
+            [string]$deployment.templateId, [string]$deployment.snapshotHash
+        $known[$key] = $true
+    }
+    $queued = 0
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    foreach ($profile in $serverProfiles) {
+        $paths = Get-AdminItemVaultProfilePaths -Profile $profile
+        foreach ($template in @($Store.templates)) {
+            if (-not (Test-AdminItemVaultTemplateRecord -Record $template)) { continue }
+            $profileId = [string]$profile.id
+            $templateId = [string]$template.templateId
+            $snapshotHash = [string]$template.snapshotHash
+            $key = '{0}|{1}|{2}' -f $profileId, $templateId, $snapshotHash
+            if (-not $Force -and $known.ContainsKey($key)) { continue }
+            $requestId = "vault-template-sync-$([guid]::NewGuid().ToString('N'))"
+            Add-AdminItemVaultJsonLine -Path $paths.import -Value ([ordered]@{
+                schema = 1
+                kind = 'template_sync'
+                requestId = $requestId
+                createdMs = $now
+                expiresMs = 0
+                template = $template
+            })
+            $Store.deployments = @($Store.deployments | Where-Object {
+                -not ([string]$_.profileId -ceq $profileId -and [string]$_.templateId -ceq $templateId)
+            }) + @([pscustomobject]@{
+                profileId = $profileId
+                templateId = $templateId
+                snapshotHash = $snapshotHash
+                requestId = $requestId
+                queuedAt = (Get-Date).ToString('o')
+            })
+            $known[$key] = $true
+            $queued++
+        }
+    }
+    if ($queued -gt 0) { Save-AdminItemVaultStore -Store $Store }
+    return [pscustomobject]@{ queued = $queued; forced = [bool]$Force }
+}
+
 function Sync-AdminItemVaultReceipts {
     param($Store)
     $latest = @{}
@@ -3091,6 +3141,7 @@ function Get-AdminItemVaultPayload {
     param([string]$Remote, [string]$RequestedBy)
     $import = Import-AdminItemVaultTemplates -Remote $Remote -RequestedBy $RequestedBy
     $store = $import.store
+    $deployment = Publish-AdminItemVaultTemplates -Store $store
     [void](Sync-AdminItemVaultReceipts -Store $store)
     $templates = @($store.templates | Sort-Object @{ Expression = { [double]$_.createdMs }; Descending = $true })
     $grants = @($store.grants | Sort-Object @{ Expression = { [double]$_.createdMs }; Descending = $true } | Select-Object -First 100)
@@ -3100,6 +3151,7 @@ function Get-AdminItemVaultPayload {
         grants = $grants
         imported = [int]$import.imported
         invalid = [int]$import.invalid
+        distributed = [int]$deployment.queued
         profiles = @($serverProfiles | ForEach-Object { [ordered]@{ id = [string]$_.id; name = [string]$_.name; serverName = [string]$_.serverName } })
         updatedAt = [string]$store.updatedAt
     }
@@ -3111,6 +3163,8 @@ function Invoke-AdminItemVaultSync {
         [string]$RequestedBy,
         [int]$WaitMilliseconds = 7000
     )
+    $import = Import-AdminItemVaultTemplates -Remote $Remote -RequestedBy $RequestedBy
+    $deployment = Publish-AdminItemVaultTemplates -Store $import.store -Force
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $requests = @($serverProfiles | ForEach-Object {
         $profile = $_
@@ -3152,12 +3206,15 @@ function Invoke-AdminItemVaultSync {
         $entry.detail = 'server_did_not_reply'
     }
     $payload = Get-AdminItemVaultPayload -Remote $Remote -RequestedBy $RequestedBy
+    $payload['imported'] = [int]$payload.imported + [int]$import.imported
+    $payload['invalid'] = [int]$payload.invalid + [int]$import.invalid
     $synced = @($requests | Where-Object status -ceq 'synced').Count
     $failed = @($requests | Where-Object { $_.status -notin @('synced', 'duplicate') }).Count
     $payload['sync'] = [ordered]@{
         requested = $requests.Count
         synced = $synced
         failed = $failed
+        templatesQueued = [int]$deployment.queued
         servers = @($requests | ForEach-Object { [ordered]@{
             id = $_.profileId
             name = $_.profileName
@@ -3240,6 +3297,7 @@ function Remove-AdminItemVaultTemplate {
     $template = $store.templates | Where-Object { [string]$_.templateId -ceq $templateId } | Select-Object -First 1
     if (-not $template) { throw "保险库模板不存在或已经删除。" }
     $store.templates = @($store.templates | Where-Object { [string]$_.templateId -cne $templateId })
+    $store.deployments = @($store.deployments | Where-Object { [string]$_.templateId -cne $templateId })
     $store.tombstones = @(@($store.tombstones) + @($templateId) | Select-Object -Unique)
     Save-AdminItemVaultStore -Store $store
     Add-Audit -Remote $Remote -Action "admin-item-vault-delete" -Detail "templateId=$templateId item=$([string]$template.snapshot.item) requestedBy=$RequestedBy" -Result "ok"

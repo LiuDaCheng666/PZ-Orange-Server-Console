@@ -25,7 +25,8 @@ function Import-PanelFunction {
 foreach ($name in @(
     'Assert-SimpleText', 'New-AdminItemVaultStore', 'Read-AdminItemVaultStore', 'Save-AdminItemVaultStore',
     'Get-AdminItemVaultProfilePaths', 'Read-AdminItemVaultJsonLines', 'Add-AdminItemVaultJsonLine',
-    'Test-AdminItemVaultTemplateRecord', 'Import-AdminItemVaultTemplates', 'Sync-AdminItemVaultReceipts',
+    'Test-AdminItemVaultTemplateRecord', 'Import-AdminItemVaultTemplates', 'Publish-AdminItemVaultTemplates',
+    'Sync-AdminItemVaultReceipts',
     'Get-AdminItemVaultPayload', 'Invoke-AdminItemVaultSync', 'Add-AdminItemVaultGrant', 'Remove-AdminItemVaultTemplate',
     'Get-AdminItemVaultReceiptPayload'
 )) { Import-PanelFunction -Name $name }
@@ -112,7 +113,16 @@ try {
     $payload = Invoke-AdminItemVaultSync -Remote 'test' -RequestedBy 'admin' -WaitMilliseconds 1000
     if ($payload.templates.Count -ne 2 -or $payload.imported -ne 2) { throw 'Current and legacy template import failed.' }
     if ($payload.sync.synced -ne 2 -or $payload.sync.failed -ne 0) { throw 'Triggered server synchronization failed.' }
+    if ($payload.sync.templatesQueued -ne 4) { throw 'Central templates were not queued to every server.' }
     if ([string]$payload.templates[0].snapshot.modData.nested.mode -cne 'full-auto') { throw 'Nested snapshot data changed during import.' }
+
+    $serverTwoTemplates = @(Read-AdminItemVaultJsonLines -Path (Get-AdminItemVaultProfilePaths -Profile $serverProfiles[1]).import |
+        Where-Object { $_.valid -and [string]$_.value.kind -ceq 'template_sync' })
+    if ($serverTwoTemplates.Count -ne 2) { throw 'Server two did not receive the central template payloads.' }
+    if ([string]$serverTwoTemplates[0].value.template.snapshot.modData.nested.mode -cne 'full-auto' -and
+            [string]$serverTwoTemplates[1].value.template.snapshot.modData.nested.mode -cne 'full-auto') {
+        throw 'Cross-server template payload changed nested snapshot data.'
+    }
 
     $grantResult = Add-AdminItemVaultGrant -Remote 'test' -RequestedBy 'admin' -Body ([pscustomobject]@{
         confirm = 'GRANT_ADMIN_VAULT_ITEM'
@@ -140,6 +150,9 @@ try {
         templateId = 'vault-template-0123456789abcdef'
     }))
     $store = Read-AdminItemVaultStore
+    if (@($store.deployments | Where-Object { [string]$_.templateId -ceq 'vault-template-0123456789abcdef' }).Count -ne 0) {
+        throw 'Deleted template deployment metadata was retained.'
+    }
     $store.sourceCursors = @()
     Save-AdminItemVaultStore -Store $store
     $afterDelete = Get-AdminItemVaultPayload -Remote 'test' -RequestedBy 'admin'
