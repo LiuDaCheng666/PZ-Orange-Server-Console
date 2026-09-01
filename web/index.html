@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>PZ橙子服务器控制台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/app.css?v=20260824-selective-reset-guard-1">
+  <link rel="stylesheet" href="/app.css?v=20260827-crc-incidents-1">
 </head>
 <body>
   <div class="auth-screen" id="authScreen">
@@ -40,6 +40,8 @@
         <button class="nav-item" data-view="patches"><i data-lucide="plug-zap"></i><span>Java 补丁</span></button>
         <button class="nav-item" data-view="items"><i data-lucide="package-search"></i><span>物品库</span></button>
         <button class="nav-item" data-view="vault"><i data-lucide="archive-restore"></i><span>物品保险库</span></button>
+        <button class="nav-item" data-view="economy"><i data-lucide="landmark"></i><span>交易经济</span></button>
+        <button class="nav-item" data-view="community"><i data-lucide="building-2"></i><span>社区治理</span></button>
         <button class="nav-item" data-view="disasters"><i data-lucide="cloud-lightning"></i><span>灾难中心</span></button>
         <button class="nav-item" data-view="world"><i data-lucide="cloud-sun"></i><span>世界控制</span></button>
         <button class="nav-item" data-view="commands"><i data-lucide="panel-top"></i><span>命令中心</span></button>
@@ -48,6 +50,7 @@
         <button class="nav-item" data-view="ai"><i data-lucide="bot"></i><span>AI 助手</span></button>
         <button class="nav-item local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>Web 用户</span></button>
         <button class="nav-item" data-view="map-reset"><i data-lucide="map-pinned"></i><span>地图刷新</span></button>
+        <button class="nav-item" data-view="chunk-recovery"><i data-lucide="shield-ellipsis"></i><span>区块恢复</span></button>
         <button class="nav-item" data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
       </nav>
       <div class="sidebar-foot"><span id="connectionDot" class="status-dot"></span><span id="connectionText">正在连接</span></div>
@@ -194,7 +197,6 @@
               </form>
               <form class="player-delete-form" id="playerDeleteForm">
                 <div class="tool-title"><i data-lucide="database-zap"></i><div><h3>永久删除玩家数据</h3><p>先备份账号库与角色库，保留封禁和审计记录</p></div></div>
-                <label>输入目标 SteamID 确认<input name="confirmSteamId" inputmode="numeric" maxlength="17" autocomplete="off" required></label>
                 <button class="danger-button" type="submit"><i data-lucide="trash-2"></i>删除账号与角色数据</button>
                 <p id="playerDeleteHint">仅在服务器完全停止且无维护任务时可用。</p>
               </form>
@@ -344,6 +346,62 @@
         </section>
       </section>
 
+      <section class="view" id="view-economy">
+        <div class="section-heading page-heading"><div><p class="eyebrow">服务端权威数据 · 不经玩家客户端</p><h2>交易经济</h2></div><div class="heading-actions"><span class="sample-time" id="economyUpdatedAt">尚未同步</span><button class="secondary-button" id="refreshEconomy" type="button"><i data-lucide="refresh-cw"></i>刷新</button></div></div>
+        <div class="economy-status" id="economyStatus" data-state="idle"><i data-lucide="database"></i><div><strong>等待 Mod 快照</strong><span>账户、排行榜和流水由游戏服务器本地桥接。</span></div><b class="badge neutral" id="economyRuntimeBadge">未连接</b></div>
+        <div class="economy-summary" aria-label="经济摘要">
+          <div><span>交易账户</span><strong id="economyAccountCount">--</strong><small>持久化账户</small></div>
+          <div><span>账户余额合计</span><strong id="economyBalanceTotal">--</strong><small>不含待领取资产</small></div>
+          <div><span>捐赠权益</span><strong id="economyDonorCount">--</strong><small>当前有效账户</small></div>
+          <div><span>当前游戏日</span><strong id="economyWorldDay">--</strong><small id="economySnapshotAge">等待快照</small></div>
+        </div>
+        <section class="economy-ranking-band">
+          <div class="section-heading"><div><p class="eyebrow">全服前 50 名</p><h2>经济排行榜</h2></div><div class="segmented-control" id="economyRankingMode" role="group" aria-label="排行榜类型"><button class="active" type="button" data-economy-rank="balance">总资产</button><button type="button" data-economy-rank="stockValue">股票</button><button type="button" data-economy-rank="kills">击杀</button><button type="button" data-economy-rank="hoursSurvived">生存</button></div></div>
+          <div class="economy-ranking-list" id="economyRankingList"><p class="empty-state compact">正在读取排行榜...</p></div>
+        </section>
+        <div class="economy-account-layout">
+          <section class="economy-account-pane" aria-label="交易账户">
+            <header><div><strong>玩家账户</strong><small id="economyAccountVisible">0 项</small></div><label><span>筛选</span><input id="economyAccountSearch" maxlength="100" placeholder="玩家名、账户键、SteamID"></label></header>
+            <div class="economy-account-list" id="economyAccountList"><p class="empty-state compact">正在读取账户...</p></div>
+          </section>
+          <section class="economy-detail-pane" id="economyAccountDetail">
+            <div class="economy-empty"><i data-lucide="circle-dollar-sign"></i><strong>选择一个交易账户</strong><span>这里会显示余额、捐赠权益、排行数据和管理操作。</span></div>
+          </section>
+        </div>
+        <section class="economy-flow-section">
+          <div class="section-heading"><div><p class="eyebrow">最近 30 个游戏日 · 只读</p><h2 id="economyFlowTitle">资金流水</h2></div><div class="heading-actions"><select id="economyFlowDirection" aria-label="收支方向"><option value="">全部方向</option><option value="in">收入</option><option value="out">支出</option></select><input id="economyFlowKeyword" maxlength="64" placeholder="类型、物品、交易对象"><button class="secondary-button" id="queryEconomyFlow" type="button"><i data-lucide="search"></i>查询</button></div></div>
+          <div class="economy-flow-head"><span>时间</span><span>类型</span><span>方向</span><span>数量</span><span>金额</span><span>余额</span><span>对象 / 说明</span></div>
+          <div class="economy-flow-list" id="economyFlowList"><p class="empty-state compact">选择账户后查询资金流水。</p></div>
+          <div class="economy-pagination"><button class="icon-button" id="economyFlowPrev" type="button" title="上一页"><i data-lucide="chevron-left"></i></button><span id="economyFlowPage">第 1 / 1 页</span><button class="icon-button" id="economyFlowNext" type="button" title="下一页"><i data-lucide="chevron-right"></i></button></div>
+        </section>
+      </section>
+
+      <section class="view" id="view-community">
+        <div class="section-heading page-heading"><div><p class="eyebrow">治理、国库与危机 · 独立文件桥</p><h2>社区管理中心</h2></div><div class="heading-actions"><span class="sample-time" id="communityUpdatedAt">尚未同步</span><button class="secondary-button" id="refreshCommunity" type="button"><i data-lucide="refresh-cw"></i>刷新</button></div></div>
+        <div class="community-bridge-status" id="communityBridgeStatus" data-state="waiting"><i data-lucide="unplug"></i><div><strong>等待社区 Mod 文件桥</strong><span>写操作只会进入待接队列，不代表服务器已执行。</span></div><b class="badge neutral" id="communityBridgeBadge">待接入</b></div>
+        <div class="community-summary">
+          <div><span>在任官员</span><strong id="communityOfficeCount">--</strong><small>四个社区职位</small></div>
+          <div><span>当前政体</span><strong id="communityGovernmentForm">--</strong><small>法律快照</small></div>
+          <div><span>单一国库</span><strong id="communityTreasuryBalance">--</strong><small>全部税收统一入账</small></div>
+          <div><span>尸潮防御</span><strong id="communityDefenseValue">--</strong><small>上限 1000</small></div>
+        </div>
+        <div class="community-dashboard-grid">
+          <section class="community-panel"><div class="section-heading"><div><p class="eyebrow">法律与投票</p><h2>社区治理</h2></div></div><div class="community-office-list" id="communityOfficeList"><p class="empty-state compact">等待治理快照。</p></div><div class="community-law-summary" id="communityLawSummary"><p class="empty-state compact">尚无法读取当前法律。</p></div>
+            <form class="community-admin-form" id="communityLawForm"><h3>管理员强制修改法律</h3><div class="community-form-grid"><label>政体<select name="governmentForm"><option value="constitutional">宪政</option><option value="democratic">民主</option><option value="dictatorship">独裁</option></select></label><label>投票期<select name="votingDays"><option>4</option><option>8</option><option>16</option></select></label><label>任期<select name="termDays"><option>10</option><option selected>30</option><option>60</option><option>120</option></select></label><label>投票费<select name="voteFee"><option>0</option><option>5</option><option>10</option><option>20</option></select></label><label class="wide">管理理由<input name="reason" minlength="4" maxlength="200" required></label></div><button class="danger-button" type="submit"><i data-lucide="gavel"></i>写入法律变更队列</button></form>
+            <form class="community-admin-form" id="communityElectionForm"><h3>选举控制</h3><div class="community-form-grid"><label>操作<select name="operation"><option value="admin_start_election">启动全职位选举</option><option value="admin_close_election">推进 / 结算当前选举</option><option value="admin_vacate_office">解除指定官职</option></select></label><label>解除职位<select name="role"><option value="chairman">社区主席</option><option value="representative">社区代表</option><option value="treasurer">财政委员</option><option value="emergency">应急委员</option></select></label><label>提名小时<input name="nominationHours" type="number" min="1" max="168" value="24"></label><label>投票期<select name="votingDays"><option>4</option><option>8</option><option>16</option></select></label><label>本届任期<select name="termDays"><option>10</option><option selected>30</option><option>60</option><option>120</option></select></label><label class="wide">管理理由<input name="reason" minlength="4" maxlength="200" required></label></div><button class="danger-button" type="submit"><i data-lucide="vote"></i>写入选举操作队列</button></form>
+          </section>
+          <section class="community-panel"><div class="section-heading"><div><p class="eyebrow">唯一资金账户</p><h2>单一国库</h2></div></div><div class="community-treasury-meta" id="communityTreasuryMeta"><p class="empty-state compact">等待国库快照。</p></div>
+            <form class="community-admin-form" id="communityTreasuryBalanceForm"><h3>校正国库余额</h3><div class="community-form-grid"><label>目标余额<input name="amount" type="number" min="0" max="2147483647" step="0.01" required></label><label class="wide">管理理由<input name="reason" minlength="4" maxlength="200" required></label></div><button class="danger-button" type="submit"><i data-lucide="circle-dollar-sign"></i>写入余额校正队列</button></form>
+            <form class="community-admin-form" id="communityTreasuryPolicyForm"><h3>国库支出政策</h3><div class="community-form-grid"><label>每日采购额度<select name="purchaseLimit"><option value="25">25%</option><option value="50" selected>50%</option><option value="75">75%</option><option value="unlimited">不限制</option></select></label><label>每日福利<select name="welfareDaily"><option>20</option><option>50</option><option>100</option></select></label><label>荣誉奖金<select name="honorBonus"><option value="0">不发放</option><option>1000</option><option>3000</option><option>5000</option></select></label><label class="community-check"><input name="donationsEnabled" type="checkbox"><span>允许玩家申请捐赠国库</span></label><label class="wide">管理理由<input name="reason" minlength="4" maxlength="200" required></label></div><button class="danger-button" type="submit"><i data-lucide="settings-2"></i>写入政策变更队列</button></form>
+          </section>
+        </div>
+        <section class="community-panel community-ledger"><div class="section-heading"><div><p class="eyebrow">服务端快照 · 分页读取</p><h2>国库流水</h2></div><div class="heading-actions"><select id="communityLedgerDirection"><option value="">全部方向</option><option value="收入">收入</option><option value="支出">支出</option><option value="欠薪">欠薪</option></select><input id="communityLedgerKeyword" maxlength="64" placeholder="类型、人员、摘要"><button class="secondary-button" id="queryCommunityLedger" type="button"><i data-lucide="search"></i>查询</button></div></div><div class="community-ledger-list" id="communityLedgerList"><p class="empty-state compact">刷新社区状态后查询流水。</p></div><div class="economy-pagination"><button class="icon-button" id="communityLedgerPrev" type="button" title="上一页"><i data-lucide="chevron-left"></i></button><span id="communityLedgerPage">第 1 / 1 页</span><button class="icon-button" id="communityLedgerNext" type="button" title="下一页"><i data-lucide="chevron-right"></i></button></div></section>
+        <div class="community-dashboard-grid">
+          <section class="community-panel"><div class="section-heading"><div><p class="eyebrow">人数缩放危机进度</p><h2>危机参数</h2></div></div><div class="community-crisis-summary" id="communityCrisisSummary"><p class="empty-state compact">等待危机快照。</p></div><form class="community-admin-form" id="communityCrisisForm"><div class="community-form-grid"><label>编辑通道<select name="lane"><option value="economic">经济危机</option><option value="horde">尸潮威胁</option><option value="defense">防御值</option><option value="bridge">大桥参数</option></select></label></div><div class="community-form-grid" id="communityCrisisFields"></div><label class="community-reason">管理理由<input name="reason" minlength="4" maxlength="200" required></label><button class="danger-button" type="submit"><i data-lucide="shield-alert"></i>写入危机参数队列</button></form></section>
+          <section class="community-panel"><div class="section-heading"><div><p class="eyebrow">不广播完整状态</p><h2>待接命令队列</h2></div></div><form class="community-admin-form" id="communityBridgeBattleForm"><h3>启动大桥保卫战</h3><div class="community-form-grid"><label>僵尸总数<input name="zombies" type="number" min="1" max="2147483647" value="3000" required></label><label class="wide">管理理由<input name="reason" minlength="4" maxlength="200" required></label></div><button class="danger-button" type="submit"><i data-lucide="swords"></i>写入保卫战队列</button></form><div class="community-command-list" id="communityCommandList"><p class="empty-state compact">当前没有社区命令。</p></div></section>
+        </div>
+      </section>
+
       <section class="view" id="view-disasters">
         <div class="section-heading page-heading"><div><p class="eyebrow">橙子社区经济 · 多服联动</p><h2>灾难与全服事件中心</h2></div><div class="heading-actions"><span class="sample-time" id="disasterUpdatedAt">尚未同步</span><button class="secondary-button" id="refreshDisasters" type="button"><i data-lucide="refresh-cw"></i>刷新状态</button></div></div>
         <div class="disaster-summary">
@@ -453,7 +511,7 @@
         <details class="map-reset-guide">
           <summary><span><i data-lucide="book-open-check"></i><strong>地图重置须知</strong></span><small>流程、保护规则、数据影响与回滚边界</small></summary>
           <div class="map-reset-guide-grid">
-            <article><h3>完整流程</h3><ol><li>选择服务器并保存保护配置。</li><li>运行只读审计，核对拟刷新区块、容量和车辆数量。</li><li>在游戏内保存并正常停止目标服。</li><li>输入 serverName 正式执行。</li><li>工具先创建整个存档的 ZIP64 完整备份，并逐文件校验 CRC。</li><li>校验通过后，未保护的地图区块才会移入隔离目录。</li><li>手动启动服务器；发现异常时停服并选择对应备份点完整回滚。</li></ol></article>
+            <article><h3>完整流程</h3><ol><li>选择服务器并保存保护配置。</li><li>运行只读审计，核对拟刷新区块、容量和车辆数量。</li><li>在游戏内保存并正常停止目标服。</li><li>点击执行并在弹窗中二次确认。</li><li>工具先创建整个存档的 ZIP64 完整备份，并逐文件校验 CRC。</li><li>校验通过后，未保护的地图区块才会移入隔离目录。</li><li>手动启动服务器；发现异常时停服并选择对应备份点完整回滚。</li></ol></article>
             <article><h3>工作原理</h3><p>工具不清空数据库，只移动未保护的 <code>map/X/Y.bin</code>。每个文件对应一个 8×8 格区块；游戏下次访问缺失区块时按当前地图和 Mod 重新生成。保护区块文件保持原样，所有楼层一起保留。</p><p>重置清单会阻止这些区块再次生成原版地图车辆；首次加载后由原版 IsoRegion 工作线程重建墙体、屋顶和室内缓存。</p></article>
             <article><h3>自动保护</h3><p>保护范围由原版安全屋、全部未死亡角色最后位置、<code>AnimalZone</code> 畜牧区及手动保护矩形组成。边距单位是区块；人物边距设为 0 时，脚下的一个区块仍会保留。</p><p>动物存档会全量保留，但畜牧区外的动物数据不保护地图。车辆数据库保留，车辆所在区块当前只统计、不自动保护。</p></article>
             <article><h3>会刷新与会保留</h3><p>未保护区会重新生成地形、建筑、容器、门窗和世界对象；其中的玩家建筑、落地物、尸体及摆设会消失。人物背包、装备、车辆数据库、全局 Mod 数据和动物数据不会主动删除。</p><p>重置区及周围一圈的旧 IsoRegion 缓存会隔离并按需重建；其他区域缓存保持原样。</p></article>
@@ -493,16 +551,74 @@
 
         <section class="map-reset-apply">
           <div><p class="eyebrow">不可在线执行</p><h2>正式刷新未保护区块</h2><p>停服后先创建并校验完整存档 ZIP；运行时防护就绪后才会隔离区块、失效区域缓存并提交车辆禁刷清单。</p></div>
-          <label>输入 serverName 确认<input id="mapResetConfirmation" autocomplete="off" spellcheck="false" placeholder="等待读取 serverName"></label>
           <button class="danger-button map-reset-admin" id="applyMapReset" type="button" disabled><i data-lucide="archive"></i>完整备份并执行</button>
         </section>
 
         <section class="map-reset-rollback">
           <div><p class="eyebrow">完整存档恢复</p><h2>回滚一次地图刷新</h2><p id="mapResetRollbackHint">选择经过 CRC 校验的完整备份。当前世界会先整体保留，回滚不会合并刷新后的进度。</p></div>
           <label>完整备份点<select id="mapResetRollbackPoint"><option value="">没有可用备份</option></select></label>
-          <label>输入 serverName 确认<input id="mapResetRollbackConfirmation" autocomplete="off" spellcheck="false" placeholder="等待读取 serverName"></label>
           <button class="danger-button map-reset-admin" id="rollbackMapReset" type="button" disabled><i data-lucide="history"></i>校验并完整回滚</button>
         </section>
+      </section>
+
+      <section class="view" id="view-chunk-recovery">
+        <div class="section-heading page-heading"><div><p class="eyebrow">B42 存档完整性</p><h2>区块灾难恢复</h2></div><span class="badge neutral" id="chunkRecoveryBadge">尚未审计</span></div>
+        <div class="map-reset-alert" id="chunkRecoveryAlert" data-state="neutral"><i data-lucide="shield-check"></i><div><strong id="chunkRecoveryAlertTitle">启动 CRC 闸门</strong><p id="chunkRecoveryAlertText">托管启动前只检查上次安全启动后修改的区块，发现损坏时阻止 Java 启动。</p></div></div>
+
+        <details class="map-reset-guide" open>
+          <summary><span><i data-lucide="book-open-check"></i><strong>定点恢复须知</strong></span><small>流程、保护边界与源头问题</small></summary>
+          <div class="map-reset-guide-grid">
+            <article><h3>安全流程</h3><ol><li>游戏内保存并正常停服。</li><li>执行全量 CRC 审计。</li><li>核对损坏坐标和安全屋。</li><li>选择损坏前的备份点。</li><li>点击恢复并在弹窗中二次确认。</li><li>启服验证建筑、容器和物品。</li></ol></article>
+            <article><h3>恢复会做什么</h3><p>先对当前存档建立完整 ZIP64 快照并逐文件校验，再对备份中的目标区块做 ZIP CRC 与 PZ 内部 CRC 双重校验。仅原子替换指定 <code>map/wx/wy.bin</code>。</p></article>
+            <article><h3>区域缓存</h3><p>目标区块及周围一圈 IsoRegion 缓存会失效，相关哈希从 <code>RegionHeader.bin</code> 移除。防护清单只写 <code>R</code> 项，不改变车辆刷新状态。</p></article>
+            <article><h3>一键回滚</h3><p>事务保留恢复前的目标区块、RegionHeader、区域缓存和防护清单。停服后可将本次定点恢复完整撤销。</p></article>
+            <article><h3>为什么会损坏</h3><p>B42.20.3 原版会先截断正式区块文件再写入，没有临时文件、fsync、写后 CRC 校验和原子替换。写入期间 Java 原生堆崩溃或进程强制终止可留下错误 CRC。</p></article>
+            <article><h3>当前防护边界</h3><p>启动闸门能阻止损坏区块被原版自动重生为空白地图，但不能阻止首次写入失败。原子写盘 Agent 需独立测试存档和崩溃注入验证后才能部署。</p></article>
+          </div>
+        </details>
+
+        <section class="chunk-recovery-action gate-settings">
+          <div><p class="eyebrow">每服独立设置</p><h2>启动 CRC 闸门</h2><p>默认关闭。开启后，下次从 Web 启动该服时才会检查并拦截损坏区块；关闭时不影响启动。</p></div>
+          <label class="toggle-field"><input id="chunkIntegrityEnabled" type="checkbox"><span>发现新损坏区块时阻止 Java 启动</span></label>
+          <button class="primary-button chunk-recovery-config-admin" id="saveChunkRecoveryConfig" type="button"><i data-lucide="save"></i>保存开关</button>
+        </section>
+
+        <section class="map-reset-results chunk-runtime-panel">
+          <div class="section-heading"><div><p class="eyebrow">运行期持续记录</p><h2>CRC 区块事故</h2></div><span class="badge neutral" id="chunkRuntimeIncidentBadge">没有记录</span></div>
+          <p class="chunk-integrity-report-meta" id="chunkRuntimeIncidentMeta">控制台增量扫描尚未发现 CRC 异常。</p>
+          <div class="chunk-runtime-incidents" id="chunkRecoveryIncidents"><p class="empty-state compact">没有运行期 CRC 事故。</p></div>
+        </section>
+
+        <section class="map-reset-results">
+          <div class="section-heading"><div><p class="eyebrow">离线检查</p><h2>区块长度与 CRC 审计</h2></div><button class="secondary-button chunk-recovery-admin" id="runChunkAudit" type="button"><i data-lucide="scan-search"></i>全量审计</button></div>
+          <dl class="map-reset-stats chunk-recovery-stats"><div><dt>检查区块</dt><dd id="chunkAuditChecked">--</dd></div><div><dt>检查容量</dt><dd id="chunkAuditBytes">--</dd></div><div><dt>损坏区块</dt><dd id="chunkAuditInvalid">--</dd></div><div><dt>耗时</dt><dd id="chunkAuditDuration">--</dd></div></dl>
+          <p class="chunk-integrity-report-meta" id="chunkIntegrityReportMeta">尚无 CRC 审计报告。</p>
+          <div class="chunk-recovery-invalid" id="chunkRecoveryInvalid"><p class="empty-state compact">停服后运行全量审计。</p></div>
+        </section>
+
+        <section class="chunk-recovery-action">
+          <div class="section-heading"><div><p class="eyebrow">最小范围替换</p><h2>从备份点恢复区块</h2></div></div>
+          <div class="chunk-recovery-fields">
+            <label>备份点<select id="chunkRecoveryBackup"><option value="">正在读取备份</option></select></label>
+            <label>选择玩家<select id="chunkRecoveryPlayerSelect"><option value="">正在读取安全屋玩家</option></select></label>
+            <label>玩家名<input id="chunkRecoveryPlayerName" autocomplete="off" spellcheck="false" placeholder="输入完整或部分玩家名"></label>
+            <label>安全屋<select id="chunkRecoverySafehouse"><option value="">正在读取安全屋</option></select></label>
+            <label>外扩区块<input id="chunkRecoverySafehouseMargin" type="number" min="0" max="16" step="1" value="0"></label>
+            <button class="secondary-button" id="locateChunkSafehouse" type="button"><i data-lucide="search"></i>按玩家定位</button>
+            <button class="secondary-button" id="fillSafehouseChunks" type="button"><i data-lucide="map-pin"></i>填入安全屋范围</button>
+            <label>区块坐标 wx,wy<textarea id="chunkRecoveryCoordinates" rows="3" spellcheck="false" placeholder="1337,1185\n多项可换行"></textarea></label>
+            <button class="danger-button chunk-recovery-admin" id="restoreChunks" type="button" disabled><i data-lucide="archive-restore"></i>快照并恢复</button>
+          </div>
+        </section>
+
+        <section class="chunk-recovery-action rollback">
+          <div class="section-heading"><div><p class="eyebrow">撤销定点恢复</p><h2>回滚一次恢复事务</h2></div></div>
+          <div class="chunk-recovery-fields rollback-fields">
+            <label>恢复事务<select id="chunkRecoveryTransaction"><option value="">没有可回滚事务</option></select></label>
+            <button class="danger-button chunk-recovery-admin" id="rollbackChunks" type="button" disabled><i data-lucide="history"></i>回滚此事务</button>
+          </div>
+        </section>
+        <pre class="map-reset-error" id="chunkRecoveryError" hidden></pre>
       </section>
 
       <section class="view" id="view-maintenance">
@@ -604,6 +720,8 @@
               <label class="wide">密码<input name="password" type="password" minlength="10" maxlength="128" autocomplete="new-password" placeholder="编辑时留空表示不修改"></label>
               <label>允许登录<select name="enabled"><option value="true">启用</option><option value="false">禁用</option></select></label>
               <label>玩家档案管理<select name="canManagePlayerData"><option value="false">不允许</option><option value="true">允许查询、改密和停服删除</option></select></label>
+              <label>经济数据查看<select name="canViewEconomy"><option value="false">不允许</option><option value="true">允许查看排行榜、账户和流水</option></select></label>
+              <label>经济配置管理<select name="canManageEconomy"><option value="false">不允许</option><option value="true">允许余额和权益操作</option></select></label>
             </div>
             <div class="profile-actions"><button class="primary-button" type="submit"><i data-lucide="save"></i>保存用户</button><button class="danger-button" id="deleteUser" type="button"><i data-lucide="user-x"></i>删除用户</button></div>
           </form>
@@ -725,7 +843,7 @@
 
   <nav class="mobile-nav" id="mobileNav" aria-label="手机功能导航">
     <div class="mobile-nav-menu" id="mobileNavMenu" aria-hidden="true">
-      <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="anticheat"><i data-lucide="shield-alert"></i><span>反作弊</span></button><button data-view="patches"><i data-lucide="plug-zap"></i><span>补丁</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="vault"><i data-lucide="archive-restore"></i><span>保险库</span></button><button data-view="disasters"><i data-lucide="cloud-lightning"></i><span>灾难</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="map-reset"><i data-lucide="map-pinned"></i><span>刷新</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
+      <button class="active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>总览</span></button><button data-view="console"><i data-lucide="terminal-square"></i><span>日志</span></button><button data-view="chat"><i data-lucide="messages-square"></i><span>聊天</span></button><button data-view="ai"><i data-lucide="bot"></i><span>AI</span></button><button data-view="players"><i data-lucide="users"></i><span>玩家</span></button><button data-view="anticheat"><i data-lucide="shield-alert"></i><span>反作弊</span></button><button data-view="patches"><i data-lucide="plug-zap"></i><span>补丁</span></button><button data-view="items"><i data-lucide="package-search"></i><span>物品</span></button><button data-view="vault"><i data-lucide="archive-restore"></i><span>保险库</span></button><button data-view="economy"><i data-lucide="landmark"></i><span>经济</span></button><button data-view="community"><i data-lucide="building-2"></i><span>社区</span></button><button data-view="disasters"><i data-lucide="cloud-lightning"></i><span>灾难</span></button><button data-view="world"><i data-lucide="cloud-sun"></i><span>世界</span></button><button data-view="commands"><i data-lucide="panel-top"></i><span>命令</span></button><button data-view="system"><i data-lucide="activity"></i><span>监控</span></button><button data-view="profiles"><i data-lucide="server-cog"></i><span>配置</span></button><button class="local-only" data-view="users" hidden><i data-lucide="user-round-cog"></i><span>用户</span></button><button data-view="map-reset"><i data-lucide="map-pinned"></i><span>刷新</span></button><button data-view="maintenance"><i data-lucide="wrench"></i><span>维护</span></button>
     </div>
     <div class="mobile-nav-bar">
       <div class="mobile-current-view"><small>当前页面</small><strong id="mobileCurrentTitle">服务器总览</strong></div>
@@ -746,6 +864,6 @@
   <dialog class="help-dialog" id="helpDialog"><div class="help-dialog-head"><div><p class="eyebrow">当前服务器 B42.20 内置 help</p><h2 id="helpTitle">命令帮助</h2></div><button class="icon-button" id="closeHelp" type="button" title="关闭"><i data-lucide="x"></i></button></div><div id="helpBody" class="help-body"></div><div class="help-actions"><a class="secondary-button" href="https://pzwiki.net/wiki/Admin_commands" target="_blank" rel="noreferrer">PZ Wiki 命令资料</a><button class="secondary-button" id="queryHelp" type="button"><i data-lucide="terminal"></i>向服务器查询 help</button></div></dialog>
   <script src="/lucide.min.js?v=20260810-2"></script>
   <script src="/qrcode.min.js?v=20260810-2"></script>
-  <script src="/app.js?v=20260824-selective-reset-guard-1"></script>
+  <script src="/app.js?v=20260827-crc-incidents-1"></script>
 </body>
 </html>
