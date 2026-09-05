@@ -128,6 +128,7 @@ New-Item -ItemType Directory -Path $stage, (Join-Path $stage "managed"), (Join-P
 $rootFiles = @(
     "PZ-ControlPanel.ps1",
     "PZ-AIBridge.ps1",
+    "PZAIQueueProtocol.ps1",
     "Start-PZControlPanel.ps1",
     "Stop-PZControlPanel.ps1",
     "Run-PZPanelAtStartup.ps1",
@@ -166,6 +167,7 @@ $rootFiles = @(
     "Test-LifecycleRecovery.ps1",
     "Test-JvmGcTelemetry.ps1",
     "Test-StockEventBridge.ps1",
+    "Test-PZAIQueueProtocol.ps1",
     "Test-AIKnowledgeBuilder.ps1",
     "Test-AIKnowledgeBuildPipeline.ps1",
     "Test-ItemGrantCommandResults.ps1",

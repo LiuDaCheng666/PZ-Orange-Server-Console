@@ -1,5 +1,5 @@
 ﻿$script:aiConfigPath = Join-Path $root "ai-config.json"
-$script:aiBridgeVersion = "0.9.0"
+$script:aiBridgeVersion = "0.9.1"
 $script:aiCredentialPath = Join-Path $root "ai-credential.dat"
 $script:aiStatePath = Join-Path $root "ai-state.json"
 $script:aiHistoryPath = Join-Path $root "ai-history.json"
@@ -21,6 +21,8 @@ $script:aiLastStateSaveAt = [datetime]::MinValue
 $script:aiApiKey = ""
 $script:aiKnowledgeBuildCall = $null
 $script:aiKnowledgeBuildState = $null
+
+. (Join-Path $root "PZAIQueueProtocol.ps1")
 
 Add-Type -AssemblyName System.Net.Http
 Add-Type -AssemblyName System.Security
@@ -2289,17 +2291,7 @@ function Write-AIManagedRecord {
         (ConvertTo-AIQueueText $Title), (ConvertTo-AIQueueText $Message),
         $expiresMs.ToString([Globalization.CultureInfo]::InvariantCulture)
     )
-    $bytes = $utf8.GetBytes(($fields -join "`t") + "`n")
-    $queuePath = Join-Path $luaDirectory "PZAI-agent-response-queue.txt"
-    $stream = $null
-    try {
-        $stream = [IO.FileStream]::new($queuePath, [IO.FileMode]::OpenOrCreate,
-            [IO.FileAccess]::Write, [IO.FileShare]::Read)
-        [void]$stream.Seek(0, [IO.SeekOrigin]::End)
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush($true)
-    }
-    finally { if ($stream) { $stream.Dispose() } }
+    [void](Write-PZAIResponseQueueLine -LuaDir $luaDirectory -Payload ($fields -join "`t"))
     return $recordId
 }
 
