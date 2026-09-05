@@ -45,6 +45,12 @@ public final class TransformSmokeTest {
                     + runtimeCalls[0] + " vanilla=" + vanillaCalls[0]);
         }
 
+        byte[] transformedAgain = AnimalLOSOptimizationAgent.transformForTest(
+                "zombie/characters/animals/IsoAnimal", original);
+        if (transformedAgain == null) {
+            throw new AssertionError("Repeated transform of original bytes must remain supported");
+        }
+
         byte[] unsupported = original.clone();
         unsupported[unsupported.length - 1] ^= 1;
         if (AnimalLOSOptimizationAgent.transformForTest(
@@ -53,6 +59,16 @@ public final class TransformSmokeTest {
         }
         if (AnimalLOSOptimizationAgent.transformForTest("example/Other", original) != null) {
             throw new AssertionError("Unrelated class must be ignored");
+        }
+        AnimalLOSOptimizationAgent.Config maximum =
+                AnimalLOSOptimizationAgent.Config.parse("reportSeconds=9223372036854776");
+        if (maximum.reportSeconds() != 86_400L) {
+            throw new AssertionError("reportSeconds upper bound was not applied");
+        }
+        AnimalLOSOptimizationAgent.Config invalid =
+                AnimalLOSOptimizationAgent.Config.parse("reportSeconds=not-a-number");
+        if (invalid.reportSeconds() != 60L) {
+            throw new AssertionError("invalid reportSeconds must retain the default");
         }
         System.out.println("PZAnimalLOSOptimization transform smoke test passed");
     }

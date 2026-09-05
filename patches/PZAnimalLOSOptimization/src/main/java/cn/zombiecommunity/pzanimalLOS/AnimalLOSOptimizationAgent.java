@@ -53,8 +53,8 @@ public final class AnimalLOSOptimizationAgent {
             }
         }
         if (target == null) {
-            instrumentation.removeTransformer(transformer);
-            throw new IllegalStateException("IsoAnimal is unavailable or not modifiable");
+            System.out.println("[PZAnimalLOS] IsoAnimal not loaded; waiting for class load");
+            return;
         }
         try {
             instrumentation.retransformClasses(target);
@@ -62,9 +62,10 @@ public final class AnimalLOSOptimizationAgent {
             instrumentation.removeTransformer(transformer);
             throw new IllegalStateException("IsoAnimal retransform failed", failure);
         }
-        if (transformer.hooks != 1) {
+        if (transformer.lastHookCount != 1) {
             instrumentation.removeTransformer(transformer);
-            throw new IllegalStateException("Unexpected IsoAnimal hook count=" + transformer.hooks);
+            throw new IllegalStateException(
+                    "Unexpected IsoAnimal hook count=" + transformer.lastHookCount);
         }
     }
 
@@ -73,7 +74,7 @@ public final class AnimalLOSOptimizationAgent {
     }
 
     private static final class Transformer implements ClassFileTransformer {
-        volatile int hooks;
+        volatile int lastHookCount;
 
         @Override
         public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
@@ -86,12 +87,14 @@ public final class AnimalLOSOptimizationAgent {
                 return null;
             }
             try {
+                int[] hooks = {0};
                 ClassReader reader = new ClassReader(bytes);
                 ClassWriter writer = new ClassWriter(reader, ClassWriter.COMPUTE_MAXS);
-                reader.accept(new AnimalVisitor(writer, this), 0);
-                if (hooks != 1) {
+                reader.accept(new AnimalVisitor(writer, hooks), 0);
+                lastHookCount = hooks[0];
+                if (hooks[0] != 1) {
                     System.err.println("[PZAnimalLOS] REFUSED " + className
-                            + " hookCount=" + hooks + "; using vanilla class");
+                            + " hookCount=" + hooks[0] + "; using vanilla class");
                     return null;
                 }
                 System.out.println("[PZAnimalLOS] ACTIVE " + className + " SHA-256=" + hash);
@@ -105,11 +108,11 @@ public final class AnimalLOSOptimizationAgent {
     }
 
     private static final class AnimalVisitor extends ClassVisitor {
-        private final Transformer transformer;
+        private final int[] hooks;
 
-        AnimalVisitor(ClassVisitor output, Transformer transformer) {
+        AnimalVisitor(ClassVisitor output, int[] hooks) {
             super(Opcodes.ASM9, output);
-            this.transformer = transformer;
+            this.hooks = hooks;
         }
 
         @Override
@@ -124,7 +127,7 @@ public final class AnimalLOSOptimizationAgent {
                     if (opcode == Opcodes.INVOKEVIRTUAL && ISO_CELL.equals(owner)
                             && "getObjectList".equals(method)
                             && "()Ljava/util/Set;".equals(calledDescriptor)) {
-                        transformer.hooks++;
+                        hooks[0]++;
                         super.visitVarInsn(Opcodes.ALOAD, 0);
                         super.visitMethodInsn(Opcodes.INVOKESTATIC, RUNTIME, "getCandidates",
                                 "(Lzombie/iso/IsoCell;Lzombie/characters/animals/IsoAnimal;)"
@@ -146,7 +149,7 @@ public final class AnimalLOSOptimizationAgent {
         }
     }
 
-    private record Config(boolean enabled, long reportSeconds) {
+    static record Config(boolean enabled, long reportSeconds) {
         static Config parse(String args) {
             boolean enabled = true;
             long reportSeconds = 60L;
@@ -158,7 +161,8 @@ public final class AnimalLOSOptimizationAgent {
                         switch (pair[0].trim()) {
                             case "enabled" -> enabled = Boolean.parseBoolean(pair[1].trim());
                             case "reportSeconds" -> reportSeconds =
-                                    Math.max(30L, Long.parseLong(pair[1].trim()));
+                                    Math.max(30L, Math.min(86_400L,
+                                            Long.parseLong(pair[1].trim())));
                             default -> { }
                         }
                     } catch (RuntimeException invalid) {

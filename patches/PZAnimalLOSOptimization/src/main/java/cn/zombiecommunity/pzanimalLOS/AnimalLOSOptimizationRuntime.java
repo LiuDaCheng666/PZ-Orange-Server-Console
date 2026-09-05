@@ -2,8 +2,9 @@ package cn.zombiecommunity.pzanimalLOS;
 
 import java.util.AbstractSet;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Iterator;
-import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -21,6 +22,8 @@ public final class AnimalLOSOptimizationRuntime {
     private static final LongAdder ORIGINAL_CANDIDATES = new LongAdder();
     private static final LongAdder REDUCED_CANDIDATES = new LongAdder();
     private static final LongAdder FAIL_OPEN = new LongAdder();
+    private static final ThreadLocal<CandidateSet> SCRATCH =
+            ThreadLocal.withInitial(CandidateSet::new);
     private static volatile boolean enabled;
 
     private AnimalLOSOptimizationRuntime() { }
@@ -28,34 +31,46 @@ public final class AnimalLOSOptimizationRuntime {
     public static void start(boolean isEnabled, long reportSeconds) {
         enabled = isEnabled;
         if (!STARTED.compareAndSet(false, true)) return;
-        Thread reporter = new Thread(() -> reportLoop(reportSeconds), "PZ-animal-los-report");
+        long reportMillis = Math.multiplyExact(reportSeconds, 1000L);
+        Thread reporter = new Thread(() -> reportLoop(reportMillis), "PZ-animal-los-report");
         reporter.setDaemon(true);
         reporter.setPriority(Thread.MIN_PRIORITY);
         reporter.start();
     }
 
     public static Set<IsoMovingObject> getCandidates(IsoCell cell, IsoAnimal animal) {
-        if (!enabled || cell == null || animal == null) {
-            return cell == null ? Set.of() : cell.getObjectList();
-        }
+        Set<IsoMovingObject> original = cell.getObjectList();
+        if (!enabled || animal == null || !GameServer.server) return original;
         try {
             ArrayList<IsoZombie> zombies = cell.getZombieList();
             ArrayList<IsoPlayer> players = GameServer.Players;
-            int reduced = 1 + zombies.size() + players.size();
+            CandidateSet candidates = SCRATCH.get();
+            candidates.reset(zombies.size() + players.size() + 1);
+            candidates.addIfActive(animal, original);
+            for (int index = 0, size = zombies.size(); index < size; index++) {
+                candidates.addIfActive(zombies.get(index), original);
+            }
+            for (int index = 0, size = players.size(); index < size; index++) {
+                candidates.addIfActive(players.get(index), original);
+            }
             CALLS.increment();
-            ORIGINAL_CANDIDATES.add(cell.getObjectList().size());
-            REDUCED_CANDIDATES.add(reduced);
-            return new CandidateSet(animal, zombies, players);
-        } catch (Throwable failure) {
+            ORIGINAL_CANDIDATES.add(original.size());
+            REDUCED_CANDIDATES.add(candidates.size());
+            return candidates;
+        } catch (OutOfMemoryError exhausted) {
+            SCRATCH.remove();
             FAIL_OPEN.increment();
-            return cell.getObjectList();
+            return original;
+        } catch (RuntimeException | LinkageError failure) {
+            FAIL_OPEN.increment();
+            return original;
         }
     }
 
-    private static void reportLoop(long reportSeconds) {
+    private static void reportLoop(long reportMillis) {
         while (true) {
             try {
-                Thread.sleep(reportSeconds * 1000L);
+                Thread.sleep(reportMillis);
                 long calls = CALLS.sumThenReset();
                 long original = ORIGINAL_CANDIDATES.sumThenReset();
                 long reduced = REDUCED_CANDIDATES.sumThenReset();
@@ -73,59 +88,50 @@ public final class AnimalLOSOptimizationRuntime {
                 return;
             } catch (Throwable failure) {
                 System.err.println("[PZAnimalLOS] report failed=" + failure);
+                return;
             }
         }
     }
 
     static final class CandidateSet extends AbstractSet<IsoMovingObject> {
-        private final IsoAnimal animal;
-        private final List<IsoZombie> zombies;
-        private final List<IsoPlayer> players;
+        private IsoMovingObject[] elements = new IsoMovingObject[64];
+        private final HashSet<IsoMovingObject> seen = new HashSet<>(128);
+        private int size;
 
-        CandidateSet(IsoAnimal animal, List<IsoZombie> zombies, List<IsoPlayer> players) {
-            this.animal = animal;
-            this.zombies = zombies;
-            this.players = players;
+        void reset(int expectedSize) {
+            size = 0;
+            seen.clear();
+            if (expectedSize > elements.length) {
+                elements = Arrays.copyOf(elements, Integer.highestOneBit(expectedSize - 1) << 1);
+            }
+        }
+
+        void addIfActive(IsoMovingObject candidate, Set<IsoMovingObject> original) {
+            if (candidate == null || !original.contains(candidate) || !seen.add(candidate)) return;
+            elements[size++] = candidate;
         }
 
         @Override
         public Iterator<IsoMovingObject> iterator() {
-            return new CandidateIterator(animal, zombies.iterator(), players.iterator());
+            return new Iterator<>() {
+                private int index;
+
+                @Override
+                public boolean hasNext() {
+                    return index < size;
+                }
+
+                @Override
+                public IsoMovingObject next() {
+                    if (!hasNext()) throw new NoSuchElementException();
+                    return elements[index++];
+                }
+            };
         }
 
         @Override
         public int size() {
-            return 1 + zombies.size() + players.size();
-        }
-    }
-
-    private static final class CandidateIterator implements Iterator<IsoMovingObject> {
-        private IsoAnimal animal;
-        private final Iterator<IsoZombie> zombies;
-        private final Iterator<IsoPlayer> players;
-
-        CandidateIterator(IsoAnimal animal, Iterator<IsoZombie> zombies,
-                Iterator<IsoPlayer> players) {
-            this.animal = animal;
-            this.zombies = zombies;
-            this.players = players;
-        }
-
-        @Override
-        public boolean hasNext() {
-            return animal != null || zombies.hasNext() || players.hasNext();
-        }
-
-        @Override
-        public IsoMovingObject next() {
-            if (animal != null) {
-                IsoAnimal result = animal;
-                animal = null;
-                return result;
-            }
-            if (zombies.hasNext()) return zombies.next();
-            if (players.hasNext()) return players.next();
-            throw new NoSuchElementException();
+            return size;
         }
     }
 }
