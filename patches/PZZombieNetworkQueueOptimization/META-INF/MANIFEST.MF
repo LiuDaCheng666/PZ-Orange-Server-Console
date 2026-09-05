@@ -1,0 +1,8 @@
+Manifest-Version: 1.0
+Implementation-Title: PZ Zombie Network Queue Optimization
+Implementation-Version: 1.0.0
+Premain-Class: cn.zombiecommunity.pzzombiequeue.ZombieNetworkQueueAgent
+Agent-Class: cn.zombiecommunity.pzzombiequeue.ZombieNetworkQueueAgent
+Can-Redefine-Classes: true
+Can-Retransform-Classes: true
+
