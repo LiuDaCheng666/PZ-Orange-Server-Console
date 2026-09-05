@@ -95,7 +95,37 @@ try {
     Assert-True (@(Get-ChildItem -LiteralPath $tempRoot -Filter '*.tmp').Count -eq 0) `
         "Atomic publication left temporary files behind."
 
-    Write-Host "PASS: queue v2 migration, UTF-8, 16 KiB, crash recovery, and rotation"
+    $panelDataRoot = Join-Path $tempRoot "panel-server"
+    $panelLuaRoot = Join-Path $panelDataRoot "Lua"
+    New-Item -ItemType Directory -Path $panelLuaRoot -Force | Out-Null
+    $tokens = $null
+    $parseErrors = $null
+    $bridgeAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot "PZ-AIBridge.ps1"), [ref]$tokens, [ref]$parseErrors)
+    Assert-True ($parseErrors.Count -eq 0) "PZ-AIBridge.ps1 did not parse."
+    foreach ($name in @("ConvertTo-AIQueueText", "Write-AIManagedRecord")) {
+        $functionAst = @($bridgeAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $name
+        }, $true))[0]
+        Assert-True ($null -ne $functionAst) "Bridge function was not found: $name"
+        Invoke-Expression $functionAst.Extent.Text
+    }
+    $serverProfiles = @([pscustomobject]@{ id = "server-1"; dataRoot = $panelDataRoot })
+    $script:aiConfig = [pscustomobject]@{ provider = "test-provider"; model = "test-model" }
+    $request = [pscustomobject]@{
+        serverId = "server-1"; sessionId = "session-1"; requestId = "request-1"
+        username = "测试玩家"; attempts = 1
+    }
+    $recordId = Write-AIManagedRecord -Request $request -Kind response -StartedMs 100 -CompletedMs 120 -LatencyMs 20 -Code agent_answered -Title "标题%" -Message "中文%字段🙂 第二行"
+    $panelManifest = Get-PZAIQueueManifest -LuaDir $panelLuaRoot
+    Assert-True ($panelManifest.publishedLines -eq 1) "Write-AIManagedRecord did not publish one v2 record."
+    $panelLine = Get-Content -LiteralPath (Join-Path $panelLuaRoot $panelManifest.filename) -Encoding UTF8
+    $panelFields = (Read-EnvelopePayload $panelLine) -split "\t"
+    Assert-True ($panelFields.Count -eq 17 -and $panelFields[1] -eq $recordId -and $panelFields[2] -eq "response" -and $panelFields[5] -eq "测试玩家" -and $panelFields[14] -eq "标题%25" -and $panelFields[15] -eq "中文%25字段🙂 第二行") "Write-AIManagedRecord changed identity or escaped response content."
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $panelLuaRoot "PZAI-agent-response-queue.txt"))) "Write-AIManagedRecord unexpectedly appended to the legacy queue."
+
+    Write-Host "PASS: queue v2 migration, UTF-8, 16 KiB, crash recovery, rotation, and panel integration"
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) {

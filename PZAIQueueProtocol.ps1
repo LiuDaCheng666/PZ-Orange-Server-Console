@@ -242,12 +242,12 @@ function Initialize-PZAIResponseQueue {
         $legacyCursor = Get-PZAILegacyCursor -LuaDir $LuaDir
         $legacy = Get-PZAICompleteLineInfo -Path (Join-Path $LuaDir $script:PZAIQueueLegacyName)
         $start = [Math]::Min($legacy.lineCount, $legacyCursor)
-        $unconsumed = if ($start -lt $legacy.lineCount) {
-            @($legacy.lines[$start..($legacy.lineCount - 1)] | ForEach-Object {
+        [string[]]$unconsumed = @()
+        if ($start -lt $legacy.lineCount) {
+            $unconsumed = @($legacy.lines[$start..($legacy.lineCount - 1)] | ForEach-Object {
                 ConvertTo-PZAIQueueEnvelope -Payload $_ -AllowInvalidLegacyPayload
             })
         }
-        else { @() }
         return New-PZAIQueueGeneration -LuaDir $LuaDir `
             -Generation (Get-PZAINextGeneration -LuaDir $LuaDir) `
             -InitialLines $unconsumed -LegacyBaseCursor $start
