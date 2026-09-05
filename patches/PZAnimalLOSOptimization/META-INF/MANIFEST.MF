@@ -1,0 +1,8 @@
+Manifest-Version: 1.0
+Implementation-Title: PZ Animal LOS Optimization
+Implementation-Version: 1.0.0
+Premain-Class: cn.zombiecommunity.pzanimalLOS.AnimalLOSOptimizationAgent
+Agent-Class: cn.zombiecommunity.pzanimalLOS.AnimalLOSOptimizationAgent
+Can-Redefine-Classes: true
+Can-Retransform-Classes: true
+
