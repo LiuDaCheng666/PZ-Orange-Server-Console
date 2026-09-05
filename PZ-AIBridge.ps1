@@ -3278,7 +3278,7 @@ function Get-AIBridgeStatus {
         knowledgeBuild = Get-AIKnowledgeBuildStatus
         monitoredServers = $servers
         credentialStorage = "windows-dpapi-current-user"
-        requestProtocol = "managed-response-queue/1"
+        requestProtocol = "managed-response-queue/2"
         dispatchProof = "agent.response"
         lastHeartbeatAt = if ($script:aiLastHeartbeatAt -eq [datetime]::MinValue) { $null } else { $script:aiLastHeartbeatAt.ToString("o") }
         readOnly = $true

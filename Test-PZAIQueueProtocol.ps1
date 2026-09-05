@@ -102,6 +102,15 @@ try {
     $parseErrors = $null
     $bridgeAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot "PZ-AIBridge.ps1"), [ref]$tokens, [ref]$parseErrors)
     Assert-True ($parseErrors.Count -eq 0) "PZ-AIBridge.ps1 did not parse."
+    $statusFunctionAst = @($bridgeAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq "Get-AIBridgeStatus"
+    }, $true))[0]
+    Assert-True ($null -ne $statusFunctionAst) "Bridge status function was not found."
+    Assert-True ($statusFunctionAst.Extent.Text -match
+        'requestProtocol\s*=\s*"managed-response-queue/2"') `
+        "Bridge status does not advertise managed response queue v2."
     foreach ($name in @("ConvertTo-AIQueueText", "Write-AIManagedRecord")) {
         $functionAst = @($bridgeAst.FindAll({
             param($node)
