@@ -1,0 +1,4 @@
+[29-08-26 12:00:00.000] event="receive-packet" message="client-connect" guid="1" ip="10.0.0.10" steam-id="76561198000000010" role="user" username="TrapHammer" connection-type="Steam".
+[29-08-26 12:00:01.000] event="receive-packet" message="client-connect" guid="2" ip="10.0.0.11" steam-id="76561198000000011" role="user" username="LegitimateThrow" connection-type="Steam".
+[29-08-26 12:10:00.000] event="receive-packet" message="client-connect" guid="3" ip="10.0.0.12" steam-id="76561198000000012" role="user" username="KFFC" connection-type="Steam".
+[29-08-26 12:20:00.000] event="receive-packet" message="client-connect" guid="4" ip="10.0.0.13" steam-id="76561198000000013" role="user" username="KFFC" connection-type="Steam".

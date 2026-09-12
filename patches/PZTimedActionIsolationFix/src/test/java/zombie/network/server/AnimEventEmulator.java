@@ -1,10 +1,12 @@
 package zombie.network.server;
 
+import java.util.ArrayList;
+import java.util.List;
 import zombie.core.NetTimedAction;
 
 public final class AnimEventEmulator {
     private static final AnimEventEmulator INSTANCE = new AnimEventEmulator();
-    public NetTimedAction removed;
+    public final List<NetTimedAction> removed = new ArrayList<>();
 
     private AnimEventEmulator() {
     }
@@ -14,10 +16,10 @@ public final class AnimEventEmulator {
     }
 
     public void remove(NetTimedAction action) {
-        removed = action;
+        removed.add(action);
     }
 
     public void reset() {
-        removed = null;
+        removed.clear();
     }
 }

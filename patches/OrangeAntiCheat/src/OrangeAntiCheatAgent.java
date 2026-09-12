@@ -14,7 +14,7 @@ import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
 public final class OrangeAntiCheatAgent {
-    private static final String VERSION = "2.5.0";
+    private static final String VERSION = "2.7.0";
     private static final String LUA_EVENT_CLASS = "zombie/Lua/LuaEventManager";
     private static final String LUA_EVENT_METHOD = "triggerEvent";
     private static final String LUA_EVENT_DESCRIPTOR =
@@ -33,6 +33,11 @@ public final class OrangeAntiCheatAgent {
     private static final String HEALTH_PARSE_DESCRIPTOR =
             "(Lzombie/core/network/ByteBufferReader;Lzombie/network/IConnection;)V";
     private static final String PLAYER_ID_CLASS = "zombie/network/fields/character/PlayerID";
+    private static final String EXPLOSIVE_TRAP_PACKET_CLASS =
+            "zombie/network/packets/AddExplosiveTrapPacket";
+    private static final String EXPLOSIVE_TRAP_METHOD = "processServer";
+    private static final String EXPLOSIVE_TRAP_DESCRIPTOR =
+            "(Lzombie/network/PacketTypes$PacketType;Lzombie/core/raknet/UdpConnection;)V";
     private static final String RUNTIME =
             "cn/zombiecommunity/orangeanticheat/OrangeAntiCheatRuntime";
     private static final Set<String> SUPPORTED_LUA_EVENT_HASHES = Set.of(
@@ -43,6 +48,8 @@ public final class OrangeAntiCheatAgent {
             "da2b667034b150dc484c5c878a9b90f2ce09fedbde19708c8c480f601f7fad3a");
     private static final Set<String> SUPPORTED_PLAYER_DAMAGE_HASHES = Set.of(
             "65b4c00e89d7703a65e392bfe525ee734688500e8562209911ce7cb7aba8c83d");
+    private static final Set<String> SUPPORTED_EXPLOSIVE_TRAP_HASHES = Set.of(
+            "e56a6498342b028529dfea202e57a61d3a565a008ad34fcab7caf09db770df8d");
 
     private OrangeAntiCheatAgent() {
     }
@@ -73,7 +80,8 @@ public final class OrangeAntiCheatAgent {
             if (!LUA_EVENT_CLASS.equals(className)
                     && !TRANSACTION_MANAGER_CLASS.equals(className)
                     && !PLAYER_HEALTH_PACKET_CLASS.equals(className)
-                    && !PLAYER_DAMAGE_PACKET_CLASS.equals(className)) {
+                    && !PLAYER_DAMAGE_PACKET_CLASS.equals(className)
+                    && !EXPLOSIVE_TRAP_PACKET_CLASS.equals(className)) {
                 return null;
             }
             try {
@@ -142,6 +150,12 @@ public final class OrangeAntiCheatAgent {
                     && HEALTH_PARSE_DESCRIPTOR.equals(descriptor)) {
                 hooks++;
                 return healthSyncGuard(output);
+            }
+            if (EXPLOSIVE_TRAP_PACKET_CLASS.equals(className)
+                    && EXPLOSIVE_TRAP_METHOD.equals(name)
+                    && EXPLOSIVE_TRAP_DESCRIPTOR.equals(descriptor)) {
+                hooks++;
+                return explosiveTrapAudit(output);
             }
             return output;
         }
@@ -241,6 +255,36 @@ public final class OrangeAntiCheatAgent {
                 }
             };
         }
+
+        private static MethodVisitor explosiveTrapAudit(MethodVisitor output) {
+            return new MethodVisitor(Opcodes.ASM9, output) {
+                @Override
+                public void visitCode() {
+                    super.visitCode();
+                    output.visitVarInsn(Opcodes.ALOAD, 0);
+                    output.visitFieldInsn(
+                            Opcodes.GETFIELD,
+                            EXPLOSIVE_TRAP_PACKET_CLASS,
+                            "item",
+                            "Lzombie/inventory/InventoryItem;");
+                    output.visitVarInsn(Opcodes.ALOAD, 2);
+                    output.visitVarInsn(Opcodes.ALOAD, 0);
+                    output.visitFieldInsn(Opcodes.GETFIELD, EXPLOSIVE_TRAP_PACKET_CLASS, "x", "I");
+                    output.visitVarInsn(Opcodes.ALOAD, 0);
+                    output.visitFieldInsn(Opcodes.GETFIELD, EXPLOSIVE_TRAP_PACKET_CLASS, "y", "I");
+                    output.visitVarInsn(Opcodes.ALOAD, 0);
+                    output.visitFieldInsn(Opcodes.GETFIELD, EXPLOSIVE_TRAP_PACKET_CLASS, "z", "B");
+                    output.visitVarInsn(Opcodes.ALOAD, 0);
+                    output.visitFieldInsn(Opcodes.GETFIELD, EXPLOSIVE_TRAP_PACKET_CLASS, "isNewItem", "Z");
+                    output.visitMethodInsn(
+                            Opcodes.INVOKESTATIC,
+                            RUNTIME,
+                            "observeExplosiveTrap",
+                            "(Ljava/lang/Object;Ljava/lang/Object;IIIZ)V",
+                            false);
+                }
+            };
+        }
     }
 
     private static Set<String> supportedHashes(String className) {
@@ -253,7 +297,10 @@ public final class OrangeAntiCheatAgent {
         if (PLAYER_HEALTH_PACKET_CLASS.equals(className)) {
             return SUPPORTED_PLAYER_HEALTH_HASHES;
         }
-        return SUPPORTED_PLAYER_DAMAGE_HASHES;
+        if (PLAYER_DAMAGE_PACKET_CLASS.equals(className)) {
+            return SUPPORTED_PLAYER_DAMAGE_HASHES;
+        }
+        return SUPPORTED_EXPLOSIVE_TRAP_HASHES;
     }
 
     private static String featureDescription(String className) {
@@ -262,6 +309,9 @@ public final class OrangeAntiCheatAgent {
         }
         if (TRANSACTION_MANAGER_CLASS.equals(className)) {
             return "1 feature=item_transform";
+        }
+        if (EXPLOSIVE_TRAP_PACKET_CLASS.equals(className)) {
+            return "1 feature=explosive_trap_audit";
         }
         return "1 feature=health_sync_audit class=" + classToken(className);
     }

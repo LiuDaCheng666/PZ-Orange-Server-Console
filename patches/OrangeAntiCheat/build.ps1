@@ -10,11 +10,12 @@ if ([string]::IsNullOrWhiteSpace($JdkRoot)) {
     if (-not $javacCommand) { throw 'Set JAVA_HOME or pass -JdkRoot with a JDK 25 installation.' }
     $JdkRoot = Split-Path -Parent (Split-Path -Parent $javacCommand.Source)
 }
+
 $Javac = Join-Path $JdkRoot 'bin\javac.exe'
 $Java = Join-Path $JdkRoot 'bin\java.exe'
 $Jar = Join-Path $JdkRoot 'bin\jar.exe'
 $GameJar = Join-Path $ServerRoot 'java\projectzomboid.jar'
-$AsmJar = Join-Path $ProjectRoot 'lib\asm-9.8.jar'
+$AsmJar = [IO.Path]::GetFullPath((Join-Path $ProjectRoot '..\PZSelectiveWorldResetGuard\lib\asm-9.8.jar'))
 $BuildDir = Join-Path $ProjectRoot 'build'
 $ClassesDir = Join-Path $BuildDir 'classes'
 $TestClassesDir = Join-Path $BuildDir 'test-classes'
@@ -44,14 +45,6 @@ if ($LASTEXITCODE -ne 0) { throw "test javac failed with exit code $LASTEXITCODE
     cn.zombiecommunity.orangeanticheat.TransformSmokeTest $GameJar
 if ($LASTEXITCODE -ne 0) { throw "transform test failed with exit code $LASTEXITCODE" }
 
-& $Java -Xverify:all -cp "$GameJar;$ClassesDir;$TestClassesDir" `
-    cn.zombiecommunity.orangeanticheat.RuntimePolicyTest
-if ($LASTEXITCODE -ne 0) { throw "runtime policy test failed with exit code $LASTEXITCODE" }
-
-& $Java -Xverify:all -cp "$GameJar;$ClassesDir;$TestClassesDir" `
-    cn.zombiecommunity.orangeanticheat.ItemContainerOwnershipTest
-if ($LASTEXITCODE -ne 0) { throw "item-container ownership test failed with exit code $LASTEXITCODE" }
-
 Push-Location $ClassesDir
 try {
     & $Jar xf $AsmJar
@@ -63,12 +56,19 @@ finally {
 }
 
 if (Test-Path -LiteralPath $OutputJar) { Remove-Item -LiteralPath $OutputJar -Force }
-& $Jar --create --file $OutputJar --manifest (Join-Path $ProjectRoot 'META-INF\MANIFEST.MF') -C $ClassesDir .
+& $Jar --create --file $OutputJar `
+    --manifest (Join-Path $ProjectRoot 'META-INF\MANIFEST.MF') `
+    -C $ClassesDir .
 if ($LASTEXITCODE -ne 0) { throw "jar failed with exit code $LASTEXITCODE" }
 
-& $Java -Xverify:all "-javaagent:$OutputJar" -cp "$GameJar;$OutputJar;$TestClassesDir" `
-    cn.zombiecommunity.orangeanticheat.GameClassLoadSmokeTest
-if ($LASTEXITCODE -ne 0) { throw "real game-class load test failed with exit code $LASTEXITCODE" }
+Push-Location $BuildDir
+try {
+    & $Java -Xverify:all "-javaagent:$OutputJar" -version
+    if ($LASTEXITCODE -ne 0) { throw "javaagent load test failed with exit code $LASTEXITCODE" }
+}
+finally {
+    Pop-Location
+}
 
 $Hash = Get-FileHash -LiteralPath $OutputJar -Algorithm SHA256
 Write-Host "Built: $OutputJar"

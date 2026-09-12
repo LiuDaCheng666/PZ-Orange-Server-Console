@@ -27,12 +27,6 @@ public final class TransformSmokeTest {
                     "init",
                     "seedVehicleChunks",
                     "()V");
-            verifyTarget(
-                    jar,
-                    "zombie/iso/IsoChunk",
-                    "doLoadGridsquare",
-                    "onChunkLoaded",
-                    "(Lzombie/iso/IsoChunk;)V");
         }
         System.out.println("PZ selective world reset guard transform smoke test passed");
     }

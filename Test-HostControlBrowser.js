@@ -89,7 +89,7 @@ async function assertLayout(page) {
   try {
     const desktop = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     desktop.on('pageerror', error => errors.push(error.message));
-    await desktop.addInitScript(() => { window.confirm = () => true; window.prompt = () => '重启物理机'; });
+    await desktop.addInitScript(() => { window.confirm = () => true; });
     await desktop.goto(`http://127.0.0.1:${port}/?view=system&server=production`, { waitUntil: 'domcontentloaded' });
     await desktop.waitForSelector('#authScreen', { state: 'hidden' });
     await desktop.waitForFunction(() => document.querySelector('#onlineCount').textContent === '5');
@@ -118,7 +118,7 @@ async function assertLayout(page) {
     await desktop.waitForFunction(() => !document.querySelector('#restartPhysicalHost').disabled);
     await desktop.click('#restartPhysicalHost');
     await desktop.waitForFunction(() => !document.querySelector('#cancelHostRestart').hidden);
-    if (!requests.restart || requests.restart.confirm !== 'RESTART_PHYSICAL_HOST') throw new Error('Typed host restart confirmation was not sent.');
+    if (!requests.restart || requests.restart.confirm !== 'RESTART_PHYSICAL_HOST') throw new Error('Host restart internal confirmation token was not sent.');
     await desktop.click('#cancelHostRestart');
     await desktop.waitForFunction(() => document.querySelector('#cancelHostRestart').hidden);
     if (!requests.cancel || requests.cancel.confirm !== 'CANCEL_HOST_RESTART') throw new Error('Host restart cancellation was not sent.');

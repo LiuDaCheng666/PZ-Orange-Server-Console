@@ -43,8 +43,9 @@ if ($panel -notmatch '\[uint32\]::MaxValue' -or
         (Get-Content -LiteralPath $startupTaskPath -Raw -Encoding UTF8) -notmatch '\[uint32\]::MaxValue') {
     throw "Scheduled-task UInt32 placeholder results are not normalized safely."
 }
-if ($javascript -notmatch "typed!=='重启物理机'" -or $javascript -notmatch 'RESTART_PHYSICAL_HOST') {
-    throw "The browser does not require typed physical-host confirmation."
+if ($javascript -match 'prompt\(' -or $javascript -notmatch "confirm\('这会重新启动整台 Windows 物理机" -or
+        $javascript -notmatch 'RESTART_PHYSICAL_HOST') {
+    throw "Physical-host restart must use click confirmation and preserve the internal API token."
 }
 if ($panel -notmatch 'Win32_PerfFormattedData_PerfOS_Processor' -or $panel -notmatch 'logicalProcessors = \$logicalProcessorLoads' -or
         $html -notmatch 'id="cpuCoreGrid"' -or $javascript -notmatch 'cpu-core-tile') {
@@ -64,7 +65,7 @@ if ($null -ne $taskStatus.lastTaskResult -and [int64]$taskStatus.lastTaskResult 
     syntax = $true
     adminOnly = $true
     csrfProtected = $true
-    typedRestartConfirmation = $true
+    clickRestartConfirmation = $true
     runningServerGuard = $true
     restartCancellation = $true
     passwordNotHandledByPanel = $true

@@ -198,6 +198,11 @@ Copy-RequiredFile -Name "managed\Invoke-ManagedPZLifecycle.ps1"
 Copy-RequiredDirectory -Name "patches"
 Get-ChildItem -LiteralPath (Join-Path $stage "patches") -Recurse -Force -File -Filter "*.bak" |
     Remove-Item -Force
+Get-ChildItem -LiteralPath (Join-Path $stage "patches") -Recurse -Force -Directory | Where-Object {
+    $_.Name -in @('build', 'testlab')
+} | Sort-Object FullName -Descending | Remove-Item -Recurse -Force
+Get-ChildItem -LiteralPath (Join-Path $stage "patches") -Recurse -Force -File -Filter ".last-deployment-backup.txt" |
+    Remove-Item -Force
 foreach ($name in @(
     "Invoke-PZSelectiveWorldReset.ps1",
     "pz_selective_world_reset.py",
@@ -205,12 +210,14 @@ foreach ($name in @(
 )) {
     Copy-RequiredFile -Name "tools\PZSelectiveWorldReset\$name"
 }
+Copy-RequiredDirectory -Name "tools\PZChunkRecovery"
 Copy-RequiredDirectory -Name "skill"
 Copy-RequiredDirectory -Name "tests"
 foreach ($name in @("index.html", "app.css", "app.js", "lucide.min.js", "qrcode.min.js")) {
     Copy-RequiredFile -Name "web\$name"
 }
 Copy-RequiredDirectory -Name "web\community"
+Copy-RequiredDirectory -Name "web\community-icons"
 
 $screenshots = [ordered]@{
     "docs\images\maintenance-and-history.png" = "docs\images\maintenance-and-history.png"
@@ -292,6 +299,11 @@ API Key、Web 密码、游戏 admin 密码、RCON 密码、Token、Steam 登录�
 本机私有路径或不应向普通玩家公开的信息。
 "@
 [IO.File]::WriteAllText((Join-Path $stage "服务器信息库\README.txt"), $knowledgeReadme, $utf8Bom)
+
+Get-ChildItem -LiteralPath $stage -Recurse -Force -Directory -Filter "__pycache__" |
+    Remove-Item -Recurse -Force
+Get-ChildItem -LiteralPath $stage -Recurse -Force -File -Include "*.pyc", "*.pyo" |
+    Remove-Item -Force
 
 Assert-PublicPackageContents -Root $stage
 Compress-Archive -LiteralPath $stage -DestinationPath $zipPath -CompressionLevel Optimal

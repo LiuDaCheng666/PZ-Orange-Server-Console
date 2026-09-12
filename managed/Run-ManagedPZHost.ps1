@@ -212,6 +212,41 @@ $existing = Get-CimInstance Win32_Process -Filter "Name='java.exe' OR Name='java
 } | Select-Object -First 1
 if ($existing) { throw "The PZ Java process is already running (PID $($existing.ProcessId))." }
 
+if ([bool]$profile.chunkIntegrityEnabled -and -not [string]::IsNullOrWhiteSpace([string]$profile.chunkIntegrityToolPath)) {
+    foreach ($required in @("pythonPath", "chunkIntegrityToolPath", "chunkIntegrityCheckpointPath", "chunkIntegrityReportRoot")) {
+        if ([string]::IsNullOrWhiteSpace([string]$profile.$required)) {
+            throw "Chunk integrity startup gate is configured incompletely: missing $required."
+        }
+    }
+    if (-not (Test-Path -LiteralPath ([string]$profile.pythonPath) -PathType Leaf) -or
+        -not (Test-Path -LiteralPath ([string]$profile.chunkIntegrityToolPath) -PathType Leaf)) {
+        throw "Chunk integrity startup gate runtime is missing."
+    }
+    $saveRoot = Join-Path ([string]$profile.dataRoot) "Saves\Multiplayer\$([string]$profile.serverName)"
+    if (Test-Path -LiteralPath (Join-Path $saveRoot "map") -PathType Container) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent ([string]$profile.chunkIntegrityCheckpointPath)), ([string]$profile.chunkIntegrityReportRoot) -Force | Out-Null
+        Write-State -Status "checking-chunk-integrity" -Process $null -Extra ([pscustomobject]@{
+            message = "Checking map chunks modified since the previous safe startup."
+        })
+        $gateOutput = @(& ([string]$profile.pythonPath) ([string]$profile.chunkIntegrityToolPath) startup-gate `
+            --save-root $saveRoot `
+            --server-name ([string]$profile.serverName) `
+            --checkpoint-path ([string]$profile.chunkIntegrityCheckpointPath) `
+            --report-root ([string]$profile.chunkIntegrityReportRoot) 2>&1)
+        $gateExitCode = $LASTEXITCODE
+        if ($gateExitCode -ne 0) {
+            $failure = ($gateOutput | ForEach-Object { [string]$_ }) -join "`n"
+            if ($failure.Length -gt 6000) { $failure = $failure.Substring($failure.Length - 6000) }
+            Write-State -Status "integrity-blocked" -Process $null -Extra ([pscustomobject]@{
+                failure = "Map chunk integrity gate blocked Java startup."
+                integrityDetails = $failure
+                integrityReportRoot = [string]$profile.chunkIntegrityReportRoot
+            })
+            throw "Map chunk integrity gate blocked Java startup. Review $([string]$profile.chunkIntegrityReportRoot) before recovery."
+        }
+    }
+}
+
 Get-ChildItem -LiteralPath ([string]$profile.queueDir) -Filter "*.json" -File -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue
 

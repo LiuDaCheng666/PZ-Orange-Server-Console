@@ -99,6 +99,7 @@ public final class AnimalLOSOptimizationRuntime {
         private int size;
 
         void reset(int expectedSize) {
+            Arrays.fill(elements, 0, size, null);
             size = 0;
             seen.clear();
             if (expectedSize > elements.length) {

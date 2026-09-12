@@ -6,7 +6,7 @@ const path = require('path');
 const root = __dirname;
 const fixture = path.join(root, 'tests', 'fixtures', 'anti-identity');
 const output = childProcess.execFileSync(process.execPath, [
-  path.join(root, 'Read-PZAntiCheatEvents.js'), fixture, root, '168', '', 'fixture',
+  path.join(root, 'Read-PZAntiCheatEvents.js'), fixture, root, '876000', '', 'fixture',
 ], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
 const report = JSON.parse(output);
 const byId = new Map(report.players.map(player => [player.steamId, player]));

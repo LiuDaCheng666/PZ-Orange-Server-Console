@@ -2,7 +2,9 @@ package cn.zombiecommunity.pzactionisolation;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -10,6 +12,7 @@ public final class TimedActionIsolationRuntime {
     private static final ConcurrentHashMap<Class<?>, Method> STOP_METHODS = new ConcurrentHashMap<>();
     private static final LongAdder EXACT_STOPS = new LongAdder();
     private static final LongAdder COLLISIONS_PREVENTED = new LongAdder();
+    private static final LongAdder STALE_CANCELS = new LongAdder();
     private static final LongAdder FAILURES = new LongAdder();
     private static volatile Field gameServerField;
     private static volatile Field actionQueueField;
@@ -22,32 +25,47 @@ public final class TimedActionIsolationRuntime {
     private TimedActionIsolationRuntime() {
     }
 
-    public static boolean stopExactOnServer(Object action) {
+    public static boolean stopOwnedOnServer(Object action) {
         if (action == null || !isGameServer()) {
             return false;
         }
 
-        boolean removed = false;
+        int removed = 0;
         try {
             Collection<?> queue = actionQueue();
-            Method stopMethod = stopMethod(action.getClass());
             prepareEmulatorMethods();
 
             int id = actionId(action);
             int owner = actionOwner(action);
-            int crossPlayerMatches = countCrossPlayerMatches(queue, action, id, owner);
-
-            if (!containsIdentity(queue, action)) {
-                return true;
+            List<Object> ownedMatches = new ArrayList<>();
+            int crossPlayerMatches = 0;
+            for (Object candidate : queue) {
+                if (candidate == null || actionId(candidate) != id) {
+                    continue;
+                }
+                if (actionOwner(candidate) == owner) {
+                    ownedMatches.add(candidate);
+                } else {
+                    crossPlayerMatches++;
+                }
             }
-            removed = queue.remove(action);
-            if (!removed) {
-                return true;
+
+            for (Object target : ownedMatches) {
+                if (!queue.remove(target)) {
+                    continue;
+                }
+                removed++;
+                Method stopMethod = stopMethod(target.getClass());
+                stopMethod.invoke(target);
+                removeAnimationEmulation(target);
             }
 
-            stopMethod.invoke(action);
-            removeAnimationEmulation(action);
-            EXACT_STOPS.increment();
+            if (removed > 0) {
+                EXACT_STOPS.add(removed);
+            } else {
+                STALE_CANCELS.increment();
+                reportStaleCancel(id, owner, crossPlayerMatches);
+            }
 
             if (crossPlayerMatches > 0) {
                 COLLISIONS_PREVENTED.add(crossPlayerMatches);
@@ -55,9 +73,9 @@ public final class TimedActionIsolationRuntime {
             }
             return true;
         } catch (Throwable failure) {
-            reportFailure(failure, removed);
-            // Once the exact action has been removed, never enter vanilla's global ID removal path.
-            return removed;
+            reportFailure(failure, removed > 0);
+            // Once an owned action has been removed, never enter vanilla's global ID removal path.
+            return removed > 0;
         }
     }
 
@@ -133,29 +151,6 @@ public final class TimedActionIsolationRuntime {
         emulatorRemove.invoke(emulator, action);
     }
 
-    private static int countCrossPlayerMatches(
-            Collection<?> queue, Object target, int id, int owner) throws ReflectiveOperationException {
-        int matches = 0;
-        for (Object candidate : queue) {
-            if (candidate != null
-                    && candidate != target
-                    && actionId(candidate) == id
-                    && actionOwner(candidate) != owner) {
-                matches++;
-            }
-        }
-        return matches;
-    }
-
-    private static boolean containsIdentity(Collection<?> queue, Object target) {
-        for (Object candidate : queue) {
-            if (candidate == target) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private static int actionId(Object action) throws ReflectiveOperationException {
         Field field = actionIdField;
         if (field == null) {
@@ -205,6 +200,17 @@ public final class TimedActionIsolationRuntime {
         }
     }
 
+    private static void reportStaleCancel(int id, int owner, int crossPlayerMatches) {
+        long total = STALE_CANCELS.sum();
+        if (total <= 3 || (total & (total - 1)) == 0) {
+            System.out.println("[PZTimedActionIsolationFix] ignored stale cancel"
+                    + " actionId=" + id
+                    + " ownerOnlineId=" + owner
+                    + " crossPlayerMatches=" + crossPlayerMatches
+                    + " totalStale=" + total);
+        }
+    }
+
     private static void reportFailure(Throwable failure, boolean afterRemoval) {
         FAILURES.increment();
         long count = FAILURES.sum();
@@ -220,6 +226,7 @@ public final class TimedActionIsolationRuntime {
         STOP_METHODS.clear();
         EXACT_STOPS.reset();
         COLLISIONS_PREVENTED.reset();
+        STALE_CANCELS.reset();
         FAILURES.reset();
         gameServerField = null;
         actionQueueField = null;
@@ -231,6 +238,8 @@ public final class TimedActionIsolationRuntime {
     }
 
     static long[] countersForTest() {
-        return new long[] {EXACT_STOPS.sum(), COLLISIONS_PREVENTED.sum(), FAILURES.sum()};
+        return new long[] {
+                EXACT_STOPS.sum(), COLLISIONS_PREVENTED.sum(), STALE_CANCELS.sum(), FAILURES.sum()
+        };
     }
 }

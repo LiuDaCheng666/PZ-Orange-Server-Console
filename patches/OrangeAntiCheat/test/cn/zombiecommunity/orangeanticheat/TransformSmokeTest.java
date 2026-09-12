@@ -17,67 +17,62 @@ public final class TransformSmokeTest {
         if (args.length != 1) {
             throw new IllegalArgumentException("Expected projectzomboid.jar path");
         }
-        byte[] luaEventManager;
-        byte[] transactionManager;
-        byte[] playerHealthPacket;
-        byte[] playerDamagePacket;
         try (ZipFile jar = new ZipFile(Path.of(args[0]).toFile())) {
-            ZipEntry luaEntry = jar.getEntry("zombie/Lua/LuaEventManager.class");
-            ZipEntry transactionEntry = jar.getEntry("zombie/core/TransactionManager.class");
-            ZipEntry playerHealthEntry = jar.getEntry(
-                    "zombie/network/packets/character/PlayerHealthPacket.class");
-            ZipEntry playerDamageEntry = jar.getEntry(
-                    "zombie/network/packets/character/PlayerDamagePacket.class");
-            if (luaEntry == null) {
-                throw new AssertionError("LuaEventManager.class is missing");
-            }
-            if (transactionEntry == null) {
-                throw new AssertionError("TransactionManager.class is missing");
-            }
-            if (playerHealthEntry == null || playerDamageEntry == null) {
-                throw new AssertionError("Player health packet classes are missing");
-            }
-            luaEventManager = jar.getInputStream(luaEntry).readAllBytes();
-            transactionManager = jar.getInputStream(transactionEntry).readAllBytes();
-            playerHealthPacket = jar.getInputStream(playerHealthEntry).readAllBytes();
-            playerDamagePacket = jar.getInputStream(playerDamageEntry).readAllBytes();
-        }
+            assertHook(jar, "zombie/Lua/LuaEventManager", "shouldBlock");
+            assertHook(jar, "zombie/core/TransactionManager", "shouldRejectItemTransform");
+            assertHook(jar, "zombie/network/packets/character/PlayerHealthPacket", "beforeHealthSync");
+            assertHook(jar, "zombie/network/packets/character/PlayerHealthPacket", "afterHealthSync");
+            assertHook(jar, "zombie/network/packets/character/PlayerDamagePacket", "beforeHealthSync");
+            assertHook(jar, "zombie/network/packets/character/PlayerDamagePacket", "afterHealthSync");
+            assertHook(jar, "zombie/network/packets/AddExplosiveTrapPacket", "observeExplosiveTrap");
 
-        assertHook(
-                "zombie/Lua/LuaEventManager",
-                luaEventManager,
-                "shouldBlock");
-        assertHook(
-                "zombie/core/TransactionManager",
-                transactionManager,
-                "shouldRejectItemTransform");
-        assertHook(
-                "zombie/network/packets/character/PlayerHealthPacket",
-                playerHealthPacket,
-                "beforeHealthSync");
-        assertHook(
-                "zombie/network/packets/character/PlayerHealthPacket",
-                playerHealthPacket,
-                "afterHealthSync");
-        assertHook(
-                "zombie/network/packets/character/PlayerDamagePacket",
-                playerDamagePacket,
-                "beforeHealthSync");
-        assertHook(
-                "zombie/network/packets/character/PlayerDamagePacket",
-                playerDamagePacket,
-                "afterHealthSync");
-
-        byte[] unsupported = luaEventManager.clone();
-        unsupported[unsupported.length - 1] ^= 1;
-        if (OrangeAntiCheatAgent.transformForTest(
-                "zombie/Lua/LuaEventManager", unsupported) != null) {
-            throw new AssertionError("Unsupported class hash must fail open without transformation");
+            byte[] unsupported = readClass(jar, "zombie/Lua/LuaEventManager").clone();
+            unsupported[unsupported.length - 1] ^= 1;
+            if (OrangeAntiCheatAgent.transformForTest(
+                    "zombie/Lua/LuaEventManager", unsupported) != null) {
+                throw new AssertionError("Unsupported class hash must fail open without transformation");
+            }
         }
+        assertRuntimePolicies();
         System.out.println("TransformSmokeTest passed");
     }
 
-    private static void assertHook(String className, byte[] original, String hookName) {
+    private static void assertRuntimePolicies() {
+        String signals = OrangeAntiCheatRuntime.healthSignals(
+                1, 5.0f, 50.0f, 53.0f, true, false, 120.0f, 80.0f, 12, 40);
+        assertContains(signals, "body_health_increase");
+        assertContains(signals, "overall_health_increase");
+        assertContains(signals, "infection_cleared");
+        assertContains(signals, "infection_time_reduced");
+        assertContains(signals, "max_weight_increase");
+
+        String normal = OrangeAntiCheatRuntime.healthSignals(
+                0, 0.0f, 50.0f, 50.5f, false, false, 0.0f, 0.0f, 12, 32);
+        if (!normal.isEmpty()) {
+            throw new AssertionError("Normal health changes must not be reported: " + normal);
+        }
+        assertContains(OrangeAntiCheatRuntime.healthSignals(
+                0, 0.0f, 50.0f, Float.NaN, false, false, 0.0f, 0.0f, 12, 12),
+                "non_finite_health");
+
+        OrangeAntiCheatRuntime.clearHealthRelayTicketsForTest();
+        OrangeAntiCheatRuntime.rememberHealthRelay(42L, 3L, "Bandage");
+        if (!OrangeAntiCheatRuntime.consumeHealthRelay(42L, 3L, "Bandage")) {
+            throw new AssertionError("Authorized administrator health relay ticket was not accepted");
+        }
+        if (OrangeAntiCheatRuntime.consumeHealthRelay(42L, 3L, "Bandage")) {
+            throw new AssertionError("Administrator health relay ticket must be single use");
+        }
+    }
+
+    private static void assertContains(String actual, String expected) {
+        if (!Arrays.asList(actual.split(",")).contains(expected)) {
+            throw new AssertionError("Expected signal " + expected + " in " + actual);
+        }
+    }
+
+    private static void assertHook(ZipFile jar, String className, String hookName) throws Exception {
+        byte[] original = readClass(jar, className);
         byte[] transformed = OrangeAntiCheatAgent.transformForTest(className, original);
         if (transformed == null || Arrays.equals(original, transformed)) {
             throw new AssertionError("Supported " + className + " was not transformed");
@@ -104,5 +99,13 @@ public final class TransformSmokeTest {
         if (calls[0] != 1) {
             throw new AssertionError("Expected one " + hookName + " hook, found " + calls[0]);
         }
+    }
+
+    private static byte[] readClass(ZipFile jar, String className) throws Exception {
+        ZipEntry entry = jar.getEntry(className + ".class");
+        if (entry == null) {
+            throw new AssertionError(className + ".class is missing");
+        }
+        return jar.getInputStream(entry).readAllBytes();
     }
 }

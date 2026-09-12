@@ -11,6 +11,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.StringJoiner;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
@@ -21,12 +22,13 @@ import zombie.characters.BodyDamage.BodyDamage;
 import zombie.characters.BodyDamage.BodyPart;
 import zombie.inventory.InventoryItem;
 import zombie.inventory.ItemContainer;
+import zombie.inventory.types.HandWeapon;
 import zombie.network.GameServer;
 import zombie.network.IConnection;
 import zombie.network.fields.character.PlayerID;
 
 public final class OrangeAntiCheatRuntime {
-    private static final String VERSION = "2.5.0";
+    private static final String VERSION = "2.7.0";
     private static final String EVENT = "OnClientCommand";
     private static final String OWN_PLAYER_ONLY = "OwnPlayerOnly";
     private static final String HEALTH_REQUEST = "player.onHealthCheat";
@@ -37,11 +39,15 @@ public final class OrangeAntiCheatRuntime {
             new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Short, Long> HEALTH_SYNC_AUTHORIZATIONS =
             new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<Long, Long> HEALTH_SYNC_LOG_TIMES =
+    private static final ConcurrentHashMap<String, EventAggregationState> EVENT_AGGREGATIONS =
             new ConcurrentHashMap<>();
     private static final ThreadLocal<HealthSnapshot> HEALTH_SNAPSHOT = new ThreadLocal<>();
     private static final float HEALTH_INCREASE_EPSILON = 1.0f;
-    private static final long HEALTH_LOG_INTERVAL_NANOS = 5_000_000_000L;
+    private static final float INFECTION_TIME_DECREASE_EPSILON = 1.0f;
+    private static final int MAX_WEIGHT_INCREASE_EPSILON = 20;
+    private static final long EVENT_AGGREGATION_WINDOW_NANOS = 30_000_000_000L;
+    private static final long EVENT_AGGREGATION_STALE_NANOS = 300_000_000_000L;
+    private static final int MAX_EVENT_AGGREGATIONS = 4096;
     private static final long EVENT_LOG_MAX_BYTES = 8L * 1024L * 1024L;
     private static final int EVENT_LOG_ROTATIONS = 5;
     private static final Object EVENT_LOG_LOCK = new Object();
@@ -169,6 +175,10 @@ public final class OrangeAntiCheatRuntime {
         String route = sourceValue == destinationValue ? "same_container" : "cross_container";
         IsoPlayer player = playerValue instanceof IsoPlayer ? (IsoPlayer) playerValue : null;
         try {
+            if (player != null && player.getRole() != null
+                    && player.getRole().hasCapability(Capability.EditItem)) {
+                return false;
+            }
             if (!(sourceValue instanceof ItemContainer source)) {
                 logBlockedItemTransform(
                         player, null, requestedType, itemId, 0, route, "missing_source_container");
@@ -256,8 +266,50 @@ public final class OrangeAntiCheatRuntime {
         for (int index = 0; index < health.length; index++) {
             health[index] = parts.get(index).getHealth();
         }
-        HEALTH_SNAPSHOT.set(new HealthSnapshot(player, health));
+        HEALTH_SNAPSHOT.set(new HealthSnapshot(
+                player,
+                health,
+                damage.getOverallBodyHealth(),
+                damage.isInfected(),
+                damage.getInfectionTime(),
+                player.getMaxWeight()));
         return false;
+    }
+
+    public static void observeExplosiveTrap(
+            Object itemValue,
+            Object connectionValue,
+            int x,
+            int y,
+            int z,
+            boolean isNewItem) {
+        if (!GameServer.server || !isNewItem) {
+            return;
+        }
+        InventoryItem item = itemValue instanceof InventoryItem ? (InventoryItem) itemValue : null;
+        IConnection connection = connectionValue instanceof IConnection ? (IConnection) connectionValue : null;
+        String itemType = item == null ? "unknown" : item.getFullType();
+        boolean plausibleExplosive = false;
+        if (item instanceof HandWeapon weapon) {
+            plausibleExplosive = weapon.isInstantExplosion()
+                    || weapon.getExplosionPower() > 0
+                    || weapon.getExplosionRange() > 0
+                    || weapon.getFireRange() > 0
+                    || weapon.getSmokeRange() > 0
+                    || weapon.getNoiseRange() > 0
+                    || weapon.getSensorRange() > 0;
+        }
+        emitEvent("[OrangeAntiCheat] event=observed_explosive_trap severity=warning"
+                + " version=" + VERSION
+                + " mode=javaagent"
+                + " steamId=" + (connection == null ? 0L : connection.getSteamId())
+                + " username=" + (connection == null ? "unknown" : token(connection.getUserName()))
+                + " itemType=" + token(itemType)
+                + " plausibleExplosive=" + plausibleExplosive
+                + " action=observed_not_blocked"
+                + " x=" + x
+                + " y=" + y
+                + " z=" + z);
     }
 
     public static void afterHealthSync(Object packetValue) {
@@ -285,13 +337,37 @@ public final class OrangeAntiCheatRuntime {
                 increasedParts++;
                 maxIncrease = Math.max(maxIncrease, Float.isFinite(after) ? after - before : Float.POSITIVE_INFINITY);
             }
-            if (increasedParts > 0) {
+            float overallBodyHealth = damage.getOverallBodyHealth();
+            boolean infected = damage.isInfected();
+            float infectionTime = damage.getInfectionTime();
+            int maxWeight = snapshot.player.getMaxWeight();
+            String signals = healthSignals(
+                    increasedParts,
+                    maxIncrease,
+                    snapshot.overallBodyHealth,
+                    overallBodyHealth,
+                    snapshot.infected,
+                    infected,
+                    snapshot.infectionTime,
+                    infectionTime,
+                    snapshot.maxWeight,
+                    maxWeight);
+            if (!signals.isEmpty()) {
                 logObservedHealthSync(
                         snapshot.player,
                         packetValue,
                         increasedParts,
                         maxIncrease,
-                        Float.isFinite(maxIncrease) ? "client_health_increase" : "non_finite_health");
+                        snapshot.overallBodyHealth,
+                        overallBodyHealth,
+                        snapshot.infected,
+                        infected,
+                        snapshot.infectionTime,
+                        infectionTime,
+                        snapshot.maxWeight,
+                        maxWeight,
+                        signals,
+                        signals.contains("non_finite_health") ? "non_finite_health" : "client_state_increase");
             }
         } catch (Throwable failure) {
             logObservedHealthSync(
@@ -308,6 +384,39 @@ public final class OrangeAntiCheatRuntime {
             return true;
         }
         return Float.isFinite(before) && after > before + HEALTH_INCREASE_EPSILON;
+    }
+
+    static String healthSignals(
+            int increasedParts,
+            float maxPartIncrease,
+            float overallBefore,
+            float overallAfter,
+            boolean infectedBefore,
+            boolean infectedAfter,
+            float infectionTimeBefore,
+            float infectionTimeAfter,
+            int maxWeightBefore,
+            int maxWeightAfter) {
+        StringJoiner signals = new StringJoiner(",");
+        if (increasedParts > 0) {
+            signals.add(Float.isFinite(maxPartIncrease) ? "body_health_increase" : "non_finite_health");
+        }
+        if (isSuspiciousHealthIncrease(overallBefore, overallAfter)) {
+            signals.add(Float.isFinite(overallAfter) ? "overall_health_increase" : "non_finite_health");
+        }
+        if (infectedBefore && !infectedAfter) {
+            signals.add("infection_cleared");
+        }
+        if (!Float.isFinite(infectionTimeAfter)) {
+            signals.add("non_finite_health");
+        } else if (Float.isFinite(infectionTimeBefore)
+                && infectionTimeAfter < infectionTimeBefore - INFECTION_TIME_DECREASE_EPSILON) {
+            signals.add("infection_time_reduced");
+        }
+        if (maxWeightAfter > maxWeightBefore + MAX_WEIGHT_INCREASE_EPSILON) {
+            signals.add("max_weight_increase");
+        }
+        return signals.toString();
     }
 
     static boolean shouldRejectItemTransformValues(
@@ -500,6 +609,12 @@ public final class OrangeAntiCheatRuntime {
         int x = player == null ? 0 : player.getXi();
         int y = player == null ? 0 : player.getYi();
         int z = player == null ? 0 : player.getZi();
+        long suppressed = suppressedSincePrevious(
+                steamId + "|blocked_client_command|" + token(module) + "." + token(command)
+                        + "|" + token(reason));
+        if (suppressed < 0) {
+            return;
+        }
         emitEvent("[OrangeAntiCheat] event=blocked_client_command severity=critical"
                 + " version=" + VERSION
                 + " mode=javaagent"
@@ -511,6 +626,7 @@ public final class OrangeAntiCheatRuntime {
                 + " capability=" + token(capability)
                 + " reason=" + token(reason)
                 + " targetId=" + (targetId == null ? "unknown" : targetId)
+                + " suppressedSincePrevious=" + suppressed
                 + " x=" + x + " y=" + y + " z=" + z);
     }
 
@@ -522,10 +638,16 @@ public final class OrangeAntiCheatRuntime {
             int allowedCount,
             String route,
             String reason) {
+        long steamId = player == null ? 0L : player.getSteamID();
+        long suppressed = suppressedSincePrevious(
+                steamId + "|blocked_item_transform|" + token(requestedType) + "|" + token(reason));
+        if (suppressed < 0) {
+            return;
+        }
         emitEvent("[OrangeAntiCheat] event=blocked_item_transform severity=critical"
                 + " version=" + VERSION
                 + " mode=javaagent"
-                + " steamId=" + (player == null ? 0L : player.getSteamID())
+                + " steamId=" + steamId
                 + " username=" + (player == null ? "unknown" : token(player.getUsername()))
                 + " onlineId=" + (player == null ? -1 : player.getOnlineID())
                 + " sourceType=" + (carrier == null ? "unknown" : token(carrier.getFullType()))
@@ -534,6 +656,7 @@ public final class OrangeAntiCheatRuntime {
                 + " allowedCount=" + allowedCount
                 + " route=" + token(route)
                 + " reason=" + token(reason)
+                + " suppressedSincePrevious=" + suppressed
                 + " x=" + (player == null ? 0 : player.getXi())
                 + " y=" + (player == null ? 0 : player.getYi())
                 + " z=" + (player == null ? 0 : player.getZi()));
@@ -545,10 +668,33 @@ public final class OrangeAntiCheatRuntime {
             int increasedParts,
             float maxIncrease,
             String reason) {
+        logObservedHealthSync(
+                player, packetValue, increasedParts, maxIncrease,
+                Float.NaN, Float.NaN, false, false, Float.NaN, Float.NaN, -1, -1,
+                reason, reason);
+    }
+
+    private static void logObservedHealthSync(
+            IsoPlayer player,
+            Object packetValue,
+            int increasedParts,
+            float maxIncrease,
+            float overallBefore,
+            float overallAfter,
+            boolean infectedBefore,
+            boolean infectedAfter,
+            float infectionTimeBefore,
+            float infectionTimeAfter,
+            int maxWeightBefore,
+            int maxWeightAfter,
+            String signals,
+            String reason) {
         long steamId = player == null ? 0L : player.getSteamID();
-        long now = System.nanoTime();
-        Long previous = HEALTH_SYNC_LOG_TIMES.put(steamId, now);
-        if (previous != null && now - previous < HEALTH_LOG_INTERVAL_NANOS) {
+        String packet = token(packetValue == null ? "unknown" : packetValue.getClass().getSimpleName());
+        long suppressed = suppressedSincePrevious(
+                steamId + "|observed_health_sync|" + packet + "|" + token(reason)
+                        + "|" + token(signals));
+        if (suppressed < 0) {
             return;
         }
         emitEvent("[OrangeAntiCheat] event=observed_health_sync severity=warning"
@@ -557,14 +703,59 @@ public final class OrangeAntiCheatRuntime {
                 + " steamId=" + steamId
                 + " username=" + (player == null ? "unknown" : token(player.getUsername()))
                 + " onlineId=" + (player == null ? -1 : player.getOnlineID())
-                + " packet=" + token(packetValue == null ? "unknown" : packetValue.getClass().getSimpleName())
+                + " packet=" + packet
                 + " increasedParts=" + increasedParts
                 + " maxIncrease=" + (Float.isFinite(maxIncrease) ? maxIncrease : "non_finite")
+                + " overallBefore=" + finiteToken(overallBefore)
+                + " overallAfter=" + finiteToken(overallAfter)
+                + " infectedBefore=" + infectedBefore
+                + " infectedAfter=" + infectedAfter
+                + " infectionTimeBefore=" + finiteToken(infectionTimeBefore)
+                + " infectionTimeAfter=" + finiteToken(infectionTimeAfter)
+                + " maxWeightBefore=" + (maxWeightBefore < 0 ? "unknown" : maxWeightBefore)
+                + " maxWeightAfter=" + (maxWeightAfter < 0 ? "unknown" : maxWeightAfter)
+                + " signals=" + token(signals)
                 + " reason=" + token(reason)
                 + " action=observed_not_blocked"
+                + " suppressedSincePrevious=" + suppressed
                 + " x=" + (player == null ? 0 : player.getXi())
                 + " y=" + (player == null ? 0 : player.getYi())
                 + " z=" + (player == null ? 0 : player.getZi()));
+    }
+
+    private static long suppressedSincePrevious(String key) {
+        long now = System.nanoTime();
+        EventAggregationState existing = EVENT_AGGREGATIONS.get(key);
+        if (existing == null) {
+            if (EVENT_AGGREGATIONS.size() >= MAX_EVENT_AGGREGATIONS) {
+                EVENT_AGGREGATIONS.entrySet().removeIf(
+                        entry -> now - entry.getValue().lastSeenNanos > EVENT_AGGREGATION_STALE_NANOS);
+            }
+            if (EVENT_AGGREGATIONS.size() >= MAX_EVENT_AGGREGATIONS) {
+                return 0;
+            }
+            EventAggregationState created = new EventAggregationState();
+            existing = EVENT_AGGREGATIONS.putIfAbsent(key, created);
+            if (existing == null) {
+                existing = created;
+            }
+        }
+        synchronized (existing) {
+            existing.lastSeenNanos = now;
+            if (existing.lastEmissionNanos == 0L
+                    || now - existing.lastEmissionNanos >= EVENT_AGGREGATION_WINDOW_NANOS) {
+                long suppressed = existing.suppressed;
+                existing.suppressed = 0L;
+                existing.lastEmissionNanos = now;
+                return suppressed;
+            }
+            existing.suppressed++;
+            return -1L;
+        }
+    }
+
+    private static String finiteToken(float value) {
+        return Float.isFinite(value) ? Float.toString(value) : "unknown";
     }
 
     private static void emitEvent(String message) {
@@ -637,11 +828,31 @@ public final class OrangeAntiCheatRuntime {
     private static final class HealthSnapshot {
         private final IsoPlayer player;
         private final float[] health;
+        private final float overallBodyHealth;
+        private final boolean infected;
+        private final float infectionTime;
+        private final int maxWeight;
 
-        private HealthSnapshot(IsoPlayer player, float[] health) {
+        private HealthSnapshot(
+                IsoPlayer player,
+                float[] health,
+                float overallBodyHealth,
+                boolean infected,
+                float infectionTime,
+                int maxWeight) {
             this.player = player;
             this.health = health;
+            this.overallBodyHealth = overallBodyHealth;
+            this.infected = infected;
+            this.infectionTime = infectionTime;
+            this.maxWeight = maxWeight;
         }
+    }
+
+    private static final class EventAggregationState {
+        private long lastEmissionNanos;
+        private long lastSeenNanos;
+        private long suppressed;
     }
 
     private static String stringValue(Object value) {

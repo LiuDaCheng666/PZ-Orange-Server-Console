@@ -10,7 +10,9 @@ const edgePath = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.
 const port = 18792;
 const now = Date.now();
 let grantBody = null;
+let queuedGrants = [];
 let receiptReads = 0;
+const errors = [];
 
 const profiles = [
   { id: "production", name: "正式服", serverName: "servertest" },
@@ -85,14 +87,20 @@ async function api(request, response, url) {
   if (url.pathname === "/api/notices/status") return json(response, { ok: true, serverId: url.searchParams.get("serverId"), channel: { usable: false } });
   if (url.pathname === "/api/players") return json(response, { ok: true, serverId: url.searchParams.get("serverId"), onlineKnown: true, online: ["TargetPlayer"], players: [{ username: "TargetPlayer", steamId: "76561198000000002", online: true, role: "user" }, { username: "HistoryPlayer", steamId: "76561198000000003", online: false, role: "user" }] });
   if (url.pathname === "/api/admin-item-vault" && request.method === "GET") return json(response, { ok: true, templates: [containerTemplate, template], grants: [], imported: 2, invalid: 0, profiles, updatedAt: new Date().toISOString() });
-  if (url.pathname === "/api/admin-item-vault/sync" && request.method === "POST") return json(response, { ok: true, templates: [containerTemplate, template], grants: [], imported: 2, invalid: 0, profiles, updatedAt: new Date().toISOString(), sync: { requested: 2, synced: 2, failed: 0, servers: profiles.map(profile => ({ id: profile.id, name: profile.name, status: "synced", detail: "completed=1" })) } });
+  if (url.pathname === "/api/admin-item-vault/sync" && request.method === "POST") return json(response, { ok: true, templates: [containerTemplate, template], grants: [], imported: 2, invalid: 0, profiles, updatedAt: new Date().toISOString(), sync: { requested: 2, synced: 2, failed: 0 } });
   if (url.pathname === "/api/admin-item-vault/grant" && request.method === "POST") {
     grantBody = await body(request);
-    return json(response, { ok: true, message: "发放请求已写入 2服 队列。", grant: queuedGrant }, 202);
+    const targets = grantBody.targetMode === "all-registered" ? [
+      { username: "TargetPlayer", steamId: "76561198000000002" },
+      { username: "HistoryPlayer", steamId: "76561198000000003" },
+    ] : [{ username: grantBody.targetUsername, steamId: grantBody.targetSteamId }];
+    queuedGrants = targets.map((target, index) => ({ ...queuedGrant, requestId: `vault-grant-browser-test-${index}`, targetUsername: target.username, targetSteamId: target.steamId, count: grantBody.count, batchId: "vault-batch-browser-test" }));
+    return json(response, { ok: true, message: `已向 2服 的 ${queuedGrants.length} 名玩家写入保险库发放队列。`, targetMode: grantBody.targetMode, targetCount: queuedGrants.length, grants: queuedGrants }, 202);
   }
-  if (url.pathname === "/api/admin-item-vault/receipt") {
+  if (url.pathname === "/api/admin-item-vault/receipts" && request.method === "POST") {
     receiptReads += 1;
-    return json(response, { ok: true, grant: { ...queuedGrant, status: "delivered", detail: "ok", delivered: 2, updatedMs: now + 2000 } });
+    const requestBody = await body(request),wanted = new Set(requestBody.requestIds || []);
+    return json(response, { ok: true, grants: queuedGrants.filter(grant => wanted.has(grant.requestId)).map(grant => ({ ...grant, status: "delivered", detail: "ok", delivered: grant.count, updatedMs: now + 2000 })) });
   }
   return json(response, { ok: true });
 }
@@ -111,28 +119,43 @@ const server = http.createServer(async (request, response) => {
   fs.createReadStream(filePath).pipe(response);
 });
 
-(async () => {
+if (process.argv.includes("--server-only")) {
+  server.listen(port, "127.0.0.1", () => console.log(`Mock panel ready at http://127.0.0.1:${port}/`));
+} else (async () => {
   await new Promise(resolve => server.listen(port, "127.0.0.1", resolve));
   const browser = await chromium.launch({ executablePath: edgePath, headless: true, args: ["--disable-gpu"] });
-  const errors = [];
   try {
     const desktop = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
     desktop.on("pageerror", error => errors.push(`desktop: ${error.message}`));
+    desktop.on("console", message => { if (message.type() === "error") errors.push(`desktop console: ${message.text()}`); });
     desktop.on("dialog", dialog => dialog.accept());
     await desktop.goto(`http://127.0.0.1:${port}/?view=vault&server=production`, { waitUntil: "networkidle" });
+    try {
+      await desktop.waitForSelector("#authScreen", { state: "hidden" });
+    } catch (error) {
+      throw new Error(`Authentication fixture did not settle: ${errors.join(" | ") || error.message}`);
+    }
     await desktop.waitForSelector("#vaultTemplateList .vault-template-row");
     await desktop.waitForFunction(() => Boolean(document.querySelector("#vaultTargetPlayer option[value='0']")));
     await desktop.waitForFunction(() => document.querySelector("#vaultDetailPane")?.textContent.includes("内含物品"));
+    await desktop.fill('#vaultPlayerSearch', '76561198000000003');
+    await desktop.waitForFunction(() => document.querySelectorAll('#vaultTargetPlayer option').length === 2 && document.querySelector('#vaultTargetPlayer option[value="1"]')?.textContent.includes('HistoryPlayer'));
+    const playerSearchState = await desktop.evaluate(() => ({ options: [...document.querySelectorAll('#vaultTargetPlayer option')].map(option => option.textContent), hint: document.querySelector('#vaultPlayerHint').textContent }));
+    await desktop.check('#vaultGrantForm input[name="targetMode"][value="selected"]', { force: true });
+    await desktop.check('#vaultTargetChecklist input[value="76561198000000003"]');
+    await desktop.waitForFunction(() => document.querySelector('#vaultPlayerHint').textContent.includes('已选择 1/2'));
+    await desktop.fill('#vaultPlayerSearch', '');
     const desktopLayout = await desktop.evaluate(() => {
       const selectors = ["#view-vault", ".vault-layout", ".vault-template-pane", ".vault-detail-pane", "#vaultGrantForm"];
       return selectors.map(selector => { const node = document.querySelector(selector); return { selector, width: node.clientWidth, scrollWidth: node.scrollWidth, height: node.clientHeight, scrollHeight: node.scrollHeight }; });
     });
     await desktop.selectOption("#vaultDestination", "server2");
     await desktop.waitForFunction(() => Boolean(document.querySelector("#vaultTargetPlayer option[value='0']")));
-    await desktop.selectOption("#vaultTargetPlayer", "0");
+    await desktop.check('#vaultGrantForm input[name="targetMode"][value="all-registered"]', { force: true });
+    await desktop.waitForFunction(() => document.querySelector('#vaultPlayerHint').textContent.includes('全部 2 名已登记玩家'));
     await desktop.fill("#vaultGrantForm input[name='count']", "2");
     await desktop.click("#vaultGrantForm button[type='submit']");
-    await desktop.waitForFunction(() => document.querySelector("#vaultGrantHistory")?.textContent.includes("已送达"), null, { timeout: 7000 });
+    await desktop.waitForFunction(() => (document.querySelector("#vaultGrantHistory")?.textContent.match(/已送达/g)||[]).length === 2, null, { timeout: 7000 });
     await desktop.screenshot({ path: path.join(__dirname, "admin-item-vault-desktop.png"), fullPage: true });
 
     const mobile = await browser.newPage({ viewport: { width: 390, height: 844 } });
@@ -143,14 +166,15 @@ const server = http.createServer(async (request, response) => {
     await mobile.screenshot({ path: path.join(__dirname, "admin-item-vault-mobile.png"), fullPage: true });
 
     if (errors.length) throw new Error(errors.join("\n"));
-    if (!grantBody || grantBody.targetUsername !== "TargetPlayer" || grantBody.targetSteamId !== "76561198000000002" || grantBody.count !== 2) throw new Error("Grant request did not preserve the selected player identity and count.");
+    if (!grantBody || grantBody.targetMode !== "all-registered" || grantBody.confirmedTargetCount !== 2 || grantBody.confirm !== "GRANT_ADMIN_VAULT_ITEM_BULK" || grantBody.count !== 2) throw new Error("Bulk grant request did not preserve mode, target count and confirmation.");
     if (grantBody.templateId !== containerTemplate.templateId) throw new Error("Container template was not selected for grant.");
     if (receiptReads < 1) throw new Error("Receipt polling did not run.");
+    if (playerSearchState.options.length !== 2 || !playerSearchState.options[1].includes('HistoryPlayer') || !playerSearchState.hint.includes('当前匹配 1 人')) throw new Error(`Vault player search failed: ${JSON.stringify(playerSearchState)}`);
     if (desktopLayout.some(row => row.scrollWidth > row.width + 1 && row.selector !== "#view-vault")) throw new Error(`Desktop horizontal overflow: ${JSON.stringify(desktopLayout)}`);
     if (mobileOverflow.body > 1 || mobileOverflow.detail > 1) throw new Error(`Mobile horizontal overflow: ${JSON.stringify(mobileOverflow)}`);
-    console.log(JSON.stringify({ ok: true, grantBody, receiptReads, desktopLayout, mobileOverflow }, null, 2));
+    console.log(JSON.stringify({ ok: true, grantBody, receiptReads, playerSearchState, desktopLayout, mobileOverflow }, null, 2));
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));
   }
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().catch(error => { console.error(error); if (errors.length) console.error(errors.join("\n")); process.exitCode = 1; });

@@ -16,7 +16,9 @@
 | `PZItemContainerCycleGuard` | 阻断物品或尸体容器所有者链的自身回指与循环递归 |
 | `PZEntityRegistrationGuard` | 忽略同一实体、状态一致的幂等重复注册 |
 | `PZItemPickInfoContainerFix` | 在掉落桶构建前注册 `inventorymale` 与 `inventoryfemale` |
-| `PZSelectiveWorldResetGuard` | 阻止已重置区块重新生成原版车辆，并按需重建对应 IsoRegion 缓存 |
+| `PZDryingCraftSyncThrottle` | 将晾晒进度改为20秒一次并只发送给位置相关玩家 |
+| `PZPacketRoutingOptimization` | 过滤远端世界对象广播并合并抗体病历重复展示同步 |
+| `PZSelectiveWorldResetGuard` | 阻止已重置区块重新生成原版车辆；IsoRegion 完全交由原版自然重建 |
 | `PZTimedActionIsolationFix` | 按玩家动作实例停止联机读条，避免动作编号撞号互相取消 |
 | `PZSpriteConfigAliasPatch` | 将已确认的合法动态贴图映射回实体定义后执行原版初始化 |
 
@@ -42,7 +44,8 @@ JAR 应放入 PZ 服务端运行目录的 `server-patches/`，并在 `zombie.net
 -javaagent:server-patches/补丁文件名.jar
 ```
 
-`PZServerStreamingStability` 与 `PZSpriteConfigAliasPatch` 还带参数，具体值和兼容边界请阅读
+`PZServerStreamingStability`、`PZSpriteConfigAliasPatch`、`PZDryingCraftSyncThrottle` 与
+`PZPacketRoutingOptimization` 还带参数，具体值和兼容边界请阅读
 各补丁自己的中文说明。Web 面板的“Java 补丁”页使用严格白名单管理这些参数，不热挂载，
 修改后必须完整重启对应游戏服务器。
 

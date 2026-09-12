@@ -15,6 +15,10 @@ public final class GameClassLoadSmokeTest {
                 "zombie.network.packets.character.PlayerDamagePacket",
                 true,
                 ClassLoader.getSystemClassLoader());
+        Class.forName(
+                "zombie.network.packets.AddExplosiveTrapPacket",
+                true,
+                ClassLoader.getSystemClassLoader());
         System.out.println("GameClassLoadSmokeTest passed");
     }
 }

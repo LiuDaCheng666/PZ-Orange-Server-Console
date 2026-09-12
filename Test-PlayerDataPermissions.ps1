@@ -17,12 +17,20 @@ function Import-PanelFunction {
     Set-Item -LiteralPath "Function:\script:$Name" -Value $functionAst.Body.GetScriptBlock()
 }
 
-foreach ($name in @('Get-PublicUser', 'Test-PlayerDataPermission', 'Assert-PlayerDataPermission', 'Assert-HostControlAdministrator')) {
+foreach ($name in @('Get-PublicUser', 'Test-PlayerDataPermission', 'Assert-PlayerDataPermission',
+        'Test-EconomyViewPermission', 'Assert-EconomyViewPermission',
+        'Test-EconomyManagePermission', 'Assert-EconomyManagePermission',
+        'Assert-HostControlAdministrator')) {
     Import-PanelFunction -Name $name
 }
 
 function New-TestSession {
-    param([string]$Username, [AllowNull()][Nullable[bool]]$CanManagePlayerData = $null)
+    param(
+        [string]$Username,
+        [AllowNull()][Nullable[bool]]$CanManagePlayerData = $null,
+        [AllowNull()][Nullable[bool]]$CanViewEconomy = $null,
+        [AllowNull()][Nullable[bool]]$CanManageEconomy = $null
+    )
     $user = [pscustomobject]@{
         id = [guid]::NewGuid().ToString('N')
         username = $Username
@@ -34,6 +42,12 @@ function New-TestSession {
     if ($null -ne $CanManagePlayerData) {
         $user | Add-Member -NotePropertyName canManagePlayerData -NotePropertyValue ([bool]$CanManagePlayerData)
     }
+    if ($null -ne $CanViewEconomy) {
+        $user | Add-Member -NotePropertyName canViewEconomy -NotePropertyValue ([bool]$CanViewEconomy)
+    }
+    if ($null -ne $CanManageEconomy) {
+        $user | Add-Member -NotePropertyName canManageEconomy -NotePropertyValue ([bool]$CanManageEconomy)
+    }
     return [pscustomobject]@{ user = $user }
 }
 
@@ -41,6 +55,8 @@ $admin = New-TestSession -Username 'admin'
 $legacyUser = New-TestSession -Username 'legacy-user'
 $grantedUser = New-TestSession -Username 'operator' -CanManagePlayerData $true
 $deniedUser = New-TestSession -Username 'viewer' -CanManagePlayerData $false
+$economyViewer = New-TestSession -Username 'economy-viewer' -CanViewEconomy $true -CanManageEconomy $false
+$economyManager = New-TestSession -Username 'economy-manager' -CanViewEconomy $false -CanManageEconomy $true
 
 if (-not (Test-PlayerDataPermission $admin)) { throw 'The reserved admin account lost player-data permission.' }
 if (Test-PlayerDataPermission $legacyUser) { throw 'A legacy user without the permission field was granted access.' }
@@ -58,11 +74,38 @@ $hostDenied = $false
 try { Assert-HostControlAdministrator $grantedUser } catch { $hostDenied = $true }
 if (-not $hostDenied) { throw 'Player-data permission incorrectly granted host-control administration.' }
 
+if (-not (Test-EconomyViewPermission $admin) -or -not (Test-EconomyManagePermission $admin)) {
+    throw 'The reserved admin account lost economy permissions.'
+}
+if ((Test-EconomyViewPermission $legacyUser) -or (Test-EconomyManagePermission $legacyUser)) {
+    throw 'A legacy user without economy fields was granted access.'
+}
+if (-not (Test-EconomyViewPermission $economyViewer) -or (Test-EconomyManagePermission $economyViewer)) {
+    throw 'Economy view-only permission is inconsistent.'
+}
+if (-not (Test-EconomyViewPermission $economyManager) -or -not (Test-EconomyManagePermission $economyManager)) {
+    throw 'Economy management permission did not imply view permission.'
+}
+Assert-EconomyViewPermission $economyViewer
+$economyManageDenied = $false
+try { Assert-EconomyManagePermission $economyViewer } catch { $economyManageDenied = $true }
+if (-not $economyManageDenied) { throw 'Economy view-only user was allowed to manage economy data.' }
+Assert-EconomyViewPermission $economyManager
+Assert-EconomyManagePermission $economyManager
+
 $publicAdmin = Get-PublicUser $admin.user
 $publicGranted = Get-PublicUser $grantedUser.user
 $publicLegacy = Get-PublicUser $legacyUser.user
+$publicEconomyViewer = Get-PublicUser $economyViewer.user
+$publicEconomyManager = Get-PublicUser $economyManager.user
 if (-not $publicAdmin.canManagePlayerData -or -not $publicGranted.canManagePlayerData -or $publicLegacy.canManagePlayerData) {
     throw 'Public user permission serialization is inconsistent.'
+}
+if (-not $publicAdmin.canViewEconomy -or -not $publicAdmin.canManageEconomy -or
+        $publicLegacy.canViewEconomy -or $publicLegacy.canManageEconomy -or
+        -not $publicEconomyViewer.canViewEconomy -or $publicEconomyViewer.canManageEconomy -or
+        -not $publicEconomyManager.canViewEconomy -or -not $publicEconomyManager.canManageEconomy) {
+    throw 'Public economy permission serialization is inconsistent.'
 }
 
 [pscustomobject]@{
@@ -72,4 +115,8 @@ if (-not $publicAdmin.canManagePlayerData -or -not $publicGranted.canManagePlaye
     grantedUserAllowed = $true
     deniedUserRejected = $true
     hostControlRemainsAdminOnly = $true
+    economyAdminAlwaysAllowed = $true
+    economyLegacyDefaultsDenied = $true
+    economyViewAndManageSeparated = $true
+    economyManageImpliesView = $true
 } | ConvertTo-Json

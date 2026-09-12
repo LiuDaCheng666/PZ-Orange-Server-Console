@@ -1,4 +1,5 @@
 Manifest-Version: 1.0
 Premain-Class: cn.zombiecommunity.pzactionisolation.PZTimedActionIsolationFixAgent
+Implementation-Version: 2.0.0
 Can-Redefine-Classes: false
 Can-Retransform-Classes: false

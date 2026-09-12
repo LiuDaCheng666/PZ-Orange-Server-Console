@@ -23,12 +23,13 @@ $economyStateMaximumBytes = 4MB
 $economyBridgeFreshnessMilliseconds = 30000
 $economyCommandCompactBytes = 512KB
 $economyRequestRateEvents = [Collections.Generic.List[object]]::new()
+$communityStateMaximumBytes = 4MB
+$communityBridgeFreshnessMilliseconds = 90000
+$communityCommandCompactBytes = 512KB
+$communityRequestRateEvents = [Collections.Generic.List[object]]::new()
+$communityStateFileCache = @{}
 $disasterCenterRoot = Join-Path $root "disaster-center"
 $disasterCenterStorePath = Join-Path $disasterCenterRoot "store.json"
-$communityStateMaximumBytes = 4MB
-$communityQueueMaximumBytes = 512KB
-$communityCommandCompactBytes = 256KB
-$communityBridgeFreshnessMilliseconds = 45000
 $managedRoot = Join-Path $root "managed"
 $managedHostPath = Join-Path $managedRoot "Run-ManagedPZHost.ps1"
 $managedLifecyclePath = Join-Path $managedRoot "Invoke-ManagedPZLifecycle.ps1"
@@ -569,7 +570,8 @@ function New-DefaultMaintenanceSchedule {
     return [pscustomobject][ordered]@{
         serverId = $ServerId
         enabled = $false
-        intervalHours = 3
+        intervalMinutes = 15
+        intervalHours = 0.25
         autoRestartOnUpdate = $false
         restartStabilizationSeconds = 60
         nextRunAt = $null
@@ -595,11 +597,17 @@ function Read-MaintenanceSchedules {
             foreach ($property in $document.servers.PSObject.Properties) {
                 $saved = $property.Value
                 $schedule = New-DefaultMaintenanceSchedule -ServerId ([string]$property.Name)
-                foreach ($name in @("enabled", "intervalHours", "autoRestartOnUpdate", "restartStabilizationSeconds", "nextRunAt", "lastRunAt", "lastStatus", "lastResultCode", "lastMessage", "lastRequestId", "updateNotificationPending", "lastNotificationAt", "lastAutoRestartAt", "lastAutoRestartOperationId", "lastAutoRestartStatus")) {
+                foreach ($name in @("enabled", "intervalMinutes", "intervalHours", "autoRestartOnUpdate", "restartStabilizationSeconds", "nextRunAt", "lastRunAt", "lastStatus", "lastResultCode", "lastMessage", "lastRequestId", "updateNotificationPending", "lastNotificationAt", "lastAutoRestartAt", "lastAutoRestartOperationId", "lastAutoRestartStatus")) {
                     if ($saved.PSObject.Properties[$name]) { $schedule.$name = $saved.$name }
                 }
                 $schedule.enabled = [bool]$schedule.enabled
-                $schedule.intervalHours = [math]::Max(1, [math]::Min(168, [int]$schedule.intervalHours))
+                $intervalMinutes = if ($saved.PSObject.Properties["intervalMinutes"]) {
+                    [int]$saved.intervalMinutes
+                } elseif ($saved.PSObject.Properties["intervalHours"]) {
+                    [int][math]::Round(([double]$saved.intervalHours) * 60)
+                } else { 15 }
+                $schedule.intervalMinutes = [math]::Max(15, [math]::Min(10080, $intervalMinutes))
+                $schedule.intervalHours = [double]$schedule.intervalMinutes / 60
                 $schedule.autoRestartOnUpdate = [bool]$schedule.autoRestartOnUpdate
                 $schedule.restartStabilizationSeconds = [math]::Max(10, [math]::Min(600, [int]$schedule.restartStabilizationSeconds))
                 $schedule.updateNotificationPending = [bool]$schedule.updateNotificationPending
@@ -910,11 +918,18 @@ function Save-CommunityUsers {
 }
 
 function New-CommunityUser {
-    param([string]$Username, [string]$DisplayName, [string]$Password, [bool]$Enabled = $true)
+    param(
+        [string]$Username,
+        [string]$DisplayName,
+        [string]$Password,
+        [bool]$Enabled = $true,
+        [bool]$CanManageMaintenance = $false
+    )
     $user = New-PanelUser -Username $Username -DisplayName $DisplayName -Password $Password -Enabled $Enabled
     $user.PSObject.Properties.Remove("canManagePlayerData")
     $user.PSObject.Properties.Remove("canViewEconomy")
     $user.PSObject.Properties.Remove("canManageEconomy")
+    $user | Add-Member -NotePropertyName canManageMaintenance -NotePropertyValue $CanManageMaintenance
     return $user
 }
 
@@ -925,8 +940,18 @@ function Get-PublicCommunityUser {
         username = [string]$User.username
         displayName = [string]$User.displayName
         enabled = [bool]$User.enabled
+        canManageMaintenance = [bool]$User.canManageMaintenance
         createdAt = [string]$User.createdAt
         updatedAt = [string]$User.updatedAt
+    }
+}
+
+function Assert-CommunityMaintenancePermission {
+    param($Session)
+    if (-not $Session -or -not [bool]$Session.user.canManageMaintenance) {
+        $exception = [UnauthorizedAccessException]::new("当前专属账号没有服务器维护权限。")
+        $exception.Data["HttpStatusCode"] = 403
+        throw $exception
     }
 }
 
@@ -1225,6 +1250,8 @@ function Set-KnownServerPatchAgentArguments {
         $fileName = [string]$definition.fileName
         $pattern = '(?i)(?:^|\s)-javaagent:(?:"?)[^\s"]*' + [regex]::Escape($fileName) + '(?:=[^\s"]+)?'
         $result = ([regex]::Replace($result, $pattern, ' ') -replace '\s+', ' ').Trim()
+        $serverIdsProperty = $definition.PSObject.Properties['serverIds']
+        if ($serverIdsProperty -and @($serverIdsProperty.Value) -notcontains [string]$Profile.id) { continue }
         $record = $Configuration.patches.PSObject.Properties[[string]$definition.id].Value
         if (-not $record -or -not [bool]$record.enabled) { continue }
         $jarPath = Join-Path ([string]$Profile.runtimeRoot) "server-patches\$fileName"
@@ -2510,6 +2537,7 @@ function Get-ServerState {
         adminSetupRequired = [bool]$adminSetupRequired
         canStop = [bool]($Profile.stopScript -and $writable)
         canRestart = [bool]($restartScriptReady -and $writable)
+        canForceStop = [bool]((Test-IsManagedProfile -Profile $Profile) -and ($process -or $hostProcess -or $lifecycleBusy))
         note = $note
     }
 }
@@ -3048,6 +3076,41 @@ function Get-ChunkRecoveryTransactions {
         } | Sort-Object createdAt -Descending)
 }
 
+function Remove-ChunkRecoveryTransaction {
+    param($Profile, [string]$TransactionId)
+    if ([string]::IsNullOrWhiteSpace($TransactionId)) { throw "请选择要删除的恢复历史。" }
+    $paths = Get-ChunkRecoveryPaths -Profile $Profile
+    $status = Complete-ChunkRecoveryStatus -Profile $Profile
+    if ($status -and [string]$status.state -in @("running", "finalizing")) { throw "区块恢复任务运行期间不能删除历史。" }
+    $transaction = Get-ChunkRecoveryTransactions -Profile $Profile | Where-Object { [string]$_.id -ceq $TransactionId } | Select-Object -First 1
+    if (-not $transaction) { throw "没有找到所选恢复历史，可能已被删除。" }
+
+    $recoveryRoot = [IO.Path]::GetFullPath([string]$paths.recoveryRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $operationRoot = [IO.Path]::GetFullPath((Split-Path -Parent ([string]$transaction.transactionDir))).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $expectedPrefix = "$($Profile.serverName)-chunk-recovery-"
+    if (-not [string]::Equals([IO.Path]::GetDirectoryName($operationRoot), $recoveryRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        -not ([IO.Path]::GetFileName($operationRoot)).StartsWith($expectedPrefix, [StringComparison]::Ordinal)) {
+        throw "恢复历史路径未通过安全边界校验，拒绝删除。"
+    }
+    $manifest = Read-MapResetJson -Path (Join-Path ([string]$transaction.transactionDir) "chunk-recovery-transaction.json")
+    if (-not $manifest -or [string]$manifest.serverName -cne [string]$Profile.serverName) { throw "恢复事务所属服务器不匹配，拒绝删除。" }
+
+    $files = @(Get-ChildItem -LiteralPath $operationRoot -File -Recurse -ErrorAction Stop)
+    $removedBytes = [long](($files | Measure-Object -Property Length -Sum).Sum)
+    Remove-Item -LiteralPath $operationRoot -Recurse -Force -ErrorAction Stop
+
+    $statusTransactionDir = if ($status -and $status.result -and $status.result.PSObject.Properties["transactionDir"]) { [string]$status.result.transactionDir } else { "" }
+    if ($statusTransactionDir -and [string]::Equals([IO.Path]::GetFullPath($statusTransactionDir), [IO.Path]::GetFullPath([string]$transaction.transactionDir), [StringComparison]::OrdinalIgnoreCase)) {
+        $panelOperationRoot = if ($status.operationRoot) { [IO.Path]::GetFullPath([string]$status.operationRoot) } else { "" }
+        $operationsRoot = [IO.Path]::GetFullPath([string]$paths.operationsRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        if ($panelOperationRoot -and [string]::Equals([IO.Path]::GetDirectoryName($panelOperationRoot), $operationsRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $panelOperationRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $paths.statusPath -Force -ErrorAction SilentlyContinue
+    }
+    return [pscustomobject][ordered]@{ id = $TransactionId; removedBytes = $removedBytes; chunks = @($transaction.chunks) }
+}
+
 function Get-LatestChunkIntegrityReport {
     param($Profile)
     $paths = Get-ChunkRecoveryPaths -Profile $Profile
@@ -3571,6 +3634,41 @@ function Add-AdminItemVaultJsonLine {
     throw "无法写入目标服务器的保险库队列：$($lastError.Exception.Message)"
 }
 
+function Add-AdminItemVaultJsonLines {
+    param([string]$Path, [object[]]$Values)
+    $rows = [Collections.Generic.List[string]]::new()
+    $totalBytes = 0L
+    foreach ($value in @($Values)) {
+        $json = $value | ConvertTo-Json -Depth 32 -Compress
+        $lineBytes = $utf8.GetByteCount($json + "`n")
+        if ($lineBytes -gt 2097152) { throw "管理员物品保险库单个请求超过 2 MiB，已拒绝批量写入。" }
+        $totalBytes += $lineBytes
+        if ($totalBytes -gt 134217728) { throw "管理员物品保险库批量请求超过 128 MiB，请减少目标人数或缩小模板内容。" }
+        $rows.Add($json)
+    }
+    if ($rows.Count -eq 0) { return }
+    $bytes = $utf8.GetBytes(($rows -join "`n") + "`n")
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    $lastError = $null
+    for ($attempt = 0; $attempt -lt 4; $attempt++) {
+        try {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+            try {
+                [void]$stream.Seek(0, [IO.SeekOrigin]::End)
+                $stream.Write($bytes, 0, $bytes.Length)
+                $stream.Flush($true)
+            }
+            finally { $stream.Dispose() }
+            return
+        }
+        catch {
+            $lastError = $_
+            Start-Sleep -Milliseconds (40 * ($attempt + 1))
+        }
+    }
+    throw "无法批量写入目标服务器的保险库队列：$($lastError.Exception.Message)"
+}
+
 function Test-AdminItemVaultTemplateRecord {
     param($Record)
     if (-not $Record -or [int]$Record.schema -ne 1) { return $false }
@@ -3807,65 +3905,151 @@ function Invoke-AdminItemVaultSync {
     return $payload
 }
 
+function Resolve-AdminItemVaultGrantTargets {
+    param($Body, $Directory)
+    $mode = ([string]$Body.targetMode).Trim().ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($mode)) { $mode = "single" }
+    if ($mode -notin @("single", "selected", "all-online", "all-registered")) { throw "保险库发放对象模式无效。" }
+    if ($mode -eq "all-online" -and -not [bool]$Directory.onlineKnown) { throw "当前无法确认在线玩家，已拒绝全部在线发放。" }
+
+    $validPlayers = @($Directory.players | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.username) -and [string]$_.steamId -match '^7656119\d{10}$'
+    })
+    $resolved = [Collections.Generic.List[object]]::new()
+    $seenSteamIds = @{}
+    if ($mode -in @("all-online", "all-registered")) {
+        $candidates = if ($mode -eq "all-online") { @($validPlayers | Where-Object { [bool]$_.online }) } else { $validPlayers }
+        $candidates = @($candidates | Sort-Object @{ Expression = { [bool]$_.online }; Descending = $true }, @{ Expression = { [string]$_.lastConnection }; Descending = $true }, username)
+        foreach ($player in $candidates) {
+            $steamId = [string]$player.steamId
+            if ($seenSteamIds.ContainsKey($steamId)) { continue }
+            $seenSteamIds[$steamId] = $true
+            $resolved.Add([pscustomobject]@{ username = [string]$player.username; steamId = $steamId; online = [bool]$player.online })
+        }
+    }
+    else {
+        $requestedTargets = if ($mode -eq "single") {
+            @([pscustomobject]@{ username = [string]$Body.targetUsername; steamId = [string]$Body.targetSteamId })
+        }
+        else { @($Body.targets) }
+        if ($mode -eq "selected" -and $requestedTargets.Count -eq 0) { throw "请至少选择一名玩家。" }
+        foreach ($requested in $requestedTargets) {
+            $username = Assert-SimpleText -Value ([string]$requested.username) -Name "目标玩家名" -MaxLength 64
+            $steamId = ([string]$requested.steamId).Trim()
+            if ($steamId -notmatch '^7656119\d{10}$') { throw "目标 SteamID64 格式无效。" }
+            $player = $validPlayers | Where-Object { [string]$_.username -ceq $username -and [string]$_.steamId -ceq $steamId } | Select-Object -First 1
+            if (-not $player) { throw "玩家 $username 与 SteamID $steamId 未在该服务器目录中形成同一条记录，已拒绝发放。" }
+            if ($seenSteamIds.ContainsKey($steamId)) { continue }
+            $seenSteamIds[$steamId] = $true
+            $resolved.Add([pscustomobject]@{ username = [string]$player.username; steamId = $steamId; online = [bool]$player.online })
+        }
+    }
+    if ($resolved.Count -eq 0) { throw $(if ($mode -eq "all-online") { "当前没有可发放的在线玩家。" } else { "没有找到已登记 SteamID 的目标玩家。" }) }
+    if ($resolved.Count -gt 500) { throw "单次保险库批量发放最多支持 500 名玩家，当前目标为 $($resolved.Count) 人。" }
+    return [pscustomobject]@{ mode = $mode; targets = @($resolved) }
+}
+
 function Add-AdminItemVaultGrant {
     param($Body, [string]$Remote, [string]$RequestedBy)
-    if ([string]$Body.confirm -cne "GRANT_ADMIN_VAULT_ITEM") { throw "跨服发放需要二次确认。" }
     $profile = Get-ServerProfile -Id ([string]$Body.serverId)
     $templateId = Assert-SimpleText -Value ([string]$Body.templateId) -Name "模板 ID" -MaxLength 96
     if ($templateId -notmatch '^vault-template-[a-f0-9]{16}$') { throw "模板 ID 格式无效。" }
-    $username = Assert-SimpleText -Value ([string]$Body.targetUsername) -Name "目标玩家名" -MaxLength 64
-    $steamId = ([string]$Body.targetSteamId).Trim()
-    if ($steamId -notmatch '^7656119\d{10}$') { throw "目标 SteamID64 格式无效。" }
     $count = [int]$Body.count
     if ($count -lt 1 -or $count -gt 10 -or [double]$Body.count -ne $count) { throw "发放数量必须是 1 至 10 的整数。" }
-
     $import = Import-AdminItemVaultTemplates -Remote $Remote -RequestedBy $RequestedBy
     $store = $import.store
     $template = $store.templates | Where-Object { [string]$_.templateId -ceq $templateId } | Select-Object -First 1
     if (-not $template) { throw "保险库模板不存在或已删除。" }
     $directory = Get-PlayerDirectory -Profile $profile
-    $player = $directory.players | Where-Object {
-        [string]$_.username -ceq $username -and [string]$_.steamId -ceq $steamId
-    } | Select-Object -First 1
-    if (-not $player) { throw "目标玩家名与 SteamID 未在该服务器玩家目录中形成同一条记录，已拒绝发放。" }
+    $selection = Resolve-AdminItemVaultGrantTargets -Body $Body -Directory $directory
+    $bulk = [string]$selection.mode -ne "single"
+    $expectedConfirm = if ($bulk) { "GRANT_ADMIN_VAULT_ITEM_BULK" } else { "GRANT_ADMIN_VAULT_ITEM" }
+    if ([string]$Body.confirm -cne $expectedConfirm) { throw "跨服发放需要二次确认。" }
+    if ($bulk -and [int]$Body.confirmedTargetCount -ne $selection.targets.Count) { throw "目标玩家人数已变化，请核对最新名单后重新确认。" }
+    $submissionId = ([string]$Body.submissionId).Trim().ToLowerInvariant()
+    if ($submissionId -and $submissionId -notmatch '^[a-f0-9]{32}$') { throw "保险库提交 ID 格式无效。" }
+    if ($submissionId) {
+        $existing = @($store.grants | Where-Object { [string]$_.submissionId -ceq $submissionId })
+        if ($existing.Count -gt 0) {
+            return [ordered]@{
+                ok = $true
+                duplicate = $true
+                message = "该批保险库发放已经提交过，未重复写入队列。"
+                targetMode = [string]$selection.mode
+                targetCount = $existing.Count
+                grant = if ($existing.Count -eq 1) { $existing[0] } else { $null }
+                grants = $existing
+            }
+        }
+    }
 
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    $requestId = "vault-grant-$([guid]::NewGuid().ToString('N'))"
-    $queueRow = [ordered]@{
-        schema = 1
-        hashVersion = if ($null -ne $template.PSObject.Properties['hashVersion']) { [int]$template.hashVersion } else { 1 }
-        requestId = $requestId
-        templateId = $templateId
-        targetUsername = $username
-        targetSteamId = $steamId
-        count = $count
-        snapshot = $template.snapshot
-        snapshotHash = [string]$template.snapshotHash
-        createdMs = $now
-        expiresMs = $now + [timespan]::FromDays(30).TotalMilliseconds
+    $batchId = if ($bulk) { "vault-batch-$([guid]::NewGuid().ToString('N'))" } else { $null }
+    $queueRows = [Collections.Generic.List[object]]::new()
+    $grants = [Collections.Generic.List[object]]::new()
+    foreach ($target in $selection.targets) {
+        $requestId = "vault-grant-$([guid]::NewGuid().ToString('N'))"
+        $queueRows.Add([ordered]@{
+            schema = 1
+            hashVersion = if ($null -ne $template.PSObject.Properties['hashVersion']) { [int]$template.hashVersion } else { 1 }
+            requestId = $requestId
+            templateId = $templateId
+            targetUsername = [string]$target.username
+            targetSteamId = [string]$target.steamId
+            count = $count
+            snapshot = $template.snapshot
+            snapshotHash = [string]$template.snapshotHash
+            createdMs = $now
+            expiresMs = $now + [timespan]::FromDays(30).TotalMilliseconds
+        })
+        $grants.Add([pscustomobject][ordered]@{
+            requestId = $requestId
+            batchId = $batchId
+            submissionId = $submissionId
+            templateId = $templateId
+            serverId = [string]$profile.id
+            serverName = [string]$profile.name
+            targetUsername = [string]$target.username
+            targetSteamId = [string]$target.steamId
+            count = $count
+            status = "queued"
+            detail = "waiting_for_server"
+            delivered = 0
+            createdMs = $now
+            updatedMs = $now
+            requestedBy = $RequestedBy
+        })
     }
     $paths = Get-AdminItemVaultProfilePaths -Profile $profile
-    Add-AdminItemVaultJsonLine -Path $paths.import -Value $queueRow
-    $grant = [pscustomobject][ordered]@{
-        requestId = $requestId
-        templateId = $templateId
-        serverId = [string]$profile.id
-        serverName = [string]$profile.name
-        targetUsername = $username
-        targetSteamId = $steamId
-        count = $count
-        status = "queued"
-        detail = "waiting_for_server"
-        delivered = 0
-        createdMs = $now
-        updatedMs = $now
-        requestedBy = $RequestedBy
-    }
-    $store.grants = @($store.grants) + @($grant)
+    Add-AdminItemVaultJsonLines -Path $paths.import -Values @($queueRows)
+    $store.grants = @($store.grants) + @($grants)
     if ($store.grants.Count -gt 500) { $store.grants = @($store.grants | Select-Object -Last 500) }
     Save-AdminItemVaultStore -Store $store
-    Add-Audit -Remote $Remote -Action "admin-item-vault-grant" -Detail "requestId=$requestId templateId=$templateId server=$($profile.id) username=$username steamId=$steamId count=$count requestedBy=$RequestedBy" -Result "queued"
-    return [ordered]@{ ok = $true; message = "发放请求已写入 $($profile.name) 队列。在线玩家通常数秒内收到，离线玩家将在下次上线后收到。"; grant = $grant }
+    Add-Audit -Remote $Remote -Action "admin-item-vault-grant" -Detail "batchId=$batchId submissionId=$submissionId templateId=$templateId server=$($profile.id) targetMode=$($selection.mode) targets=$($grants.Count) count=$count requestedBy=$RequestedBy" -Result "queued"
+    return [ordered]@{
+        ok = $true
+        message = "已向 $($profile.name) 的 $($grants.Count) 名玩家写入保险库发放队列。在线玩家通常数秒内收到，离线玩家将在下次上线后收到。"
+        targetMode = [string]$selection.mode
+        targetCount = $grants.Count
+        batchId = $batchId
+        grant = if ($grants.Count -eq 1) { $grants[0] } else { $null }
+        grants = @($grants)
+    }
+}
+
+function Get-AdminItemVaultReceiptBatchPayload {
+    param($Body)
+    $requestIds = @($Body.requestIds | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    if ($requestIds.Count -eq 0 -or $requestIds.Count -gt 100) { throw "保险库批量回执一次必须包含 1 至 100 个请求 ID。" }
+    foreach ($requestId in $requestIds) {
+        if ($requestId -notmatch '^vault-grant-[A-Za-z0-9-]+$') { throw "保险库请求 ID 格式无效。" }
+    }
+    $store = Read-AdminItemVaultStore
+    [void](Sync-AdminItemVaultReceipts -Store $store)
+    $wanted = @{}
+    foreach ($requestId in $requestIds) { $wanted[$requestId] = $true }
+    $grants = @($store.grants | Where-Object { $wanted.ContainsKey([string]$_.requestId) })
+    return [ordered]@{ ok = $true; requested = $requestIds.Count; found = $grants.Count; grants = $grants }
 }
 
 function Remove-AdminItemVaultTemplate {
@@ -4056,7 +4240,7 @@ function Read-EconomyRuntimeState {
     param($Profile)
     Assert-EconomyProfileDataRootUnique -Profile $Profile
     $paths = Get-EconomyProfilePaths -Profile $Profile
-    $selected, $failures = $null, @()
+    $states, $failures = @(), @()
     foreach ($path in @($paths.stateA, $paths.stateB, $paths.state)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
         try {
@@ -4078,13 +4262,11 @@ function Read-EconomyRuntimeState {
                         [string]::IsNullOrWhiteSpace($_) -or $_ -cne [string]$Profile.serverName
                     }).Count -gt 0) { throw "所属服务器不匹配。" }
             [void](Get-EconomyFiniteDouble -Value $state.updatedMs -Name "经济快照时间" -Minimum 1 -Maximum ([double]::MaxValue))
-            if (-not $selected -or [double]$state.updatedMs -gt [double]$selected.updatedMs) {
-                $selected = $state
-            }
+            $states += $state
         }
         catch { $failures += $_.Exception.Message }
     }
-    if ($selected) { return $selected }
+    if ($states.Count -gt 0) { return $states | Sort-Object { [double]$_.updatedMs } -Descending | Select-Object -First 1 }
     if ($failures.Count -gt 0) { throw "交易经济快照无效：$($failures[0])" }
     return $null
 }
@@ -4134,7 +4316,7 @@ function Add-EconomyJsonLine {
                         }
                     }
                     if ($stream.Length -gt 0 -and $lastByte -ne 10) { $lineCount++ }
-                    if ($ConsumedLines -eq $lineCount) { $stream.SetLength(0) }
+                    if ($ConsumedLines -ge $lineCount) { $stream.SetLength(0) }
                     elseif ($lineCount -ge 100000) { throw "交易经济队列已满，请等待 Mod 消费后重试。" }
                 }
                 [void]$stream.Seek(0, [IO.SeekOrigin]::End)
@@ -4367,6 +4549,466 @@ function Get-EconomyReceiptPayload {
     return [ordered]@{ ok = $true; requestId = $RequestId; status = [string]$latest.status; receipt = $latest }
 }
 
+function Get-CommunityProfilePaths {
+    param($Profile)
+    $luaRoot = Join-Path ([string]$Profile.dataRoot) "Lua"
+    return [pscustomobject]@{
+        command = Join-Path $luaRoot "OrangeCommunityEconomy-community-commands.txt"
+        receipt = Join-Path $luaRoot "OrangeCommunityEconomy-community-receipts.txt"
+        audit = Join-Path $luaRoot "OrangeCommunityEconomy-community-web-audit.txt"
+        state = Join-Path $luaRoot "OrangeCommunityEconomy-community-state.json"
+        stateA = Join-Path $luaRoot "OrangeCommunityEconomy-community-state-a.json"
+        stateB = Join-Path $luaRoot "OrangeCommunityEconomy-community-state-b.json"
+        ledgerA = Join-Path $luaRoot "OrangeCommunityEconomy-community-treasury-ledger-a.json"
+        ledgerB = Join-Path $luaRoot "OrangeCommunityEconomy-community-treasury-ledger-b.json"
+    }
+}
+
+function Read-CommunityStateFile {
+    param([string]$Path, $Profile)
+    $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ([int64]$file.Length -le 0 -or [int64]$file.Length -gt [int64]$communityStateMaximumBytes) {
+        throw "社区快照大小无效。"
+    }
+    $fingerprint = "$($file.Length):$($file.LastWriteTimeUtc.Ticks)"
+    $cached = $communityStateFileCache[$Path]
+    if ($cached -and [string]$cached.fingerprint -ceq $fingerprint) { return $cached.state }
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        if ($stream.Length -gt [int64]$communityStateMaximumBytes) { throw "社区快照超过 4 MiB。" }
+        $reader = [IO.StreamReader]::new($stream, $utf8, $true)
+        try { $state = $reader.ReadToEnd() | ConvertFrom-Json }
+        finally { $reader.Dispose() }
+    }
+    finally { if ($stream) { $stream.Dispose() } }
+    if (-not $state -or [int]$state.schema -ne 1) { throw "社区快照协议版本无效。" }
+    if ([string]::IsNullOrWhiteSpace([string]$state.server) -or
+            [string]$state.server -cne [string]$Profile.serverName) {
+        throw "社区快照所属服务器不匹配。"
+    }
+    [void](Get-EconomyFiniteDouble -Value $state.updatedMs -Name "社区快照时间" -Minimum 1 -Maximum ([double]::MaxValue))
+    $communityStateFileCache[$Path] = [pscustomobject]@{ fingerprint = $fingerprint; state = $state }
+    return $state
+}
+
+function Read-CommunityRuntimeState {
+    param($Profile)
+    Assert-EconomyProfileDataRootUnique -Profile $Profile
+    $paths = Get-CommunityProfilePaths -Profile $Profile
+    $candidatePaths = @($paths.stateA, $paths.stateB, $paths.state)
+    $candidates = @($candidatePaths | Where-Object {
+        Test-Path -LiteralPath $_ -PathType Leaf
+    } | ForEach-Object { Get-Item -LiteralPath $_ } | Sort-Object LastWriteTimeUtc -Descending)
+    $failures = @()
+    foreach ($file in $candidates) {
+        try { return Read-CommunityStateFile -Path $file.FullName -Profile $Profile }
+        catch { $failures += $_.Exception.Message }
+    }
+    if ($failures.Count -gt 0) { throw "社区快照无效：$($failures[0])" }
+    return $null
+}
+
+function Test-CommunityRuntimeStateFresh {
+    param($State, [int64]$NowMilliseconds = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+    if (-not $State) { return $false }
+    $updatedMs = [double]$State.updatedMs
+    return [bool]($updatedMs -le ($NowMilliseconds + 5000) -and
+        $updatedMs -ge ($NowMilliseconds - $communityBridgeFreshnessMilliseconds))
+}
+
+function Read-CommunityTreasuryLedgerState {
+    param($Profile)
+    $paths = Get-CommunityProfilePaths -Profile $Profile
+    $candidatePaths = @($paths.ledgerA, $paths.ledgerB)
+    $candidates = @($candidatePaths | Where-Object {
+        Test-Path -LiteralPath $_ -PathType Leaf
+    } | ForEach-Object { Get-Item -LiteralPath $_ } | Sort-Object LastWriteTimeUtc -Descending)
+    foreach ($file in $candidates) {
+        try {
+            $payload = Read-CommunityStateFile -Path $file.FullName -Profile $Profile
+            if ($payload.PSObject.Properties['rows']) { return $payload }
+        }
+        catch { continue }
+    }
+    return $null
+}
+
+function Copy-CommunitySectionWithoutProperty {
+    param($Section, [string[]]$Excluded)
+    if (-not $Section) { return $null }
+    $copy = [ordered]@{}
+    foreach ($property in $Section.PSObject.Properties) {
+        if ([string]$property.Name -notin $Excluded) { $copy[[string]$property.Name] = $property.Value }
+    }
+    return $copy
+}
+
+function Get-CommunityPublicSnapshot {
+    param($State)
+    if (-not $State) { return $null }
+    return [ordered]@{
+        schema = [int]$State.schema
+        server = [string]$State.server
+        updatedMs = [int64]$State.updatedMs
+        revision = [int64]$State.revision
+        revisionSignature = [string]$State.revisionSignature
+        governance = $State.governance
+        treasury = Copy-CommunitySectionWithoutProperty -Section $State.treasury -Excluded @('ledger')
+        projects = $State.projects
+        crisis = $State.crisis
+        honors = $State.honors
+        auction = $State.auction
+        disaster = $State.disaster
+        bridge = $State.bridge
+    }
+}
+
+function Get-CommunityJsonLines {
+    param([string]$Path, [int64]$MaximumBytes = 2097152)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    $tail = Read-Utf8Tail -Path $Path -MaxBytes $MaximumBytes
+    $rows = @()
+    foreach ($line in @($tail -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.Length -gt 1048576) { continue }
+        try { $row = $line | ConvertFrom-Json } catch { continue }
+        if ($row -and [int]$row.schema -eq 1) { $rows += $row }
+    }
+    return @($rows)
+}
+
+function Get-CommunityQueueRows {
+    param($Profile, [int]$MaximumRows = 40)
+    $paths = Get-CommunityProfilePaths -Profile $Profile
+    $commands = @(Get-CommunityJsonLines -Path $paths.command -MaximumBytes 524288 | Where-Object {
+        [string]$_.expectedServerName -ceq [string]$Profile.serverName
+    })
+    $receiptById = @{}
+    foreach ($receipt in @(Get-CommunityJsonLines -Path $paths.receipt)) {
+        if ([string]$receipt.server -ceq [string]$Profile.serverName -or
+                [string]$receipt.expectedServerName -ceq [string]$Profile.serverName) {
+            $receiptById[[string]$receipt.requestId] = $receipt
+        }
+    }
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $start = [math]::Max(0, $commands.Count - $MaximumRows)
+    $result = @()
+    for ($index = $commands.Count - 1; $index -ge $start; $index--) {
+        $command = $commands[$index]
+        $receipt = $receiptById[[string]$command.requestId]
+        $status = if ($receipt) { [string]$receipt.status }
+            elseif ([int64]$command.expiresMs -lt $now) { 'expired' } else { 'waiting' }
+        $result += [ordered]@{
+            requestId = [string]$command.requestId
+            operation = [string]$command.operation
+            requestedBy = [string]$command.requestedBy
+            reason = [string]$command.reason
+            createdMs = [int64]$command.createdMs
+            expiresMs = [int64]$command.expiresMs
+            status = $status
+            code = if ($receipt) { [string]$receipt.code } else { '' }
+            detail = if ($receipt) { [string]$receipt.detail } else { '' }
+        }
+    }
+    return @($result)
+}
+
+function Get-CommunityPayload {
+    param($Profile, $Session)
+    $snapshot = Read-CommunityRuntimeState -Profile $Profile
+    $runtime = Get-ServerState -Profile $Profile
+    $fresh = Test-CommunityRuntimeStateFresh -State $snapshot
+    $consumer = [bool]($snapshot -and $snapshot.bridge -and $snapshot.bridge.commandConsumer -eq $true -and
+        [int]$snapshot.bridge.commandSchema -eq 1)
+    $status = if ($fresh -and $consumer) { 'connected' } elseif ($snapshot) { 'snapshot_only' } else { 'awaiting_mod_bridge' }
+    return [ordered]@{
+        ok = $true
+        server = [ordered]@{ id = [string]$Profile.id; name = [string]$Profile.name;
+            serverName = [string]$Profile.serverName; alive = [bool]$runtime.alive }
+        stale = [bool](-not $fresh)
+        bridge = [ordered]@{ status = $status; stale = [bool](-not $fresh);
+            message = if (-not $snapshot) { '当前服务器尚未生成社区状态文件。' }
+                elseif (-not $fresh) { '社区状态文件已过期，请检查服务器 Mod 是否正常运行。' }
+                elseif (-not $consumer) { '社区状态可读，但当前 Mod 未声明命令消费器。' } else { '' } }
+        snapshot = Get-CommunityPublicSnapshot -State $snapshot
+        queue = @(Get-CommunityQueueRows -Profile $Profile)
+        canManage = [bool](Test-EconomyManagePermission -Session $Session)
+    }
+}
+
+function Assert-CommunityRequestRateLimit {
+    param([string]$RequestedBy, [datetime]$Now = [DateTime]::UtcNow)
+    for ($index = $communityRequestRateEvents.Count - 1; $index -ge 0; $index--) {
+        if (($Now - [datetime]$communityRequestRateEvents[$index].at).TotalSeconds -ge 60) {
+            $communityRequestRateEvents.RemoveAt($index)
+        }
+    }
+    $userKey = $RequestedBy.Trim().ToLowerInvariant()
+    $userCount = @($communityRequestRateEvents | Where-Object { [string]$_.user -ceq $userKey }).Count
+    if ($communityRequestRateEvents.Count -ge 120 -or $userCount -ge 12) {
+        Throw-EconomyHttpError -StatusCode 429 -Message "社区管理请求过于频繁，请稍后再试。"
+    }
+    $communityRequestRateEvents.Add([pscustomobject]@{ at = $Now; user = $userKey })
+}
+
+function Add-CommunityJsonLine {
+    param([string]$Path, $Value, [int64]$ConsumedLines = 0)
+    $json = $Value | ConvertTo-Json -Depth 20 -Compress
+    $bytes = $utf8.GetBytes($json + "`n")
+    if ($bytes.Length -gt 65536) { throw "社区管理请求超过 64 KiB，已拒绝写入。" }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    $lastError = $null
+    for ($attempt = 0; $attempt -lt 4; $attempt++) {
+        try {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+            try {
+                if ($stream.Length -ge $communityCommandCompactBytes) {
+                    [void]$stream.Seek(0, [IO.SeekOrigin]::Begin)
+                    $buffer, $lineCount, $lastByte = [byte[]]::new(65536), 0L, -1
+                    while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        for ($index = 0; $index -lt $read; $index++) {
+                            $lastByte = $buffer[$index]
+                            if ($lastByte -eq 10) { $lineCount++ }
+                        }
+                    }
+                    if ($stream.Length -gt 0 -and $lastByte -ne 10) { $lineCount++ }
+                    if ($ConsumedLines -ge $lineCount) { $stream.SetLength(0) }
+                    elseif ($lineCount -ge 100000) { throw "社区命令队列已满，请等待 Mod 消费后重试。" }
+                }
+                [void]$stream.Seek(0, [IO.SeekOrigin]::End)
+                $stream.Write($bytes, 0, $bytes.Length)
+                $stream.Flush($true)
+            }
+            finally { $stream.Dispose() }
+            return
+        }
+        catch { $lastError = $_; Start-Sleep -Milliseconds (40 * ($attempt + 1)) }
+    }
+    throw "无法写入目标服务器的社区命令队列：$($lastError.Exception.Message)"
+}
+
+function Get-CommunityCommandArguments {
+    param([string]$Operation, $Arguments)
+    $args = if ($Arguments) { $Arguments } else { [pscustomobject]@{} }
+    switch ($Operation) {
+        'admin_override_law' {
+            $government = ([string]$args.governmentForm).Trim()
+            if ($government -notin @('constitutional', 'democratic', 'dictatorship')) { throw "政体选项无效。" }
+            $votingDays = Get-EconomyInteger $args.votingDays "法律投票期" 4 16
+            if ($votingDays -notin @(4, 8, 16)) { throw "法律投票期只能选择 4、8 或 16 个游戏日。" }
+            $termDays = Get-EconomyInteger $args.termDays "官员任期" 10 120
+            if ($termDays -notin @(10, 30, 60, 120)) { throw "官员任期选项无效。" }
+            $voteFee = Get-EconomyInteger $args.voteFee "投票费用" 0 20
+            if ($voteFee -notin @(0, 5, 10, 20)) { throw "投票费用选项无效。" }
+            return [ordered]@{ governmentForm = $government; votingDays = $votingDays; termDays = $termDays; voteFee = $voteFee }
+        }
+        'admin_start_election' {
+            $nominationHours = Get-EconomyInteger $args.nominationHours "提名小时" 1 168
+            $votingDays = Get-EconomyInteger $args.votingDays "选举投票期" 4 16
+            $termDays = Get-EconomyInteger $args.termDays "本届任期" 10 120
+            if ($votingDays -notin @(4, 8, 16) -or $termDays -notin @(10, 30, 60, 120)) { throw "选举期限选项无效。" }
+            return [ordered]@{ nominationHours = $nominationHours; votingDays = $votingDays; termDays = $termDays }
+        }
+        'admin_close_election' { return [ordered]@{} }
+        'admin_vacate_office' {
+            $role = ([string]$args.role).Trim()
+            if ($role -notin @('chairman', 'representative', 'treasurer', 'emergency')) { throw "社区职位无效。" }
+            return [ordered]@{ role = $role }
+        }
+        'admin_set_treasury_balance' {
+            return [ordered]@{ amount = Get-EconomyDecimal $args.amount "国库目标余额" 0 2147483647 }
+        }
+        'admin_set_treasury_policy' {
+            $limit = ([string]$args.purchaseLimit).Trim()
+            if ($limit -notin @('25', '50', '75', 'unlimited')) { throw "采购额度选项无效。" }
+            $welfare = Get-EconomyInteger $args.welfareDaily "每日福利" 20 100
+            $bonus = Get-EconomyInteger $args.honorBonus "荣誉奖金" 0 5000
+            if ($welfare -notin @(20, 50, 100) -or $bonus -notin @(0, 1000, 3000, 5000)) { throw "国库政策选项无效。" }
+            if ($args.donationsEnabled -isnot [bool]) { throw "捐赠开关格式无效。" }
+            return [ordered]@{ purchaseLimit = $limit; welfareDaily = $welfare; honorBonus = $bonus; donationsEnabled = [bool]$args.donationsEnabled }
+        }
+        'admin_update_crisis' {
+            $lane = ([string]$args.lane).Trim()
+            $fields = switch ($lane) {
+                'economic' { @{ baseGrowth = @(0, 1000000); multiplier = @(0, 1000); threshold = @(1, 2147483647); currentValue = @(0, 2147483647); triggerDurationDays = @(0.25, 30) } }
+                'horde' { @{ baseGrowth = @(0, 1000000); multiplier = @(0, 1000); threshold = @(1, 2147483647); currentValue = @(0, 2147483647) } }
+                'defense' { @{ currentValue = @(0, 1000) } }
+                'bridge' { @{ rallyX = @(-1000000, 1000000); rallyY = @(-1000000, 1000000); rallyZ = @(0, 32); batchSize = @(1, 1500); returnAckTimeoutHours = @(0.05, 24) } }
+                default { throw "危机参数分区无效。" }
+            }
+            $clean = [ordered]@{ lane = $lane }
+            foreach ($name in $fields.Keys) {
+                $range = $fields[$name]
+                $clean[$name] = Get-EconomyFiniteDouble $args.$name "危机参数 $name" $range[0] $range[1]
+            }
+            if ($lane -eq 'bridge') {
+                $title = Get-EconomyOptionalText $args.safehouseTitle "集合安全区" 64
+                if ([string]::IsNullOrWhiteSpace($title)) { throw "集合安全区不能为空。" }
+                $clean.safehouseTitle = $title
+            }
+            return $clean
+        }
+        'admin_start_bridge_battle' {
+            return [ordered]@{ zombies = Get-EconomyInteger $args.zombies "保卫战僵尸数量" 1 1000000 }
+        }
+        'admin_create_auction' {
+            $assetKind = ([string]$args.assetKind).Trim().ToLowerInvariant()
+            if ($assetKind -notin @('item', 'vehicle', 'animal')) { throw "拍卖资产类型无效。" }
+            $assetId = Get-EconomyOptionalText $args.assetId "拍卖资产 ID" 128
+            if ([string]::IsNullOrWhiteSpace($assetId)) { throw "拍卖资产 ID 不能为空。" }
+            $displayName = Get-EconomyOptionalText $args.displayName "拍卖显示名称" 128
+            $quantity = if ($assetKind -in @('vehicle', 'animal')) { 1 }
+                else { Get-EconomyInteger $args.quantity "拍卖数量" 1 1000 }
+            $startPrice = Get-EconomyDecimal $args.startPrice "拍卖起拍价" 0.01 2147483647
+            $buyoutPrice = Get-EconomyDecimal $args.buyoutPrice "拍卖一口价" 0 2147483647
+            if ($buyoutPrice -gt 0 -and $buyoutPrice -lt $startPrice) { throw "一口价不能低于起拍价。" }
+            $minimumIncrement = Get-EconomyDecimal $args.minimumIncrement "拍卖最低加价" 0.01 2147483647
+            $durationHours = Get-EconomyInteger $args.durationHours "拍卖持续小时" 1 720
+            $preparationMode = ([string]$args.preparationMode).Trim().ToLowerInvariant()
+            if ($preparationMode -notin @('stock', 'full')) { $preparationMode = 'stock' }
+            return [ordered]@{ assetKind = $assetKind; assetId = $assetId; displayName = $displayName;
+                quantity = $quantity; startPrice = $startPrice; buyoutPrice = $buyoutPrice;
+                minimumIncrement = $minimumIncrement; durationHours = $durationHours;
+                preparationMode = $preparationMode }
+        }
+        default { throw "社区管理操作不在允许列表中。" }
+    }
+}
+
+function Add-CommunityCommand {
+    param($Profile, $Body, [string]$RequestedBy, [string]$Remote)
+    if ([string]$Body.confirmation -cne 'COMMUNITY_ADMIN_COMMAND') { throw "社区管理操作需要二次确认。" }
+    $runtime = Get-ServerState -Profile $Profile
+    if (-not [bool]$runtime.alive) { throw "服务器未运行，不能提交社区管理操作。" }
+    $state = Read-CommunityRuntimeState -Profile $Profile
+    if (-not $state -or -not (Test-CommunityRuntimeStateFresh -State $state)) { throw "社区快照已过期，请确认 Mod 文件桥正常运行。" }
+    if (-not $state.bridge -or $state.bridge.commandConsumer -ne $true -or [int]$state.bridge.commandSchema -ne 1) {
+        throw "当前 Mod 没有启用社区命令消费器。"
+    }
+    $expectedRevision = Get-EconomyInteger $Body.expectedRevision "社区 revision" 0 ([int64]::MaxValue)
+    if ($expectedRevision -ne [int64]$state.revision) {
+        Throw-EconomyHttpError -StatusCode 409 -Message "社区状态已变化，请刷新页面后重试。"
+    }
+    $reason = Assert-EconomyReason $Body.reason
+    $operation = ([string]$Body.operation).Trim()
+    $requiredFeature = switch ($operation) {
+        { $_ -in @('admin_override_law', 'admin_start_election', 'admin_close_election', 'admin_vacate_office') } { 'governance'; break }
+        { $_ -in @('admin_set_treasury_balance', 'admin_set_treasury_policy') } { 'treasury'; break }
+        'admin_save_project_template' { 'projects'; break }
+        { $_ -in @('admin_update_crisis', 'admin_start_bridge_battle') } { 'crisis'; break }
+        'admin_create_auction' { 'auction'; break }
+        default { '' }
+    }
+    if ($requiredFeature -and $state.bridge.features -and
+            $state.bridge.features.PSObject.Properties[$requiredFeature] -and
+            $state.bridge.features.$requiredFeature -ne $true) {
+        throw "当前服务器已在沙盒设置中关闭该 Web 功能。"
+    }
+    $arguments = Get-CommunityCommandArguments -Operation $operation -Arguments $Body.args
+    Assert-CommunityRequestRateLimit -RequestedBy $RequestedBy
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $requestId = "community-$([guid]::NewGuid().ToString('N'))"
+    $row = [ordered]@{ schema = 1; mappingVersion = 1; requestId = $requestId; operation = $operation;
+        expectedServerName = [string]$Profile.serverName; createdMs = $now; expiresMs = $now + 90000;
+        requestedBy = $RequestedBy; reason = $reason; args = $arguments }
+    Add-CommunityJsonLine -Path (Get-CommunityProfilePaths -Profile $Profile).command -Value $row `
+        -ConsumedLines ([int64]$state.bridge.queueCursor)
+    Add-Audit -Remote $Remote -Action 'community-admin-command' `
+        -Detail "requestId=$requestId server=$($Profile.id) operation=$operation requestedBy=$RequestedBy reason=$reason" -Result 'queued'
+    return [ordered]@{ ok = $true; requestId = $requestId; serverId = [string]$Profile.id;
+        operation = $operation; status = 'waiting'; message = '社区命令已进入当前服务器队列。' }
+}
+
+function Get-CommunityReceiptPayload {
+    param($Profile, [string]$RequestId)
+    if ($RequestId -notmatch '^community-[a-f0-9]{32}$') { throw "社区请求 ID 格式无效。" }
+    $receipts = @(Get-CommunityJsonLines -Path (Get-CommunityProfilePaths -Profile $Profile).receipt)
+    for ($index = $receipts.Count - 1; $index -ge 0; $index--) {
+        $receipt = $receipts[$index]
+        if ([string]$receipt.requestId -cne $RequestId) { continue }
+        if ([string]$receipt.server -cne [string]$Profile.serverName -and
+                [string]$receipt.expectedServerName -cne [string]$Profile.serverName) { continue }
+        return [ordered]@{ ok = $true; requestId = $RequestId; status = [string]$receipt.status; receipt = $receipt }
+    }
+    return [ordered]@{ ok = $true; requestId = $RequestId; status = 'waiting'; receipt = $null }
+}
+
+function Get-CommunityLedgerCategoryName {
+    param([string]$Category)
+    $labels = @{ tax = '税收收入'; tax_income = '税收收入'; transaction_tax = '交易税'; vote_fee = '投票费用';
+        donation = '国库捐赠'; daily_welfare = '每日福利'; admin_adjustment = '管理员校正'; official_salary = '官员工资';
+        profession_salary = '职业工资'; welfare = '每日福利'; purchase = '国库采购'; community_project = '社区工程';
+        project = '社区工程'; project_refund = '工程退款'; purchase_refund = '采购退款'; honor_bonus = '荣誉奖金';
+        bridge_return = '大桥返场'; bridge_return_refund = '返场退款' }
+    if ($labels.ContainsKey($Category)) { return [string]$labels[$Category] }
+    return '其他国库流水'
+}
+
+function Test-CommunityReadableText {
+    param($Value)
+    $text = ([string]$Value).Trim()
+    return [bool]($text -and $text -notmatch '[\uFFFD\x00-\x08\x0B\x0C\x0E-\x1F\x7F]')
+}
+
+function ConvertTo-CommunityLedgerRow {
+    param($Row)
+    $directionId = ([string]$Row.directionId).ToLowerInvariant()
+    if (-not $directionId) {
+        $directionId = switch ([string]$Row.direction) { '收入' { 'income' } '支出' { 'expense' } '欠薪' { 'arrears' } default { 'other' } }
+    }
+    $direction = switch ($directionId) { 'income' { '收入' } 'expense' { '支出' } 'arrears' { '欠薪' } default { '其他' } }
+    $category = [string]$Row.category
+    $categoryName = Get-CommunityLedgerCategoryName $category
+    if ($categoryName -eq '其他国库流水' -and (Test-CommunityReadableText $Row.categoryName)) { $categoryName = [string]$Row.categoryName }
+    $details = $Row.details
+    $summary = if ($details -and (Test-CommunityReadableText $details.summary)) { [string]$details.summary }
+        elseif (Test-CommunityReadableText $Row.explanation) { [string]$Row.explanation } else { $categoryName }
+    return [ordered]@{
+        id = $Row.id; timestamp = $Row.timestamp; realTimestamp = $Row.realTimestamp; day = $Row.day;
+        direction = $direction; directionId = $directionId; category = $category; categoryName = $categoryName;
+        amount = $Row.amount; balance = $Row.balance; balanceAfter = $Row.balanceAfter; explanation = $summary;
+        details = [ordered]@{ summary = $summary; actorKey = if ($details) { $details.actorKey } else { '' };
+            actorName = if ($details) { $details.actorName } else { '' }; targetKey = if ($details) { $details.targetKey } else { '' };
+            targetName = if ($details) { $details.targetName } else { '' }; item = if ($details) { $details.item } else { '' };
+            quantity = if ($details) { $details.quantity } else { 0 }; sourceId = if ($details) { $details.sourceId } else { '' } }
+    }
+}
+
+function Get-CommunityTreasuryLedgerPayload {
+    param($Profile, $Request)
+    $state = Read-CommunityRuntimeState -Profile $Profile
+    if (-not $state) { throw "当前服务器尚未生成社区快照。" }
+    if (-not $state.treasury) { throw "当前服务器已关闭 Web 国库总览。" }
+    $page = Get-EconomyInteger $Request.QueryString['page'] "流水页码" 1 1000000
+    $pageSize = Get-EconomyInteger $Request.QueryString['pageSize'] "流水每页数量" 10 50
+    $direction = (Get-EconomyOptionalText $Request.QueryString['direction'] "流水方向" 8).Trim()
+    if ($direction -notin @('', '收入', '支出', '欠薪')) { throw "流水方向无效。" }
+    $kind = Get-EconomyOptionalText $Request.QueryString['kind'] "流水类型" 64
+    $keyword = (Get-EconomyOptionalText $Request.QueryString['keyword'] "流水关键词" 64).ToLowerInvariant()
+    $wantedDirection = switch ($direction) { '收入' { 'income' } '支出' { 'expense' } '欠薪' { 'arrears' } default { '' } }
+    $ledgerState = Read-CommunityTreasuryLedgerState -Profile $Profile
+    $sourceRows = if ($ledgerState) { @($ledgerState.rows) } else { @($state.treasury.ledger) }
+    $rows = @($sourceRows | ForEach-Object { ConvertTo-CommunityLedgerRow $_ } | Where-Object {
+        $directionOk = -not $wantedDirection -or [string]$_.directionId -ceq $wantedDirection
+        $kindOk = -not $kind -or [string]$_.category -ceq $kind
+        $search = "$($_.category) $($_.categoryName) $($_.explanation) $($_.details.actorName) $($_.details.targetName) $($_.details.sourceId)".ToLowerInvariant()
+        $directionOk -and $kindOk -and (-not $keyword -or $search.Contains($keyword))
+    } | Sort-Object -Property @{ Expression = {
+            if ($null -eq $_.timestamp) { 0L } else { [int64]$_.timestamp }
+        }; Descending = $true },
+        @{ Expression = {
+            if ($null -eq $_.id) { 0L } else { [int64]$_.id }
+        }; Descending = $true })
+    $total = $rows.Count
+    $pageCount = [math]::Max(1, [math]::Ceiling($total / [double]$pageSize))
+    if ($page -gt $pageCount) { $page = [int64]$pageCount }
+    $offset = [int](($page - 1) * $pageSize)
+    $pageRows = if ($offset -lt $total) { @($rows | Select-Object -Skip $offset -First $pageSize) } else { @() }
+    return [ordered]@{ ok = $true; serverId = [string]$Profile.id; page = $page; pageSize = $pageSize;
+        pageCount = $pageCount; total = $total; rows = @($pageRows); snapshotRevision = [int64]$state.revision;
+        ledgerRevision = if ($ledgerState) { [int64]$ledgerState.revision } else { [int64]$state.treasury.revision };
+        ledgerUpdatedMs = if ($ledgerState) { [int64]$ledgerState.updatedMs } else { [int64]$state.updatedMs } }
+}
+
 function New-DisasterCenterStore {
     return [ordered]@{
         version = 1
@@ -4403,449 +5045,6 @@ function Save-DisasterCenterStore {
         Move-Item -LiteralPath $temporaryPath -Destination $disasterCenterStorePath -Force
     }
     finally { Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue }
-}
-
-function Get-CommunityProfilePaths {
-    param($Profile)
-    $luaRoot = Join-Path ([string]$Profile.dataRoot) "Lua"
-    return [pscustomobject]@{
-        command = Join-Path $luaRoot "OrangeCommunityEconomy-community-commands.txt"
-        receipt = Join-Path $luaRoot "OrangeCommunityEconomy-community-receipts.txt"
-        state = Join-Path $luaRoot "OrangeCommunityEconomy-community-state.json"
-        stateA = Join-Path $luaRoot "OrangeCommunityEconomy-community-state-a.json"
-        stateB = Join-Path $luaRoot "OrangeCommunityEconomy-community-state-b.json"
-    }
-}
-
-function Assert-CommunityProfileDataRootUnique {
-    param($Profile)
-    $target = [IO.Path]::GetFullPath([string]$Profile.dataRoot).TrimEnd('\', '/')
-    $duplicate = @($serverProfiles | Where-Object {
-        [string]$_.id -cne [string]$Profile.id -and
-        [string]::Equals([IO.Path]::GetFullPath([string]$_.dataRoot).TrimEnd('\', '/'),
-            $target, [StringComparison]::OrdinalIgnoreCase)
-    })
-    if ($duplicate.Count -gt 0) { throw "服务器数据目录与其他配置重复，社区桥已拒绝访问。" }
-}
-
-function Get-CommunityRequestBody {
-    param($Request, [int]$MaximumBytes = 65536)
-    if ($MaximumBytes -lt 1024 -or $MaximumBytes -gt 1048576) { throw "社区请求体上限配置无效。" }
-    if ([int64]$Request.ContentLength64 -gt $MaximumBytes) { throw "社区请求超过 64 KiB，已拒绝读取。" }
-    $memory = [IO.MemoryStream]::new()
-    try {
-        $buffer = [byte[]]::new(8192)
-        while (($read = $Request.InputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            if ($memory.Length + $read -gt $MaximumBytes) { throw "社区请求超过 64 KiB，已拒绝读取。" }
-            $memory.Write($buffer, 0, $read)
-        }
-        if ($memory.Length -le 0) { throw "社区请求体不能为空。" }
-        try { return $utf8.GetString($memory.ToArray()) | ConvertFrom-Json }
-        catch { throw "社区请求 JSON 无效：$($_.Exception.Message)" }
-    }
-    finally { $memory.Dispose() }
-}
-
-function Get-CommunityText {
-    param($Value, [string]$Name, [int]$MaximumLength, [bool]$Required = $false)
-    $text = ([string]$Value).Trim()
-    if ($text.Length -gt $MaximumLength -or $text -match '[\x00-\x1f\x7f]') {
-        throw "$Name 不能包含控制字符，且最长 $MaximumLength 个字符。"
-    }
-    if ($Required -and [string]::IsNullOrWhiteSpace($text)) { throw "$Name 不能为空。" }
-    return $text
-}
-
-function Get-CommunityNumber {
-    param($Value, [string]$Name, [double]$Minimum, [double]$Maximum, [bool]$Integer = $false)
-    $number = 0.0
-    $text = [Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture)
-    if (-not [double]::TryParse($text, [Globalization.NumberStyles]::Float,
-            [Globalization.CultureInfo]::InvariantCulture, [ref]$number) -or
-            [double]::IsNaN($number) -or [double]::IsInfinity($number) -or
-            $number -lt $Minimum -or $number -gt $Maximum -or ($Integer -and $number -ne [math]::Floor($number))) {
-        $kind = if ($Integer) { "整数" } else { "有限数值" }
-        throw "$Name 必须是 $Minimum 至 $Maximum 之间的$kind。"
-    }
-    return $(if ($Integer) { [int64]$number } else { [double]$number })
-}
-
-function Assert-CommunityReason {
-    param($Value)
-    $reason = Get-CommunityText -Value $Value -Name "管理理由" -MaximumLength 200 -Required $true
-    if ($reason.Length -lt 4) { throw "管理理由至少需要 4 个字符。" }
-    return $reason
-}
-
-function Get-CommunityCommandMap {
-    return @(
-        [pscustomobject]@{ operation = 'admin_override_law'; serviceMethod = 'AdminOverrideGovernanceRules'; domain = 'governance'; dangerous = $true },
-        [pscustomobject]@{ operation = 'admin_start_election'; serviceMethod = 'AdminStartGovernanceElection'; domain = 'governance'; dangerous = $true },
-        [pscustomobject]@{ operation = 'admin_close_election'; serviceMethod = 'AdminCloseGovernanceElection'; domain = 'governance'; dangerous = $true },
-        [pscustomobject]@{ operation = 'admin_vacate_office'; serviceMethod = 'AdminVacateGovernanceOffice'; domain = 'governance'; dangerous = $true },
-        [pscustomobject]@{ operation = 'admin_set_treasury_balance'; serviceMethod = 'CommunityTreasuryAdminSetBalance'; domain = 'treasury'; dangerous = $true },
-        [pscustomobject]@{ operation = 'admin_set_treasury_policy'; serviceMethod = 'CommunityTreasurySetLaw'; domain = 'treasury'; dangerous = $true },
-        [pscustomobject]@{ operation = 'admin_update_crisis'; serviceMethod = 'AdminUpdateCommunityCrisis'; domain = 'crisis'; dangerous = $true },
-        [pscustomobject]@{ operation = 'admin_start_bridge_battle'; serviceMethod = 'StartCommunityBridgeBattle'; domain = 'crisis'; dangerous = $true }
-    )
-}
-
-function Get-CommunityCommandDefinition {
-    param([string]$Operation)
-    return Get-CommunityCommandMap | Where-Object { [string]$_.operation -ceq $Operation } | Select-Object -First 1
-}
-
-function Read-CommunityRuntimeState {
-    param($Profile)
-    Assert-CommunityProfileDataRootUnique -Profile $Profile
-    $paths = Get-CommunityProfilePaths -Profile $Profile
-    $selected, $failures = $null, @()
-    foreach ($path in @($paths.stateA, $paths.stateB, $paths.state)) {
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
-        try {
-            $file = Get-Item -LiteralPath $path -ErrorAction Stop
-            if ([int64]$file.Length -gt [int64]$communityStateMaximumBytes) { throw "快照超过 4 MiB。" }
-            $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-            try {
-                $reader = [IO.StreamReader]::new($stream, $utf8, $true)
-                try { $state = $reader.ReadToEnd() | ConvertFrom-Json }
-                finally { $reader.Dispose() }
-            }
-            finally { if ($stream) { $stream.Dispose() } }
-            if (-not $state -or [int]$state.schema -ne 1) { throw "协议版本无效。" }
-            if ([string]::IsNullOrWhiteSpace([string]$state.server) -or
-                    [string]$state.server -cne [string]$Profile.serverName) { throw "所属服务器不匹配。" }
-            [void](Get-CommunityNumber -Value $state.updatedMs -Name "社区快照时间" -Minimum 1 -Maximum ([double]::MaxValue))
-            if (-not $selected -or [double]$state.updatedMs -gt [double]$selected.updatedMs) {
-                $selected = $state
-            }
-        }
-        catch { $failures += $_.Exception.Message }
-    }
-    if ($selected) { return $selected }
-    if ($failures.Count -gt 0) { throw "社区快照无效：$($failures[0])" }
-    return $null
-}
-
-function Test-CommunityRuntimeStateFresh {
-    param($State, [int64]$NowMilliseconds = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-    if (-not $State) { return $false }
-    $updated = [double]$State.updatedMs
-    return [bool]($updated -le ($NowMilliseconds + 5000) -and
-        $updated -ge ($NowMilliseconds - $communityBridgeFreshnessMilliseconds))
-}
-
-function Test-CommunityCommandConsumer {
-    param($State)
-    return [bool]($State -and $State.bridge -and $State.bridge.commandConsumer -eq $true -and
-        [int]$State.bridge.commandSchema -eq 1)
-}
-
-function Read-CommunityJsonLines {
-    param([string]$Path, [int64]$MaximumBytes = 4194304, [int]$MaximumRows = 2000)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
-    $file = Get-Item -LiteralPath $Path -ErrorAction Stop
-    if ([int64]$file.Length -gt $MaximumBytes) { throw "社区桥文件超过允许大小。" }
-    $rows = [Collections.Generic.List[object]]::new()
-    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-    try {
-        $reader = [IO.StreamReader]::new($stream, $utf8, $true)
-        try {
-            while (-not $reader.EndOfStream) {
-                $line = $reader.ReadLine()
-                if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                try { $rows.Add(($line | ConvertFrom-Json)) } catch { }
-                if ($rows.Count -gt $MaximumRows) { $rows.RemoveAt(0) }
-            }
-        }
-        finally { $reader.Dispose() }
-    }
-    finally { if ($stream) { $stream.Dispose() } }
-    return @($rows)
-}
-
-function Add-CommunityJsonLine {
-    param([string]$Path, $Value, [int64]$ConsumedLines = 0)
-    $json = $Value | ConvertTo-Json -Depth 20 -Compress
-    $bytes = $utf8.GetBytes($json + "`n")
-    if ($bytes.Length -gt 65536) { throw "社区命令超过 64 KiB，已拒绝写入。" }
-    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
-    $lastError = $null
-    for ($attempt = 0; $attempt -lt 4; $attempt++) {
-        try {
-            $stream = [IO.File]::Open($Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
-            try {
-                if ($stream.Length -ge $communityCommandCompactBytes -and $ConsumedLines -gt 0) {
-                    [void]$stream.Seek(0, [IO.SeekOrigin]::Begin)
-                    $buffer, $lineCount, $lastByte = [byte[]]::new(65536), 0L, -1
-                    while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                        for ($index = 0; $index -lt $read; $index++) {
-                            $lastByte = $buffer[$index]
-                            if ($lastByte -eq 10) { $lineCount++ }
-                        }
-                    }
-                    if ($stream.Length -gt 0 -and $lastByte -ne 10) { $lineCount++ }
-                    if ($ConsumedLines -ge $lineCount) { $stream.SetLength(0) }
-                    elseif ($lineCount -ge 100000) { throw "社区命令队列行数异常，已拒绝继续追加。" }
-                }
-                if ($stream.Length + $bytes.Length -gt $communityQueueMaximumBytes) {
-                    throw "社区命令队列已满，请等待 Mod 消费后重试。"
-                }
-                [void]$stream.Seek(0, [IO.SeekOrigin]::End)
-                $stream.Write($bytes, 0, $bytes.Length)
-                $stream.Flush($true)
-            }
-            finally { $stream.Dispose() }
-            return
-        }
-        catch { $lastError = $_; Start-Sleep -Milliseconds (40 * ($attempt + 1)) }
-    }
-    throw "无法写入社区命令队列：$($lastError.Exception.Message)"
-}
-
-function Get-CommunityReceiptPayload {
-    param($Profile, [string]$RequestId)
-    if ($RequestId -notmatch '^community-[a-f0-9]{32}$') { throw "社区请求 ID 格式无效。" }
-    Assert-CommunityProfileDataRootUnique -Profile $Profile
-    $state = Read-CommunityRuntimeState -Profile $Profile
-    $receipts = @(Read-CommunityJsonLines -Path (Get-CommunityProfilePaths -Profile $Profile).receipt `
-        -MaximumBytes $communityStateMaximumBytes -MaximumRows 1000)
-    $receipt = $null
-    for ($index = $receipts.Count - 1; $index -ge 0; $index--) {
-        $candidate = $receipts[$index]
-        if (-not $candidate -or [int]$candidate.schema -ne 1 -or
-                [string]$candidate.requestId -cne $RequestId) { continue }
-        $receiptServer = if ($candidate.PSObject.Properties['expectedServerName']) {
-            [string]$candidate.expectedServerName
-        } elseif ($candidate.PSObject.Properties['server']) { [string]$candidate.server } else { '' }
-        if (-not [string]::IsNullOrWhiteSpace($receiptServer) -and
-                $receiptServer -cne [string]$Profile.serverName) { continue }
-        $receipt = $candidate
-        break
-    }
-    $status = if ($receipt) { ([string]$receipt.status).Trim().ToLowerInvariant() } else { 'waiting' }
-    if ($status -notin @('waiting', 'pending', 'queued', 'accepted', 'processing', 'completed',
-            'success', 'failed', 'error', 'rejected', 'expired', 'duplicate')) {
-        $status = 'failed'
-        if ($receipt) {
-            $receipt | Add-Member -NotePropertyName detail -NotePropertyValue 'Mod 返回了无法识别的回执状态。' -Force
-        }
-    }
-    return [ordered]@{
-        ok = $true; requestId = $RequestId; status = $status; receipt = $receipt
-        bridgeAvailable = [bool](Test-CommunityCommandConsumer -State $state)
-    }
-}
-
-function Get-CommunityQueueEntries {
-    param($Profile, $State)
-    $paths = Get-CommunityProfilePaths -Profile $Profile
-    $commands = @(Read-CommunityJsonLines -Path $paths.command -MaximumBytes $communityQueueMaximumBytes -MaximumRows 500)
-    $receipts = @(Read-CommunityJsonLines -Path $paths.receipt -MaximumBytes $communityStateMaximumBytes -MaximumRows 1000)
-    $receiptById = @{}
-    foreach ($receipt in $receipts) {
-        $id = [string]$receipt.requestId
-        $receiptServer = if ($receipt.PSObject.Properties['expectedServerName']) {
-            [string]$receipt.expectedServerName
-        } elseif ($receipt.PSObject.Properties['server']) { [string]$receipt.server } else { '' }
-        if ([int]$receipt.schema -eq 1 -and $id -match '^community-[a-f0-9]{32}$' -and
-                ([string]::IsNullOrWhiteSpace($receiptServer) -or
-                    $receiptServer -ceq [string]$Profile.serverName)) { $receiptById[$id] = $receipt }
-    }
-    $consumer = Test-CommunityCommandConsumer -State $State
-    $rows = [Collections.Generic.List[object]]::new()
-    foreach ($command in @($commands | Select-Object -Last 100)) {
-        $id = [string]$command.requestId
-        if ($id -notmatch '^community-[a-f0-9]{32}$') { continue }
-        $receipt = $receiptById[$id]
-        $definition = Get-CommunityCommandDefinition -Operation ([string]$command.operation)
-        $status = if ($receipt) { ([string]$receipt.status).Trim().ToLowerInvariant() }
-            elseif ([int64]$command.expiresMs -gt 0 -and
-                [int64]$command.expiresMs -lt [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) { 'expired' }
-            elseif ($consumer) { 'waiting' } else { 'waiting_mod_bridge' }
-        $rows.Add([pscustomobject][ordered]@{
-            requestId = $id; operation = [string]$command.operation
-            serviceMethod = if ($definition) { [string]$definition.serviceMethod } else { '' }
-            status = $status; requestedBy = [string]$command.requestedBy
-            reason = [string]$command.reason; createdMs = [int64]$command.createdMs
-            expiresMs = [int64]$command.expiresMs
-            code = if ($receipt) { [string]$receipt.code } else { '' }
-            detail = if ($receipt) { [string]$receipt.detail } else { '' }
-        })
-    }
-    return @($rows | Sort-Object createdMs -Descending)
-}
-
-function Get-CommunityPayload {
-    param($Profile, $Session)
-    $state = Read-CommunityRuntimeState -Profile $Profile
-    $runtime = Get-ServerState -Profile $Profile
-    $consumer = Test-CommunityCommandConsumer -State $state
-    $fresh = Test-CommunityRuntimeStateFresh -State $state
-    $bridgeStatus = if ($consumer -and $fresh) { 'connected' } elseif ($state) { 'snapshot_only' } else { 'awaiting_mod_bridge' }
-    return [ordered]@{
-        ok = $true
-        server = [ordered]@{ id = [string]$Profile.id; name = [string]$Profile.name
-            serverName = [string]$Profile.serverName; alive = [bool]$runtime.alive }
-        bridge = [ordered]@{
-            status = $bridgeStatus; stateAvailable = [bool]$state
-            commandConsumer = $consumer; stale = [bool]($state -and -not $fresh)
-            message = if ($consumer) { '社区 Mod 文件桥已连接。' }
-                else { 'Mod 尚未提供社区命令消费器；写操作只会进入待接队列，不代表服务器已经执行。' }
-        }
-        snapshot = $state
-        queue = @(Get-CommunityQueueEntries -Profile $Profile -State $state)
-        commandMap = @(Get-CommunityCommandMap)
-        canManage = [bool](Test-EconomyManagePermission -Session $Session)
-    }
-}
-
-function Get-CommunityLedgerPayload {
-    param($Profile, [int]$Page, [int]$PageSize, [string]$Direction, [string]$Kind, [string]$Keyword)
-    $state = Read-CommunityRuntimeState -Profile $Profile
-    $treasury = if ($state -and $state.treasury) { $state.treasury } else { $null }
-    $rows = if ($treasury -and $treasury.ledger) { @($treasury.ledger) } else { @() }
-    if ($Direction -notin @('', '收入', '支出', '欠薪')) { throw "国库流水方向无效。" }
-    $kindText = Get-CommunityText -Value $Kind -Name "流水类型" -MaximumLength 64
-    $keywordText = Get-CommunityText -Value $Keyword -Name "流水关键词" -MaximumLength 64
-    $keywordPattern = if ($keywordText -eq '') { '' } else { "*$([WildcardPattern]::Escape($keywordText))*" }
-    $filtered = @($rows | Where-Object {
-        ($Direction -eq '' -or [string]$_.direction -ceq $Direction) -and
-        ($kindText -eq '' -or [string]$_.category -ceq $kindText -or [string]$_.kind -ceq $kindText) -and
-        ($keywordText -eq '' -or (@($_.category, $_.categoryName, $_.explanation, $_.kind, $_.summary,
-                    $_.actorName, $_.targetName, $_.sourceId, $_.details.actorName,
-                    $_.details.targetName, $_.details.sourceId, $_.details.summary, $_.details.item) -join ' ') -like $keywordPattern)
-    } | Sort-Object {
-        if ($null -ne $_.timestamp) { [double]$_.timestamp }
-        elseif ($null -ne $_.hour) { [double]$_.hour }
-        elseif ($null -ne $_.day) { [double]$_.day }
-        else { 0.0 }
-    } -Descending)
-    $total = $filtered.Count
-    $pageCount = [math]::Max(1, [math]::Ceiling($total / [double]$PageSize))
-    $safePage = [math]::Min([math]::Max(1, $Page), $pageCount)
-    return [ordered]@{
-        ok = $true; page = $safePage; pageSize = $PageSize; pageCount = $pageCount; total = $total
-        rows = @($filtered | Select-Object -Skip (($safePage - 1) * $PageSize) -First $PageSize)
-        bridgeAvailable = [bool]$state
-    }
-}
-
-function ConvertTo-CommunityCommandArguments {
-    param([string]$Operation, $InputArguments, [string]$Reason, [string]$RequestId)
-    $input = if ($InputArguments) { $InputArguments } else { [pscustomobject]@{} }
-    switch ($Operation) {
-        'admin_override_law' {
-            $form = Get-CommunityText $input.governmentForm '政体' 24 $true
-            if ($form -notin @('constitutional', 'democratic', 'dictatorship')) { throw "政体参数无效。" }
-            $votingDays = Get-CommunityNumber $input.votingDays '投票游戏日' 4 16 $true
-            if ($votingDays -notin @(4, 8, 16)) { throw "投票游戏日只能是 4、8 或 16。" }
-            $termDays = Get-CommunityNumber $input.termDays '官员任期' 10 120 $true
-            if ($termDays -notin @(10, 30, 60, 120)) { throw "官员任期只能是 10、30、60 或 120。" }
-            $voteFee = Get-CommunityNumber $input.voteFee '投票费用' 0 20 $true
-            if ($voteFee -notin @(0, 5, 10, 20)) { throw "投票费用只能是 0、5、10 或 20。" }
-            return [ordered]@{ governmentForm = $form; votingDays = $votingDays; termDays = $termDays; voteFee = $voteFee; reason = $Reason }
-        }
-        'admin_start_election' {
-            $roles = @($input.targetRoles | ForEach-Object { Get-CommunityText $_ '选举职位' 24 $true })
-            $validRoles = @('chairman', 'representative', 'treasurer', 'emergency')
-            if (-not $roles.Count) { $roles = $validRoles }
-            if (@($roles | Where-Object { $_ -notin $validRoles }).Count -gt 0) { throw "选举职位无效。" }
-            return [ordered]@{ nominationHours = Get-CommunityNumber $input.nominationHours '提名小时' 1 168;
-                votingDays = Get-CommunityNumber $input.votingDays '投票游戏日' 4 16 $true;
-                termDays = Get-CommunityNumber $input.termDays '官员任期' 10 120 $true; targetRoles = $roles; reason = $Reason }
-        }
-        'admin_close_election' { return [ordered]@{ reason = $Reason } }
-        'admin_vacate_office' {
-            $role = Get-CommunityText $input.role '职位' 24 $true
-            if ($role -notin @('chairman', 'representative', 'treasurer', 'emergency')) { throw "职位参数无效。" }
-            return [ordered]@{ role = $role; reason = $Reason }
-        }
-        'admin_set_treasury_balance' {
-            return [ordered]@{ requestId = $RequestId; amount = Get-CommunityNumber $input.amount '国库余额' 0 2147483647; summary = $Reason }
-        }
-        'admin_set_treasury_policy' {
-            $limit = Get-CommunityText $input.purchaseLimit '采购日额度' 16 $true
-            if ($limit -notin @('25', '50', '75', 'unlimited')) { throw "采购日额度只能是 25%、50%、75% 或不限制。" }
-            $welfare = Get-CommunityNumber $input.welfareDaily '每日福利' 20 100 $true
-            if ($welfare -notin @(20, 50, 100)) { throw "每日福利只能是 20、50 或 100。" }
-            $bonus = Get-CommunityNumber $input.honorBonus '荣誉奖金' 0 5000 $true
-            if ($bonus -notin @(0, 1000, 3000, 5000)) { throw "荣誉奖金只能是 0、1000、3000 或 5000。" }
-            return [ordered]@{ requestId = $RequestId; purchaseLimit = $limit; welfareDaily = $welfare;
-                honorBonus = $bonus; donationsEnabled = [bool]$input.donationsEnabled; reason = $Reason }
-        }
-        'admin_update_crisis' {
-            $lane = Get-CommunityText $input.lane '危机通道' 24 $true
-            if ($lane -notin @('economic', 'horde', 'defense', 'bridge')) { throw "危机通道无效。" }
-            $result = [ordered]@{ lane = $lane; reason = $Reason }
-            if ($lane -in @('economic', 'horde')) {
-                $result.baseGrowth = Get-CommunityNumber $input.baseGrowth '每日基础增长' 0 1000000
-                $result.multiplier = Get-CommunityNumber $input.multiplier '增长倍率' 0 1000
-                $result.threshold = Get-CommunityNumber $input.threshold '触发阈值' 1 2147483647
-                $result.currentValue = Get-CommunityNumber $input.currentValue '当前进度' 0 2147483647
-                if ($lane -eq 'economic') { $result.triggerDurationDays = Get-CommunityNumber $input.triggerDurationDays '经济危机持续日' 0.25 30 }
-            }
-            elseif ($lane -eq 'defense') { $result.currentValue = Get-CommunityNumber $input.currentValue '防御值' 0 1000 }
-            else {
-                $result.safehouseTitle = Get-CommunityText $input.safehouseTitle '集合安全区' 64 $true
-                $result.rallyX = Get-CommunityNumber $input.rallyX '集合点 X' -1000000 1000000
-                $result.rallyY = Get-CommunityNumber $input.rallyY '集合点 Y' -1000000 1000000
-                $result.rallyZ = Get-CommunityNumber $input.rallyZ '集合点 Z' 0 32 $true
-                $result.batchSize = Get-CommunityNumber $input.batchSize '生成批次' 1 1500 $true
-                $result.returnAckTimeoutHours = Get-CommunityNumber $input.returnAckTimeoutHours '返场确认小时' 0.05 24
-            }
-            return $result
-        }
-        'admin_start_bridge_battle' {
-            return [ordered]@{ zombies = Get-CommunityNumber $input.zombies '保卫战僵尸总数' 1 2147483647 $true; reason = $Reason }
-        }
-    }
-    throw "社区操作不在允许列表中。"
-}
-
-function Add-CommunityAdminCommand {
-    param($Body, [string]$Remote, [string]$RequestedBy)
-    if ([string]$Body.confirmation -cne 'COMMUNITY_ADMIN_COMMAND') { throw "社区管理操作需要二次确认。" }
-    $profile = Get-ServerProfile -Id ([string]$Body.serverId)
-    Assert-CommunityProfileDataRootUnique -Profile $profile
-    $operation = Get-CommunityText $Body.operation '社区操作' 64 $true
-    $definition = Get-CommunityCommandDefinition -Operation $operation
-    if (-not $definition) { throw "社区操作不在允许列表中。" }
-    $reason = Assert-CommunityReason $Body.reason
-    $state = Read-CommunityRuntimeState -Profile $profile
-    if ($state -and $Body.PSObject.Properties['expectedRevision']) {
-        $currentRevision = if ($null -ne $state.revision) { [int64]$state.revision }
-            elseif ($state.governance -and $null -ne $state.governance.revision) { [int64]$state.governance.revision }
-            else { 0L }
-        $expectedRevision = Get-CommunityNumber $Body.expectedRevision '社区并发修订号' 0 2147483647 $true
-        if ($currentRevision -ne $expectedRevision) {
-            $failure = [InvalidOperationException]::new("社区状态已变化，请刷新后重试。")
-            $failure.Data['HttpStatusCode'] = 409
-            throw $failure
-        }
-    }
-    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    $requestId = "community-$([guid]::NewGuid().ToString('N'))"
-    $args = ConvertTo-CommunityCommandArguments -Operation $operation -InputArguments $Body.args -Reason $reason -RequestId $requestId
-    $row = [ordered]@{
-        schema = 1; mappingVersion = 1; requestId = $requestId; operation = $operation
-        expectedServerName = [string]$profile.serverName; createdMs = $now; expiresMs = $now + 300000
-        requestedBy = $RequestedBy; reason = $reason; args = $args
-    }
-    $consumed = if ($state -and $state.bridge -and $null -ne $state.bridge.queueCursor) {
-        [int64]$state.bridge.queueCursor
-    } else { 0L }
-    Add-CommunityJsonLine -Path (Get-CommunityProfilePaths -Profile $profile).command -Value $row -ConsumedLines $consumed
-    $consumer = Test-CommunityCommandConsumer -State $state
-    $status = if ($consumer) { 'waiting' } else { 'waiting_mod_bridge' }
-    Add-Audit -Remote $Remote -Action "community-$operation" `
-        -Detail "requestId=$requestId server=$($profile.id) requestedBy=$RequestedBy reason=$reason bridgeConsumer=$consumer" -Result $status
-    return [ordered]@{
-        ok = $true; requestId = $requestId; serverId = [string]$profile.id; operation = $operation
-        serviceMethod = [string]$definition.serviceMethod; status = $status; bridgeAvailable = $consumer
-        message = if ($consumer) { '社区命令已进入 Mod 队列，等待服务端回执。' }
-            else { '命令已写入待接队列；当前 Mod 尚无社区 Web 消费器，服务器不会执行这项操作。' }
-    }
 }
 
 function Get-DisasterProfilePaths {
@@ -5522,10 +5721,12 @@ function Get-KnownServerPatchDefinitions {
         [pscustomobject][ordered]@{ id = "PZItemContainerCycleGuard"; name = "物品容器循环防护"; category = "稳定性修复"; fileName = "PZItemContainerCycleGuard-agent.jar"; arguments = ""; activePattern = '\[PZItemContainerCycleGuard\] ACTIVE'; activeEvidence = "pre-pz-stdout"; compatibility = "PZ 42.20.x"; manageable = $true; target = "ItemContainer.getCharacter"; risk = "异常容器链返回无所属角色；不删除物品、不写存档。"; description = "阻断异常物品或尸体容器的自身回指与循环链，避免无限递归和栈溢出。" },
         [pscustomobject][ordered]@{ id = "PZEntityRegistrationGuard"; name = "重复实体注册防护"; category = "稳定性修复"; fileName = "PZEntityRegistrationGuard-agent.jar"; arguments = ""; activePattern = '\[PZEntityRegistrationGuard\] ACTIVE'; compatibility = "PZ 42.20.2"; manageable = $true; target = "EngineEntityManager.addEntityInternal"; risk = "仅忽略同一对象、状态一致的幂等重复注册；其他异常保留原版报错。"; description = "避免区块加载时同一实体被重复注册并连续中断 ServerCell 加载。" },
         [pscustomobject][ordered]@{ id = "PZItemPickInfoContainerFix"; name = "尸体容器 ID 注册修复"; category = "掉落兼容"; fileName = "PZItemPickInfoContainerFix-agent.jar"; arguments = ""; activePattern = '\[PZItemPickInfoContainerFix\] ACTIVE'; compatibility = "PZ 42.20 已审核构建"; manageable = $true; target = "ItemConfigurator.Preprocess"; risk = "只补注册 inventorymale 与 inventoryfemale，不改变掉落表或物品内容。"; description = "在 ItemConfig 建桶前补充两个原版尸体容器 ID，消除高频 cannot get ID 日志。" },
+        [pscustomobject][ordered]@{ id = "PZGlobalModDataPreallocationFix"; name = "GlobalModData 首存预分配"; category = "保存性能"; fileName = "PZGlobalModDataPreallocationFix-agent.jar"; arguments = "enabled=true,headroomBytes=4194304,maxPreallocateBytes=268435456"; activePattern = '\[PZGlobalModDataPreallocation\] ACTIVE'; activeEvidence = "pre-pz-stdout"; compatibility = "PZ 42.20.4 精确类哈希"; manageable = $true; serverIds = @("production", "server2", "server3"); target = "GlobalModData.save"; risk = "只替换初始 ByteBuffer 容量；不改表、序列化顺序或文件格式，预分配失败时回退原版。"; description = "按现有 global_mod_data.bin 大小加 4 MiB 一次分配，避免重启后首次保存从 1 MiB 按 512 KiB 重复扩容和序列化。" },
+        [pscustomobject][ordered]@{ id = "PZAnimalLOSOptimization"; name = "动物 LOS 候选集优化"; category = "主线程性能"; fileName = "PZAnimalLOSOptimization-agent.jar"; arguments = "enabled=true,reportSeconds=300"; activePattern = '\[PZAnimalLOS\] ACTIVE'; activeEvidence = "pre-pz-stdout"; compatibility = "PZ 42.20.4 精确类哈希"; manageable = $true; serverIds = @("production", "server2", "server3"); target = "IsoAnimal.updateLOS"; risk = "仍执行原版距离、楼层、隐身和 spotted 逻辑；候选集生成异常时当次回退完整对象集。"; description = "动物 LOS 仅遍历原版真正会处理的当前动物、僵尸和玩家，排除车辆、物理对象及其他动物。" },
         [pscustomobject][ordered]@{ id = "PZDryingCraftSyncThrottle"; name = "晾晒工艺同步定向优化"; category = "网络稳定性"; fileName = "PZDryingCraftSyncThrottle-agent.jar"; arguments = "intervalMs=20000,reportSeconds=300"; activePattern = '\[PZDryingSyncThrottle\] ACTIVE'; compatibility = "PZ 42.20.3 已审核构建"; manageable = $true; target = "CraftLogic.onUpdate / sendCraftLogicSync"; risk = "晾晒过程进度每20秒仅同步给位置相关玩家；界面进度最多延迟约20秒，开始、停止、完成和区块完整同步仍走原版。"; description = "根治晾晒架向全服广播完整工艺状态：保留20秒节流，并使用原版 sendToRelative 仅向相关玩家发送，避免可靠队列积压。" },
-        [pscustomobject][ordered]@{ id = "PZPacketRoutingOptimization"; name = "世界对象与病历定向路由优化"; category = "网络稳定性"; fileName = "PZPacketRoutingOptimization-agent.jar"; arguments = "syncIsoObject=true,antibodies=true,antibodiesIntervalMs=20000,reportSeconds=300"; activePattern = '\[PZPacketRouting\].*ACTIVE'; activeEvidence = "pre-pz-stdout"; compatibility = "PZ 42.20.3 精确类哈希"; manageable = $true; target = "UdpConnection.endPacket / GameServer.sendServerCommand"; risk = "只过滤未加载目标区域连接的 SyncIsoObject，并合并同一病历对同一连接20秒内的重复展示同步；不处理容器、物品转移、车辆、长读条或客户端命令。"; description = "阻止畜舍、炉灶、发电机和门等世界对象向远端无关玩家可靠广播，同时保留抗体疾病计算，仅降低完整病历展示包的重复发送。" },
+        [pscustomobject][ordered]@{ id = "PZPacketRoutingOptimization"; name = "世界对象、农业与病历定向路由优化"; category = "网络稳定性"; fileName = "PZPacketRoutingOptimization-agent.jar"; arguments = "syncIsoObject=true,antibodies=true,antibodiesIntervalMs=20000,farmingDedup=true,farmingHeartbeatMs=300000,farmingCacheMax=32768,farmingCacheTtlMs=900000,connectionTelemetry=true,telemetryIntervalMs=1000,telemetryStaleMs=900000,reportSeconds=300"; activePattern = '\[PZPacketRouting\].*ACTIVE'; activeEvidence = "pre-pz-stdout"; compatibility = "PZ 42.20.4 精确类哈希"; manageable = $true; target = "UdpConnection.endPacket / GameServer.sendServerCommand"; risk = "农业包仅在服务端解析到真实耕地对象后进行逐连接完整字节去重；首次、状态变化、识别异常均原样发送。连接遥测每名玩家最多每秒只读一次 RakNet 统计，不限速、不踢人、不丢包。"; description = "过滤远端无关世界对象广播，降低抗体病历和农业重复同步，并按玩家聚合可靠发送队列、重发、丢包及拥塞峰值，用于定位少数玩家长期卡交互。" },
         [pscustomobject][ordered]@{ id = "PZSelectiveWorldResetGuard"; name = "选择性地图重置运行时防护"; category = "地图维护"; fileName = "PZSelectiveWorldResetGuard-agent.jar"; arguments = ""; activePattern = '\[PZSelectiveResetGuard\] ACTIVE'; activeEvidence = "pre-pz-stdout"; compatibility = "PZ 42.20.4 已审核构建"; manageable = $true; target = "VehiclesDB2.init"; risk = "仅在存档存在工具生成的重置清单时生效；清单中的区块不会再次生成原版地图车辆。区域缓存由原版自然重建。"; description = "将重置区块标记为车辆已生成，防止原版停车车辆和随机车祸重复生成；不注入区块加载或区域线程。" },
-        [pscustomobject][ordered]@{ id = "PZTimedActionIsolationFix"; name = "多人长读条动作隔离"; category = "联机修复"; fileName = "PZTimedActionIsolationFix-agent.jar"; arguments = ""; activePattern = '\[PZTimedActionIsolationFix\] ACTIVE'; compatibility = "PZ 42.20.x"; manageable = $true; target = "ActionManager.stop(Action)"; risk = "不能与 PZTimedActionTrace 同时加载；不强制动作完成，不改配方和物品。"; description = "按玩家动作实例停止读条，防止不同玩家相同一字节动作编号互相取消。" },
+        [pscustomobject][ordered]@{ id = "PZTimedActionIsolationFix"; name = "多人长读条动作隔离"; category = "联机修复"; fileName = "PZTimedActionIsolationFix-agent.jar"; arguments = ""; activePattern = '\[PZTimedActionIsolationFix\] ACTIVE v2 owner\+action-id'; compatibility = "PZ 42.20.3 精确类哈希"; manageable = $true; target = "ActionManager.stop(Action)"; risk = "不能与 PZTimedActionTrace 同时加载；不强制动作完成，不改配方、物品或存档。"; description = "按玩家在线 ID 与一字节动作 ID 停止本人动作；过期取消直接忽略，避免吞取消或跨玩家同号误删。" },
         [pscustomobject][ordered]@{ id = "PZSpriteConfigAliasPatch"; name = "动态贴图映射兼容"; category = "区块兼容"; fileName = "PZSpriteConfigAliasPatch-agent.jar"; arguments = "enabled=true"; activePattern = '\[PZSpriteAlias\].*(?:ACTIVE|agent installed)'; compatibility = "PZ 42.20.x"; manageable = $true; target = "SpriteConfigManager / TileInfo.verifyObject"; risk = "只映射 24 个已确认贴图；不能与旧 PZSpriteConfigGuard 同时启用。"; description = "把 Open All Containers、Wooden_Windows 与 Lifestyle 的合法动态贴图映射回实体原贴图后执行完整原版初始化。" },
         [pscustomobject][ordered]@{ id = "PZPlayerStateFiniteGuard"; name = "玩家状态有限数防护"; category = "数值安全"; fileName = "PZPlayerStateFiniteGuard-agent.jar"; arguments = ""; activePattern = '\[PZPlayerStateFiniteGuard\] ACTIVE'; compatibility = "PZ 42.20.x"; manageable = $true; target = "Stats / Nutrition / Thermoregulator"; risk = "只拒绝 NaN 和 Infinity；不会自动修复已经保存的最低值。"; description = "在原生 setter 入口拒绝非有限数，避免食物或温度计算污染角色状态并保存。" },
         [pscustomobject][ordered]@{ id = "PZServerStreamingStability"; name = "对象数据流式同步防护"; category = "网络稳定性"; fileName = "PZServerStreamingStability-agent.jar"; arguments = ""; activePattern = '\[PZStreaming\] ACTIVE'; compatibility = "PZ 42.20.2 - 42.20.3"; manageable = $false; target = "ObjectModDataPacket / ServerMap.preupdate"; risk = "由服务器 streamingStabilityOptions 参数单独管理；错误参数可能丢弃过期同步。"; description = "丢弃确定无效的 ObjectModData，并对目标方格未加载的数据做有界排队与主线程重放。" },
@@ -5765,6 +5966,8 @@ function Get-ServerPatchPayload {
             $jar = Get-Item -LiteralPath $jarPath -ErrorAction SilentlyContinue
             $serverStates = @($scope.profiles | ForEach-Object {
                 $profile = $_
+                $serverIdsProperty = $definition.PSObject.Properties['serverIds']
+                $applicable = -not $serverIdsProperty -or @($serverIdsProperty.Value) -contains [string]$profile.id
                 $snapshot = $serverPatchSnapshots[[string]$profile.id]
                 $state = $snapshot.state
                 $managedArguments = ""
@@ -5779,7 +5982,8 @@ function Get-ServerPatchPayload {
                 $consoleText = [string]$snapshot.consoleText
                 $active = [bool]$state.alive -and [regex]::IsMatch($consoleText, [string]$definition.activePattern)
                 $earlyMarker = [string]$definition.activeEvidence -eq 'pre-pz-stdout'
-                $detail = if (-not $state.alive) {
+                $detail = if (-not $applicable) { "该补丁不适用于此服务器" }
+                elseif (-not $state.alive) {
                     if ($configured) { "已配置，服务器停止中" } else { "未配置，服务器停止中" }
                 }
                 elseif ($active) { "启动日志已确认 ACTIVE" }
@@ -5790,6 +5994,7 @@ function Get-ServerPatchPayload {
                 [pscustomobject][ordered]@{
                     id = [string]$profile.id
                     name = [string]$profile.name
+                    applicable = [bool]$applicable
                     running = [bool]$state.alive
                     configured = [bool]$configured
                     processMounted = [bool]$processMounted
@@ -5807,9 +6012,9 @@ function Get-ServerPatchPayload {
                 sha256 = if ($jar) { Get-FileSha256 -Path $jarPath } else { "" }
                 pendingRestart = if ([bool]$definition.manageable) {
                     if ($definitionEnabled) {
-                        @($serverStates | Where-Object { -not $_.configured -or ($_.running -and -not $_.processMounted) }).Count -gt 0
+                        @($serverStates | Where-Object { $_.applicable -and (-not $_.configured -or ($_.running -and -not $_.processMounted)) }).Count -gt 0
                     } else {
-                        @($serverStates | Where-Object { $_.configured -or ($_.running -and $_.processMounted) }).Count -gt 0
+                        @($serverStates | Where-Object { $_.applicable -and ($_.configured -or ($_.running -and $_.processMounted)) }).Count -gt 0
                     }
                 } else { $false }
                 servers = $serverStates
@@ -7871,7 +8076,8 @@ function Get-MaintenanceSchedulePayload {
         ok = $true
         serverId = [string]$Profile.id
         enabled = [bool]$schedule.enabled
-        intervalHours = [int]$schedule.intervalHours
+        intervalMinutes = [int]$schedule.intervalMinutes
+        intervalHours = [double]$schedule.intervalMinutes / 60
         autoRestartOnUpdate = [bool]$schedule.autoRestartOnUpdate
         autoRestartWarningSeconds = 60
         restartStabilizationSeconds = [int]$schedule.restartStabilizationSeconds
@@ -7947,7 +8153,7 @@ function Start-ScheduledModCheck {
     }
     $now = Get-Date
     $schedule.lastRunAt = $now.ToString("o")
-    $schedule.nextRunAt = if ($schedule.enabled) { $now.AddHours([int]$schedule.intervalHours).ToString("o") } else { $null }
+    $schedule.nextRunAt = if ($schedule.enabled) { $now.AddMinutes([int]$schedule.intervalMinutes).ToString("o") } else { $null }
     $state = Get-ServerState -Profile $Profile
     if (-not $state.alive -or -not $state.writable) {
         $schedule.lastStatus = "skipped"
@@ -8112,7 +8318,7 @@ function Invoke-MaintenanceSchedulerTick {
                 $schedule.lastStatus = "failed"
                 $schedule.lastResultCode = "queue-failed"
                 $schedule.lastMessage = "自动检查提交失败：$($_.Exception.Message)"
-                $schedule.nextRunAt = $now.AddHours([int]$schedule.intervalHours).ToString("o")
+                $schedule.nextRunAt = $now.AddMinutes([int]$schedule.intervalMinutes).ToString("o")
                 Save-MaintenanceSchedules
             }
         }
@@ -8401,9 +8607,7 @@ function Test-ManagedHostAlive {
     if (-not (Get-Process -Id $hostPid -ErrorAction SilentlyContinue)) { return $false }
     try {
         $hostInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$hostPid" -OperationTimeoutSec 2 -ErrorAction Stop
-        $profilePath = [string](Get-ManagedProfilePaths -Id ([string]$Profile.id)).profilePath
-        return [bool]($hostInfo -and [string]$hostInfo.CommandLine -like "*$managedHostPath*" -and
-            [string]$hostInfo.CommandLine -like "*${profilePath}*")
+        return [bool](Test-ManagedHostProcessMatchesProfile -Process $hostInfo -Profile $Profile)
     }
     catch {
         # A live recorded host PID is enough to avoid destructive recovery when CIM is unavailable.
@@ -8497,6 +8701,211 @@ function Get-ActiveLifecycleOperation {
     }
     catch { }
     return $null
+}
+
+function Test-ManagedHostProcessMatchesProfile {
+    param($Process, $Profile)
+    if (-not $Process -or [string]$Process.Name -notmatch '^powershell\.exe$|^pwsh\.exe$') { return $false }
+    $paths = Get-ManagedProfilePaths -Id ([string]$Profile.id)
+    $commandLine = [string]$Process.CommandLine
+    $directHost = $commandLine -like "*$managedHostPath*" -and $commandLine -like "*$([string]$paths.profilePath)*"
+    $profileHost = $commandLine -like "*$([string]$paths.startScript)*"
+    return [bool]($directHost -or $profileHost)
+}
+
+function Test-LifecycleWorkerProcessMatchesProfile {
+    param($Process, $Profile)
+    if (-not $Process -or [string]$Process.Name -notmatch '^powershell\.exe$|^pwsh\.exe$') { return $false }
+    $profilePath = [string](Get-ManagedProfilePaths -Id ([string]$Profile.id)).profilePath
+    return [string]$Process.CommandLine -like "*$managedLifecyclePath*" -and
+        [string]$Process.CommandLine -like "*${profilePath}*"
+}
+
+function Stop-VerifiedProcessTree {
+    param($Process, [string]$Label)
+    if (-not $Process -or -not $Process.ProcessId) { return $false }
+    $processId = [int]$Process.ProcessId
+    $current = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue
+    if (-not $current) { return $false }
+    if ([string]$current.Name -cne [string]$Process.Name -or
+        [string]$current.CreationDate -cne [string]$Process.CreationDate -or
+        [string]$current.CommandLine -cne [string]$Process.CommandLine) {
+        throw "$Label PID $processId 已被其他进程占用，已拒绝终止。"
+    }
+
+    $taskkillPath = Join-Path $env:SystemRoot "System32\taskkill.exe"
+    & $taskkillPath /PID $processId /T /F 2>&1 | Out-Null
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $deadline -and (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+        throw "$Label PID $processId 未能终止。"
+    }
+    return $true
+}
+
+function Invoke-ManagedForceStop {
+    param($Profile, [string]$Remote, [string]$RequestedBy)
+    if (-not (Test-IsManagedProfile -Profile $Profile)) {
+        throw "强制终止只支持由面板托管的服务器配置档。"
+    }
+
+    $paths = Get-ManagedProfilePaths -Id ([string]$Profile.id)
+    if (-not (Test-Path -LiteralPath $paths.profilePath -PathType Leaf)) {
+        throw "受管配置文件不存在，已拒绝强制终止。"
+    }
+
+    if (-not (Test-Path -LiteralPath $paths.statePath -PathType Leaf)) {
+        throw "受管状态文件不存在，无法确认目标 PID。"
+    }
+    try { $initialState = Get-Content -LiteralPath $paths.statePath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { throw "受管状态文件损坏，无法确认目标 PID。" }
+    if (-not [bool]$initialState.managed -or [int]$initialState.protocolVersion -lt 2 -or
+        [string]$initialState.serverName -ine [string]$Profile.serverName) {
+        throw "受管状态与所选服务器不匹配，已拒绝强制终止。"
+    }
+
+    $initialJavaInfo = $null
+    $initialHostInfo = $null
+    if ($initialState.javaPid) {
+        $initialJavaPid = [int]$initialState.javaPid
+        $initialJavaInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$initialJavaPid" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($initialJavaInfo -and -not (Test-PZProcessMatchesProfile -Process $initialJavaInfo -Profile $Profile)) {
+            throw "状态中的 Java PID $initialJavaPid 不属于 $($Profile.name)，已拒绝终止。"
+        }
+    }
+    if ($initialState.hostPid) {
+        $initialHostPid = [int]$initialState.hostPid
+        $initialHostInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$initialHostPid" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($initialHostInfo -and -not (Test-ManagedHostProcessMatchesProfile -Process $initialHostInfo -Profile $Profile)) {
+            throw "状态中的托管宿主 PID $initialHostPid 不属于 $($Profile.name)，已拒绝终止。"
+        }
+    }
+    if ($initialJavaInfo -and $initialHostInfo -and [int]$initialJavaInfo.ProcessId -eq [int]$initialHostInfo.ProcessId) {
+        throw "受管状态中的 Java PID 与宿主 PID 冲突，已拒绝终止。"
+    }
+
+    $workers = @()
+    try {
+        $workers = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -OperationTimeoutSec 2 -ErrorAction Stop |
+            Where-Object { Test-LifecycleWorkerProcessMatchesProfile -Process $_ -Profile $Profile })
+    }
+    catch { throw "无法核验生命周期执行器，已拒绝强制终止：$($_.Exception.Message)" }
+    $workerPids = @()
+    foreach ($worker in $workers) {
+        $workerPids += [int]$worker.ProcessId
+        [void](Stop-VerifiedProcessTree -Process $worker -Label "生命周期执行器")
+    }
+
+    Start-Sleep -Milliseconds 250
+    try { $state = Get-Content -LiteralPath $paths.statePath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { throw "受管状态文件损坏，无法确认目标 PID。" }
+    if (-not [bool]$state.managed -or [int]$state.protocolVersion -lt 2 -or
+        [string]$state.serverName -ine [string]$Profile.serverName) {
+        throw "受管状态与所选服务器不匹配，已拒绝强制终止。"
+    }
+
+    $javaInfo = $null
+    $hostInfo = $null
+    if ($state.javaPid) {
+        $javaPid = [int]$state.javaPid
+        $javaInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$javaPid" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($javaInfo -and -not (Test-PZProcessMatchesProfile -Process $javaInfo -Profile $Profile)) {
+            throw "状态中的 Java PID $javaPid 不属于 $($Profile.name)，已拒绝终止。"
+        }
+    }
+    if ($state.hostPid) {
+        $hostPid = [int]$state.hostPid
+        $hostInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$hostPid" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($hostInfo -and -not (Test-ManagedHostProcessMatchesProfile -Process $hostInfo -Profile $Profile)) {
+            throw "状态中的托管宿主 PID $hostPid 不属于 $($Profile.name)，已拒绝终止。"
+        }
+    }
+    if (-not $javaInfo -and $initialJavaInfo) {
+        $javaInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$initialJavaInfo.ProcessId)" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($javaInfo -and -not (Test-PZProcessMatchesProfile -Process $javaInfo -Profile $Profile)) {
+            throw "初始 Java PID $([int]$initialJavaInfo.ProcessId) 在终止过程中发生变化，已停止继续操作。"
+        }
+    }
+    if (-not $hostInfo -and $initialHostInfo) {
+        $hostInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$initialHostInfo.ProcessId)" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($hostInfo -and -not (Test-ManagedHostProcessMatchesProfile -Process $hostInfo -Profile $Profile)) {
+            throw "初始托管宿主 PID $([int]$initialHostInfo.ProcessId) 在终止过程中发生变化，已停止继续操作。"
+        }
+    }
+    if (-not $javaInfo -and -not $hostInfo -and -not $initialJavaInfo -and -not $initialHostInfo -and $workerPids.Count -eq 0) {
+        throw "所选服务器的受管进程已经停止。"
+    }
+    if ($javaInfo -and $hostInfo -and [int]$javaInfo.ProcessId -eq [int]$hostInfo.ProcessId) {
+        throw "受管状态中的 Java PID 与宿主 PID 冲突，已拒绝终止。"
+    }
+
+    $javaPid = if ($javaInfo) { [int]$javaInfo.ProcessId } elseif ($initialJavaInfo) { [int]$initialJavaInfo.ProcessId } else { $null }
+    $hostPid = if ($hostInfo) { [int]$hostInfo.ProcessId } elseif ($initialHostInfo) { [int]$initialHostInfo.ProcessId } else { $null }
+    if ($javaInfo) { [void](Stop-VerifiedProcessTree -Process $javaInfo -Label "游戏服务器 Java") }
+
+    # The host normally exits after Java. Kill it only if it remains after settling.
+    if ($hostInfo) {
+        $hostDeadline = (Get-Date).AddSeconds(3)
+        while ((Get-Date) -lt $hostDeadline -and (Get-Process -Id $hostPid -ErrorAction SilentlyContinue)) {
+            Start-Sleep -Milliseconds 100
+        }
+        $remainingHost = Get-CimInstance Win32_Process -Filter "ProcessId=$hostPid" -OperationTimeoutSec 2 -ErrorAction SilentlyContinue
+        if ($remainingHost) {
+            if (-not (Test-ManagedHostProcessMatchesProfile -Process $remainingHost -Profile $Profile)) {
+                throw "托管宿主 PID $hostPid 在终止过程中发生变化，已停止继续操作。"
+            }
+            [void](Stop-VerifiedProcessTree -Process $remainingHost -Label "托管宿主")
+        }
+    }
+
+    $now = (Get-Date).ToString("o")
+    $forcedState = [ordered]@{
+        status = "stopped"
+        serverName = [string]$Profile.serverName
+        hostPid = $null
+        javaPid = $null
+        startedAt = if ($state.startedAt) { [string]$state.startedAt } else { $null }
+        updatedAt = $now
+        finishedAt = $now
+        managed = $true
+        protocolVersion = 2
+        priorityClass = if ($state.priorityClass) { [string]$state.priorityClass } else { $null }
+        exitCode = $null
+        forced = $true
+        failure = "服务器由 Web 管理员强制终止；本次操作未执行存档保存。"
+    }
+    Write-LifecycleRecoveryJson -Path $paths.statePath -Value $forcedState
+    Remove-Item -LiteralPath $paths.lifecycleLockPath -Force -ErrorAction SilentlyContinue
+
+    $operationId = [guid]::NewGuid().ToString("N")
+    $operation = [ordered]@{
+        id = $operationId; action = "force-stop"; trigger = "manual"; serverId = [string]$Profile.id
+        status = "completed"; stage = "completed"; message = "服务器进程已被强制终止，未保存存档。"
+        startedAt = $now; updatedAt = $now; finishedAt = $now; workerPid = $PID
+        oldJavaPid = $javaPid; oldHostPid = $hostPid; newJavaPid = $null
+        warningSeconds = 0; countdownUntil = $null; restartStabilizationSeconds = 0; stabilizationUntil = $null
+        warnings = @(); detail = "terminatedJavaPid=$javaPid; terminatedHostPid=$hostPid; terminatedLifecycleWorkerPids=$($workerPids -join ',')"; error = $null
+    }
+    Write-LifecycleRecoveryJson -Path $paths.operationPath -Value $operation
+    $script:statusCache = $null
+    $script:statusCacheAt = [datetime]::MinValue
+    $script:pzProcessInfoCacheAt = [datetime]::MinValue
+
+    $detail = "server=$($Profile.id) requestedBy=$RequestedBy javaPid=$javaPid hostPid=$hostPid lifecycleWorkerPids=$($workerPids -join ',') unsaved=true"
+    Add-Audit -Remote $Remote -Action "server-force-stop" -Detail $detail -Result "ok"
+    [void](Add-ExecutionHistoryRecord -ServerId ([string]$Profile.id) -Category "lifecycle" -Action "force-stop" -Source "web" `
+        -Summary "强制终止服务器（未保存）" -Status "success" -Message "已强制终止 Java PID $javaPid；本次未保存存档。" `
+        -OperationId $operationId -Detail $detail)
+    return [ordered]@{
+        ok = $true
+        message = "$($Profile.name) 已强制终止；本次未保存存档。"
+        operationId = $operationId
+        javaPid = $javaPid
+        hostPid = $hostPid
+        lifecycleWorkerPids = @($workerPids)
+    }
 }
 
 function Start-LifecycleOperation {
@@ -8775,6 +9184,82 @@ try {
                     Write-JsonResponse $context 200 (Get-NoticeReceiptPayload -Profile $profile -Id ([string]$request.QueryString["id"]))
                     continue
                 }
+                if ($request.HttpMethod -eq "GET" -and $path -eq "/community/api/maintenance/status") {
+                    Assert-CommunityMaintenancePermission -Session $communitySession
+                    $profile = Get-CommunityServerProfile -Id ([string]$request.QueryString["serverId"])
+                    $state = Get-ServerState -Profile $profile
+                    $schedule = Get-MaintenanceSchedulePayload -Profile $profile
+                    $operationPayload = Get-LifecycleOperationPayload -Profile $profile -Id ""
+                    $publicOperation = if ($operationPayload.available) {
+                        $operation = $operationPayload.operation
+                        [ordered]@{
+                            id = [string]$operation.id
+                            action = [string]$operation.action
+                            trigger = [string]$operation.trigger
+                            status = [string]$operation.status
+                            stage = [string]$operation.stage
+                            message = [string]$operation.message
+                            startedAt = [string]$operation.startedAt
+                            updatedAt = [string]$operation.updatedAt
+                            countdownUntil = $operation.countdownUntil
+                            stabilizationUntil = $operation.stabilizationUntil
+                            warningSeconds = [int]$operation.warningSeconds
+                            restartStabilizationSeconds = [int]$operation.restartStabilizationSeconds
+                            warnings = @($operation.warnings)
+                            error = [string]$operation.error
+                        }
+                    } else { $null }
+                    Write-JsonResponse $context 200 @{
+                        ok = $true
+                        serverId = [string]$profile.id
+                        server = [ordered]@{
+                            name = [string]$profile.name
+                            status = [string]$state.status
+                            alive = [bool]$state.alive
+                            writable = [bool]$state.writable
+                            canRestart = [bool]$state.canRestart
+                            lifecycleBusy = [bool]$state.lifecycleBusy
+                            adminSetupRequired = [bool]$state.adminSetupRequired
+                            note = [string]$state.note
+                        }
+                        maintenance = $schedule
+                        operation = $publicOperation
+                    }
+                    continue
+                }
+                if ($request.HttpMethod -eq "POST" -and $path -eq "/community/api/maintenance/check") {
+                    Assert-CommunityMaintenancePermission -Session $communitySession
+                    $body = Get-RequestBody $request
+                    $profile = Get-CommunityServerProfile -Id ([string]$body.serverId)
+                    $payload = Start-ScheduledModCheck -Profile $profile -Manual
+                    Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "community-mod-check" -Detail "server=$($profile.id) user=$($communitySession.user.username)" -Result "queued"
+                    Write-JsonResponse $context 202 (@{ message = [string]$payload.lastMessage } + $payload)
+                    continue
+                }
+                if ($request.HttpMethod -eq "POST" -and $path -eq "/community/api/maintenance/restart") {
+                    Assert-CommunityMaintenancePermission -Session $communitySession
+                    $body = Get-RequestBody $request
+                    $profile = Get-CommunityServerProfile -Id ([string]$body.serverId)
+                    if ([string]$body.confirm -cne "COMMUNITY_SAVE_QUIT_RESTART") { throw "重启服务器需要二次确认。" }
+                    $serverState = Get-ServerState -Profile $profile
+                    if (-not $serverState.canRestart) { throw "服务器尚未由面板受控启动，当前不能执行安全重启。" }
+                    if ([bool]$serverState.adminSetupRequired) { throw "游戏账号数据库已缺失，不能执行安全重启。请先在完整管理面板完成游戏内置 admin 初始化。" }
+                    $warningSeconds = [int]$body.warningSeconds
+                    if ($warningSeconds -eq 0) { $warningSeconds = 60 }
+                    if ($warningSeconds -lt 10 -or $warningSeconds -gt 600) { throw "重启通知倒计时必须为 10 至 600 秒。" }
+                    $schedule = Get-MaintenanceSchedule -ServerId ([string]$profile.id)
+                    $restartStabilizationSeconds = if ($null -ne $body.restartStabilizationSeconds) { [int]$body.restartStabilizationSeconds } else { [int]$schedule.restartStabilizationSeconds }
+                    if ($restartStabilizationSeconds -lt 10 -or $restartStabilizationSeconds -gt 600) { throw "停服后启动缓冲必须为 10 至 600 秒。" }
+                    $operationId = Start-LifecycleOperation -Profile $profile -Action "restart" -WarningSeconds $warningSeconds -RestartStabilizationSeconds $restartStabilizationSeconds
+                    $script:statusCache = $null
+                    $script:statusCacheAt = [datetime]::MinValue
+                    Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "community-server-restart" -Detail "server=$($profile.id) user=$($communitySession.user.username) warningSeconds=$warningSeconds stabilizationSeconds=$restartStabilizationSeconds" -Result "queued"
+                    [void](Add-ExecutionHistoryRecord -ServerId ([string]$profile.id) -Category "lifecycle" -Action "restart" -Source "web" `
+                        -Summary "专属页面安全重启（通知 $warningSeconds 秒，停服缓冲 $restartStabilizationSeconds 秒）" -Status "queued" `
+                        -Message "正在通知玩家，随后将保存、退出，旧 Java 完全结束后缓冲 $restartStabilizationSeconds 秒再启动。" -OperationId $operationId)
+                    Write-JsonResponse $context 202 @{ ok = $true; message = "正在发送双通道维护通知；倒计时结束后将保存、退出，停服后缓冲 $restartStabilizationSeconds 秒再启动。"; operationId = $operationId }
+                    continue
+                }
                 if ($request.HttpMethod -eq "POST" -and $path -eq "/community/api/notices") {
                     $body = Get-RequestBody $request
                     $profile = Get-CommunityServerProfile -Id ([string]$body.serverId)
@@ -8924,11 +9409,7 @@ try {
             if ($request.HttpMethod -eq "GET" -and $path -eq "/api/community/treasury-ledger") {
                 Assert-EconomyViewPermission -Session $session
                 $profile = Get-ServerProfile -Id ([string]$request.QueryString["serverId"])
-                $page = Get-CommunityNumber -Value $request.QueryString["page"] -Name "流水页码" -Minimum 1 -Maximum 1000000 -Integer $true
-                $pageSize = Get-CommunityNumber -Value $request.QueryString["pageSize"] -Name "流水每页数量" -Minimum 10 -Maximum 100 -Integer $true
-                Write-JsonResponse $context 200 (Get-CommunityLedgerPayload -Profile $profile -Page $page -PageSize $pageSize `
-                    -Direction ([string]$request.QueryString["direction"]) -Kind ([string]$request.QueryString["kind"]) `
-                    -Keyword ([string]$request.QueryString["keyword"]))
+                Write-JsonResponse $context 200 (Get-CommunityTreasuryLedgerPayload -Profile $profile -Request $request)
                 continue
             }
             if ($request.HttpMethod -eq "GET" -and $path -eq "/api/community/receipt") {
@@ -8940,8 +9421,9 @@ try {
             }
             if ($request.HttpMethod -eq "POST" -and $path -eq "/api/community/command") {
                 Assert-EconomyManagePermission -Session $session
-                $body = Get-CommunityRequestBody $request
-                Write-JsonResponse $context 202 (Add-CommunityAdminCommand -Body $body `
+                $body = Get-RequestBody $request
+                $profile = Get-ServerProfile -Id ([string]$body.serverId)
+                Write-JsonResponse $context 202 (Add-CommunityCommand -Profile $profile -Body $body `
                     -Remote $request.RemoteEndPoint.Address.ToString() -RequestedBy ([string]$session.user.username))
                 continue
             }
@@ -8974,6 +9456,12 @@ try {
             if ($request.HttpMethod -eq "GET" -and $path -eq "/api/admin-item-vault/receipt") {
                 Assert-PlayerDataPermission -Session $session
                 Write-JsonResponse $context 200 (Get-AdminItemVaultReceiptPayload -RequestId ([string]$request.QueryString["id"]))
+                continue
+            }
+            if ($request.HttpMethod -eq "POST" -and $path -eq "/api/admin-item-vault/receipts") {
+                Assert-PlayerDataPermission -Session $session
+                $body = Get-RequestBody $request
+                Write-JsonResponse $context 200 (Get-AdminItemVaultReceiptBatchPayload -Body $body)
                 continue
             }
             if ($request.HttpMethod -eq "GET" -and $path -eq "/api/disasters") {
@@ -9038,7 +9526,7 @@ try {
                     $users = @(Read-CommunityUsers)
                     $username = Assert-LoginName ([string]$body.username)
                     if ($users | Where-Object { [string]$_.username -ieq $username }) { throw "登录名已存在。" }
-                    $user = New-CommunityUser -Username $username -DisplayName ([string]$body.displayName) -Password ([string]$body.password) -Enabled ([bool]$body.enabled)
+                    $user = New-CommunityUser -Username $username -DisplayName ([string]$body.displayName) -Password ([string]$body.password) -Enabled ([bool]$body.enabled) -CanManageMaintenance ([bool]$body.canManageMaintenance)
                     Save-CommunityUsers -Users (@($users) + @($user))
                     Add-Audit -Remote "local" -Action "community-user-create" -Detail "username=$username" -Result "ok"
                     Write-JsonResponse $context 201 @{ ok = $true; message = "专属聊天账号已创建。"; user = Get-PublicCommunityUser $user }
@@ -9052,10 +9540,13 @@ try {
                     $username = Assert-LoginName ([string]$body.username)
                     if ($users | Where-Object { [string]$_.id -cne [string]$user.id -and [string]$_.username -ieq $username }) { throw "登录名已存在。" }
                     $enabled = [bool]$body.enabled
-                    $invalidate = [bool]$user.enabled -and -not $enabled
+                    $canManageMaintenance = [bool]$body.canManageMaintenance
+                    $invalidate = ([bool]$user.enabled -and -not $enabled) -or ([bool]$user.canManageMaintenance -ne $canManageMaintenance)
                     $user.username = $username
                     $user.displayName = Assert-SimpleText -Value ([string]$body.displayName) -Name "显示名称" -MaxLength 64
                     $user.enabled = $enabled
+                    if ($user.PSObject.Properties.Name -contains "canManageMaintenance") { $user.canManageMaintenance = $canManageMaintenance }
+                    else { $user | Add-Member -NotePropertyName canManageMaintenance -NotePropertyValue $canManageMaintenance }
                     if (-not [string]::IsNullOrWhiteSpace([string]$body.password)) {
                         $password = Assert-PanelPassword ([string]$body.password)
                         $salt = [byte[]]::new(32)
@@ -9069,7 +9560,7 @@ try {
                     if ($invalidate) { $user.sessionVersion = [int]$user.sessionVersion + 1 }
                     $user.updatedAt = (Get-Date).ToString("o")
                     Save-CommunityUsers -Users $users
-                    Add-Audit -Remote "local" -Action "community-user-update" -Detail "username=$username enabled=$enabled" -Result "ok"
+                    Add-Audit -Remote "local" -Action "community-user-update" -Detail "username=$username enabled=$enabled canManageMaintenance=$canManageMaintenance" -Result "ok"
                     Write-JsonResponse $context 200 @{ ok = $true; message = "专属聊天账号已更新。"; user = Get-PublicCommunityUser $user }
                     continue
                 }
@@ -9377,6 +9868,18 @@ try {
                     -Detail "server=$($profile.id) startupGateEnabled=$([bool]$config.startupGateEnabled) requestedBy=$($session.user.username)" -Result "ok"
                 $payload = Get-ChunkRecoveryPayload -Profile $profile -Session $session
                 $payload.message = if ($config.startupGateEnabled) { "启动 CRC 闸门已开启；目标服下次从面板启动前执行增量检查。" } else { "启动 CRC 闸门已关闭；发现野外坏区块也不会阻止服务器启动。" }
+                Write-JsonResponse $context 200 $payload
+                continue
+            }
+            if ($request.HttpMethod -eq "DELETE" -and $path -eq "/api/chunk-recovery/transaction") {
+                Assert-HostControlAdministrator -Session $session
+                $body = Get-RequestBody $request
+                $profile = Get-ServerProfile -Id ([string]$body.serverId)
+                $removed = Remove-ChunkRecoveryTransaction -Profile $profile -TransactionId ([string]$body.transactionId)
+                Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "chunk-recovery-transaction-delete" `
+                    -Detail "server=$($profile.id) transaction=$($removed.id) chunks=$(@($removed.chunks) -join ';') removedBytes=$($removed.removedBytes) requestedBy=$($session.user.username)" -Result "ok"
+                $payload = Get-ChunkRecoveryPayload -Profile $profile -Session $session
+                $payload.message = "恢复历史及其回滚快照已删除；当前地图和周期备份未改变。"
                 Write-JsonResponse $context 200 $payload
                 continue
             }
@@ -9754,8 +10257,12 @@ try {
             if ($request.HttpMethod -eq "PUT" -and $path -eq "/api/maintenance/schedule") {
                 $body = Get-RequestBody $request
                 $profile = Get-ServerProfile -Id ([string]$body.serverId)
-                $intervalHours = [int]$body.intervalHours
-                if ($intervalHours -lt 1 -or $intervalHours -gt 168) { throw "自动检查间隔必须为 1 至 168 小时的整数。" }
+                $intervalMinutes = if ($body.PSObject.Properties["intervalMinutes"]) {
+                    [int]$body.intervalMinutes
+                } elseif ($body.PSObject.Properties["intervalHours"]) {
+                    [int][math]::Round(([double]$body.intervalHours) * 60)
+                } else { 0 }
+                if ($intervalMinutes -lt 15 -or $intervalMinutes -gt 10080) { throw "自动检查间隔必须为 15 至 10080 分钟的整数。" }
                 $restartStabilizationSeconds = [int]$body.restartStabilizationSeconds
                 if ($restartStabilizationSeconds -eq 0) { $restartStabilizationSeconds = 60 }
                 if ($restartStabilizationSeconds -lt 10 -or $restartStabilizationSeconds -gt 600) { throw "停服后启动缓冲必须为 10 至 600 秒。" }
@@ -9763,7 +10270,8 @@ try {
                 $wasEnabled = [bool]$schedule.enabled
                 $wasAutoRestartEnabled = [bool]$schedule.autoRestartOnUpdate
                 $schedule.enabled = [bool]$body.enabled
-                $schedule.intervalHours = $intervalHours
+                $schedule.intervalMinutes = $intervalMinutes
+                $schedule.intervalHours = [double]$intervalMinutes / 60
                 $schedule.autoRestartOnUpdate = [bool]$body.autoRestartOnUpdate
                 $schedule.restartStabilizationSeconds = $restartStabilizationSeconds
                 if ($schedule.autoRestartOnUpdate -and -not $wasAutoRestartEnabled -and [string]$schedule.lastResultCode -eq "mods-update-required") {
@@ -9772,15 +10280,15 @@ try {
                 }
                 if ($schedule.enabled) {
                     if (-not $wasEnabled -or [string]::IsNullOrWhiteSpace([string]$schedule.nextRunAt)) {
-                        $schedule.nextRunAt = (Get-Date).AddHours($intervalHours).ToString("o")
+                        $schedule.nextRunAt = (Get-Date).AddMinutes($intervalMinutes).ToString("o")
                     }
                     elseif ($schedule.lastRunAt) {
-                        $schedule.nextRunAt = ([datetime]$schedule.lastRunAt).AddHours($intervalHours).ToString("o")
+                        $schedule.nextRunAt = ([datetime]$schedule.lastRunAt).AddMinutes($intervalMinutes).ToString("o")
                     }
                 }
                 else { $schedule.nextRunAt = $null }
                 Save-MaintenanceSchedules
-                Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "maintenance-schedule-save" -Detail "server=$($profile.id) enabled=$($schedule.enabled) intervalHours=$intervalHours stabilizationSeconds=$restartStabilizationSeconds" -Result "ok"
+                Add-Audit -Remote $request.RemoteEndPoint.Address.ToString() -Action "maintenance-schedule-save" -Detail "server=$($profile.id) enabled=$($schedule.enabled) intervalMinutes=$intervalMinutes stabilizationSeconds=$restartStabilizationSeconds" -Result "ok"
                 $message = if ($schedule.autoRestartOnUpdate) {
                     "自动 Mod 检查计划已保存；发现更新后将发送 60 秒双通道通知，停服后缓冲 $restartStabilizationSeconds 秒再安全重启。"
                 } else { "自动 Mod 检查计划已保存。" }
@@ -10483,6 +10991,15 @@ try {
                 [void](Add-ExecutionHistoryRecord -ServerId ([string]$profile.id) -Category "lifecycle" -Action "stop" -Source "web" `
                     -Summary "保存并停止服务器" -Status "queued" -Message "正在保存，完成后将正常退出。" -OperationId $operationId)
                 Write-JsonResponse $context 202 @{ ok = $true; message = "正在保存，完成后将正常退出。"; operationId = $operationId }
+                continue
+            }
+            if ($request.HttpMethod -eq "POST" -and $path -eq "/api/server/force-stop") {
+                Assert-HostControlAdministrator -Session $session
+                $body = Get-RequestBody $request
+                if ([string]$body.confirm -cne "FORCE_STOP") { throw "强制终止需要输入确认词 FORCE_STOP。" }
+                $profile = Get-ServerProfile -Id ([string]$body.serverId)
+                $payload = Invoke-ManagedForceStop -Profile $profile -Remote $request.RemoteEndPoint.Address.ToString() -RequestedBy ([string]$session.user.username)
+                Write-JsonResponse $context 200 $payload
                 continue
             }
             if ($request.HttpMethod -eq "POST" -and $path -eq "/api/server/restart") {

@@ -54,7 +54,7 @@ function eventReviewKey(event) {
     ? String(event.steamId) : `user:${String(event.username || 'unknown').toLowerCase()}`;
   const signature = [
     subject, event.type || '', event.code || '', event.command || '', event.reason || '',
-    event.sourceType || '', event.targetType || '', event.packet || '',
+    event.sourceType || '', event.targetType || '', event.packet || '', event.itemType || '',
   ].map(value => String(value).trim().toLowerCase()).join('|');
   return crypto.createHash('sha256').update(signature, 'utf8').digest('hex');
 }
@@ -81,7 +81,17 @@ function reviewEventForLine(line) {
       steamId, username, type: 'blocked-command', code: 'server-blocked',
       command: `${values.module || '?'}.${values.command || '?'}`,
     };
+    if (line.includes('event=observed_explosive_trap')) return {
+      steamId, username, type: 'explosive-trap-add', code: 'explosive-trap-packet',
+      command: 'AddExplosiveTrapPacket', packet: 'AddExplosiveTrapPacket',
+      itemType: values.itemType || 'unknown',
+    };
   }
+  const trap = /trap:\s+user\s+"([^"]+)"\s+added\s+([A-Za-z0-9_.-]+)\s+at\s+(-?\d+),(-?\d+),(-?\d+)\.?/i.exec(line);
+  if (trap) return {
+    steamId: requestedSteamId, username: trap[1], type: 'explosive-trap-add', code: 'explosive-trap-packet',
+    command: 'AddExplosiveTrapPacket', packet: 'AddExplosiveTrapPacket', itemType: trap[2],
+  };
   const command = /^\[[^\]]+\]\s+(7656119\d{10})\s+"([^"]+)"\s+([A-Za-z0-9_-]+)\.([A-Za-z0-9_.-]+)\s+@/.exec(line);
   if (command) {
     const fullCommand = `${command[3]}.${command[4]}`;
@@ -221,7 +231,6 @@ function readLogEvidence() {
       }
     }
   }
-
   const categoryCounts = { connections: 0, admin: 0, item: 0, pvp: 0, map: 0, command: 0, debug: 0, agent: 0, user: 0 };
   const commandCounts = new Map();
   const nativeAntiCheat = [];
@@ -237,6 +246,7 @@ function readLogEvidence() {
   const lifestyle = [];
   const connectionHits = [];
   const relevantDebug = [];
+  const explosiveTrapAdds = [];
   let reviewedNoiseEvents = 0;
   let firstSeen = '';
   let lastSeen = '';
@@ -283,7 +293,7 @@ function readLogEvidence() {
         categoryCounts.command += 1;
         const command = /"[^"]+"\s+([A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+)\s+@/.exec(line);
         if (command) commandCounts.set(command[1], (commandCounts.get(command[1]) || 0) + 1);
-        if (/OrangeAntiCheat|blocked_client_command|blocked_item_transform|blocked_health_overwrite|observed_health_sync/i.test(line)) keepProtected(row);
+        if (/OrangeAntiCheat|blocked_client_command|blocked_item_transform|blocked_health_overwrite|observed_health_sync|observed_explosive_trap/i.test(line)) keepProtected(row);
         else if (/addFireOnSquare|addSmokeOnSquare|addExplosionOnSquare|addFluidDebug|clearContainerExplore|addWaterContainer|removeFluidContainer|onHealthCheat|setWeight|disableForSquare|event\.thunder/i.test(line)) {
           if (isPrivilegedIdentity()) keep(authorizedAdminActions, { ...row, classification: 'authorized-admin-action', riskPoints: 0 });
           else keepProtected(row);
@@ -291,7 +301,14 @@ function readLogEvidence() {
         if (/LS\.(AddItemToPlayer|RemoveItemFromPlayer)/i.test(line)) keep(lifestyle, { ...row, command: command ? command[1] : '' }, 160);
       } else if (/_DebugLog-server\.txt$/i.test(name)) {
         categoryCounts.debug += 1;
-        if (/Anti-cheat=|Lua\/script checksums|OrangeAntiCheat|dupe|duplicate|exploit/i.test(line)) {
+        const trap = /trap:\s+user\s+"([^"]+)"\s+added\s+([A-Za-z0-9_.-]+)\s+at\s+(-?\d+),(-?\d+),(-?\d+)\.?/i.exec(line);
+        if (trap) {
+          keep(explosiveTrapAdds, {
+            ...row, eventType: 'explosive-trap-add', packet: 'AddExplosiveTrapPacket', itemType: trap[2],
+            coordinate: `${trap[3]},${trap[4]},${trap[5]}`,
+            suspiciousNonExplosiveItem: /^Base\.Hammer$/i.test(trap[2]),
+          }, 160);
+        } else if (/Anti-cheat=|Lua\/script checksums|OrangeAntiCheat|dupe|duplicate|exploit/i.test(line)) {
           if (/Anti-cheat=|Lua\/script checksums/i.test(line)) {
             const native = /Anti-cheat="([^"]+)"[^\n]*reason="([^"]*)"/i.exec(line);
             const isSpeed = Boolean(native && native[1] === 'Speed');
@@ -315,7 +332,18 @@ function readLogEvidence() {
         }
       } else if (/^server-console\.txt$/i.test(name) || /^OrangeAntiCheat-events(?:\.\d+)?\.jsonl$/i.test(name)) {
         categoryCounts.agent += 1;
-        if (/\[OrangeAntiCheat\][^\r\n]*event=(?:blocked_client_command|blocked_item_transform|blocked_health_overwrite|observed_health_sync)/i.test(line)) keepProtected(row);
+        if (/\[OrangeAntiCheat\][^\r\n]*event=(?:blocked_client_command|blocked_item_transform|blocked_health_overwrite|observed_health_sync|observed_explosive_trap)/i.test(line)) {
+          keepProtected(row);
+          if (/event=observed_explosive_trap/i.test(line)) {
+            const values = parseKeyValues(line);
+            keep(explosiveTrapAdds, {
+              ...row, eventType: 'explosive-trap-add', packet: 'AddExplosiveTrapPacket',
+              itemType: values.itemType || 'unknown',
+              coordinate: `${values.x || 0},${values.y || 0},${values.z || 0}`,
+              suspiciousNonExplosiveItem: values.plausibleExplosive === 'false',
+            }, 160);
+          }
+        }
       } else categoryCounts.user += 1;
     }
   }
@@ -341,7 +369,7 @@ function readLogEvidence() {
     commandSummary: [...commandCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([command, count]) => ({ command, count })),
     nativeAntiCheat, nativeAntiCheatSummary: nativeAntiCheatCounts,
     speedNoise: { count: nativeAntiCheatCounts.speedNoise, samples: speedNoiseSamples },
-    protectedOrBlocked, authorizedAdminActions, adminHits, itemHits, pvpHits, mapHits,
+    protectedOrBlocked, authorizedAdminActions, explosiveTrapAdds, adminHits, itemHits, pvpHits, mapHits,
     lifestyle: { total: lifestyle.length, pairedGroups: lifestylePairs.slice(0, 40), unmatched: unmatchedLifestyle.slice(0, 40) },
     connections: connectionHits, relevantDebug,
   };
@@ -523,6 +551,7 @@ function main() {
       '本证据包不解析角色背包历史或已被轮换删除的日志。',
       'AI 只能给出调查建议，不能自动执行封禁或踢出。',
       'PZAI 客户端声明可能被客户端伪造、屏蔽或修改，不能单独作为处罚依据。',
+      'explosiveTrapAdds 来自原版 AddExplosiveTrapPacket 服务端日志：证明客户端提交的物品已进入陷阱创建流程；单次正常爆炸物不能定性，普通锤子等非爆炸物重复出现属于强异常。',
       '具有服务端连接权限证据的管理员操作只保留审计，不计入作弊风险；不得仅凭用户名判断管理员身份。',
     ],
   }));

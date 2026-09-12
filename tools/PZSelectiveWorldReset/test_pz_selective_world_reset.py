@@ -1,7 +1,9 @@
 import struct
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +16,7 @@ from pz_selective_world_reset import (
     create_full_save_backup,
     main,
     parse_world_protection,
+    read_player_areas,
     read_animal_state_cells,
     read_region_header,
     read_reset_guard_manifest,
@@ -51,6 +54,46 @@ def minimal_map_meta() -> bytes:
 
 
 class WorldProtectionTests(unittest.TestCase):
+    def test_player_position_protection_skips_invalid_living_positions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            players_db = Path(temporary) / "players.db"
+            with closing(sqlite3.connect(players_db)) as connection:
+                connection.execute(
+                    "CREATE TABLE networkPlayers "
+                    "(id INTEGER, username TEXT, name TEXT, x, y, z INTEGER, isDead INTEGER)"
+                )
+                connection.executemany(
+                    "INSERT INTO networkPlayers VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (1, "missing", "Missing", None, None, 0, 0),
+                        (2, "invalid", "Invalid", "bad", "position", 0, 0),
+                        (3, "infinite", "Infinite", float("inf"), 20.0, 0, 0),
+                        (4, "nan", "NaN", float("nan"), 20.0, 0, 0),
+                        (5, "normal", "Normal", 31.9, -0.1, 0, 0),
+                        (6, "dead", "Dead", None, None, 0, 1),
+                    ],
+                )
+                connection.commit()
+
+            areas, players = read_player_areas(players_db, 0)
+
+        self.assertEqual(len(areas), 1)
+        self.assertEqual((areas[0].name, areas[0].x, areas[0].y), ("player:normal", 31, -1))
+        by_name = {player["username"]: player for player in players}
+        for username in ("missing", "invalid", "infinite", "nan"):
+            self.assertEqual(by_name[username]["positionProtection"], "skipped")
+            self.assertEqual(
+                by_name[username]["positionProtectionReason"],
+                "missing-or-invalid-position",
+            )
+        self.assertEqual(by_name["normal"]["positionProtection"], "protected")
+        self.assertEqual(by_name["dead"]["positionProtection"], "not-applicable")
+        self.assertEqual(by_name["dead"]["positionProtectionReason"], "dead-player")
+        self.assertEqual(
+            sum(player["positionProtection"] == "skipped" for player in players),
+            4,
+        )
+
     def test_reads_safehouses_and_livestock_designations(self):
         payload = bytearray(b"META")
         payload += i32(249)
@@ -229,7 +272,7 @@ class WorldProtectionTests(unittest.TestCase):
             )
             vehicles, regions = read_reset_guard_manifest(save / RESET_GUARD_MANIFEST)
             self.assertEqual(vehicles, {(0, 0)})
-            self.assertEqual(len(regions), 9)
+            self.assertEqual(len(regions), 0)
             quarantine = next(root.glob("servertest-selective-reset-quarantine-*"))
             with patch.object(
                 sys,

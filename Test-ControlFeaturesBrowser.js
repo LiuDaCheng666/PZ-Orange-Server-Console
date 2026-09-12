@@ -256,7 +256,11 @@ async function clickMobileView(page, view) {
     collectErrors(desktop, 'desktop', errors);
     await desktop.addInitScript(() => { window.confirm = () => true; });
     await desktop.goto(`http://127.0.0.1:${port}/?view=ai&server=mock`, { waitUntil: 'domcontentloaded' });
-    await desktop.waitForSelector('#authScreen', { state: 'hidden' });
+    try {
+      await desktop.waitForSelector('#authScreen', { state: 'hidden' });
+    } catch (error) {
+      throw new Error(`Authentication fixture did not settle: ${errors.join(' | ') || error.message}`);
+    }
     try {
       await desktop.waitForFunction(() => document.querySelectorAll('#aiOperationPicker input').length === 3 && document.querySelectorAll('#aiPolicyPlayerOptions option').length === 2, null, { timeout: 10000 });
     } catch (error) {
@@ -331,6 +335,17 @@ async function clickMobileView(page, view) {
     await desktop.fill('#accessForm input[name="username"]', 'Alice');
     await desktop.click('#accessForm button[data-access="user"]');
     await desktop.waitForFunction(() => document.querySelector('#commandResultTitle').textContent.includes('修改访问级别'));
+    await desktop.evaluate(() => { const input = document.querySelector('#grantForm input[name="targetMode"][value="selected"]'); input.checked = true; input.dispatchEvent(new Event('change', { bubbles: true })); });
+    await desktop.fill('#grantForm .item-target-search-input', 'Alice');
+    await desktop.check('#grantForm .item-target-checklist input[value="Alice"]');
+    await desktop.fill('#grantForm .item-target-search-input', '76561198000000002');
+    await desktop.check('#grantForm .item-target-checklist input[value="玩家乙"]');
+    const playerSearchState = await desktop.evaluate(() => ({
+      visibleNames: [...document.querySelectorAll('#grantForm .item-target-checklist input')].map(input => input.value),
+      summary: document.querySelector('#grantForm .item-target-summary').textContent,
+    }));
+    await desktop.evaluate(() => { const input = document.querySelector('#grantForm input[name="targetMode"][value="single"]'); input.checked = true; input.dispatchEvent(new Event('change', { bubbles: true })); });
+    await desktop.fill('#grantForm .item-target-search-input', 'Alice');
     await desktop.selectOption('#grantForm .online-player-select', 'Alice');
     await desktop.fill('#grantForm input[name="count"]', '2');
     await desktop.selectOption('#grantForm select[name="notificationChannel"]', 'both');
@@ -434,7 +449,7 @@ async function clickMobileView(page, view) {
     const mobileHistoryLayout = await layout(mobile, ['.execution-history', '#executionHistoryList']);
     await mobile.screenshot({ path: path.join(__dirname, 'pz-panel-execution-history-mobile.png'), fullPage: true });
 
-    const result = { requests, policyCount: policies.length, scheduleCount: schedules.length, historyCount: history.length, antiCheatLocalization, patchLocalization, playerHistoryRefresh, mobilePlayerHistoryRefresh, desktop: { ai: aiLayout, anticheat: antiCheatLayout, patches: patchLayout, itemGrant: itemGrantLayout, chat: chatLayout, history: historyLayout }, mobile: { access: mobileAccess, chat: mobileChatLayout, itemGrant: mobileItemGrantLayout, anticheat: mobileAntiCheatLayout, patches: mobilePatchLayout, ai: mobileAiLayout, history: mobileHistoryLayout }, browserErrors: errors };
+    const result = { requests, policyCount: policies.length, scheduleCount: schedules.length, historyCount: history.length, antiCheatLocalization, patchLocalization, playerSearchState, playerHistoryRefresh, mobilePlayerHistoryRefresh, desktop: { ai: aiLayout, anticheat: antiCheatLayout, patches: patchLayout, itemGrant: itemGrantLayout, chat: chatLayout, history: historyLayout }, mobile: { access: mobileAccess, chat: mobileChatLayout, itemGrant: mobileItemGrantLayout, anticheat: mobileAntiCheatLayout, patches: mobilePatchLayout, ai: mobileAiLayout, history: mobileHistoryLayout }, browserErrors: errors };
     console.log(JSON.stringify(result, null, 2));
     if (errors.length) process.exitCode = 2;
     if (!requests.policy || requests.policy.serverId !== 'mock' || requests.policy.username !== 'Alice' || requests.policy.steamId !== '76561198000000001' || requests.policy.trustedAll || requests.policy.allowedOperations.length !== 2) process.exitCode = 3;
@@ -443,6 +458,7 @@ async function clickMobileView(page, view) {
     if (!requests.playerPassword || requests.playerPassword.serverId !== 'mock' || requests.playerPassword.steamId !== '76561198000000001' || requests.playerPassword.username !== 'Alice' || requests.playerPassword.password !== 'new-test-password' || !passwordFieldsCleared) process.exitCode = 14;
     if (!requests.runNow || requests.runNow.id !== 'schedule-1' || history.length !== 2) process.exitCode = 5;
     if (!requests.itemGrant || requests.itemGrant.notificationChannel !== 'both' || requests.itemGrant.notificationDuration !== 25 || requests.itemGrant.usernames[0] !== 'Alice' || requests.itemGrant.count !== 2 || !/^[a-f0-9]{32}$/.test(requests.itemGrant.submissionId)) process.exitCode = 7;
+    if (playerSearchState.visibleNames.length !== 1 || playerSearchState.visibleNames[0] !== '玩家乙' || !playerSearchState.summary.includes('已选择 2/2')) process.exitCode = 21;
     if (requests.itemResultQueries !== 0 || requests.itemSubmissionQueries !== 0) process.exitCode = 10;
     if (!mobileAccess.aiVisible || !mobileAccess.antiCheatVisible || mobileAccess.pageCount !== 16 || !mobileAccess.usersHidden || mobileAccess.activeView !== 'view-ai') process.exitCode = 8;
     if (!requests.aiRuntime || requests.aiRuntime.action !== 'restart') process.exitCode = 9;

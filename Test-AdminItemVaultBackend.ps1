@@ -24,11 +24,10 @@ function Import-PanelFunction {
 
 foreach ($name in @(
     'Assert-SimpleText', 'New-AdminItemVaultStore', 'Read-AdminItemVaultStore', 'Save-AdminItemVaultStore',
-    'Get-AdminItemVaultProfilePaths', 'Read-AdminItemVaultJsonLines', 'Add-AdminItemVaultJsonLine',
-    'Test-AdminItemVaultTemplateRecord', 'Import-AdminItemVaultTemplates', 'Publish-AdminItemVaultTemplates',
-    'Sync-AdminItemVaultReceipts',
-    'Get-AdminItemVaultPayload', 'Invoke-AdminItemVaultSync', 'Add-AdminItemVaultGrant', 'Remove-AdminItemVaultTemplate',
-    'Get-AdminItemVaultReceiptPayload'
+    'Get-AdminItemVaultProfilePaths', 'Read-AdminItemVaultJsonLines', 'Add-AdminItemVaultJsonLine', 'Add-AdminItemVaultJsonLines',
+    'Test-AdminItemVaultTemplateRecord', 'Import-AdminItemVaultTemplates', 'Publish-AdminItemVaultTemplates', 'Sync-AdminItemVaultReceipts',
+    'Get-AdminItemVaultPayload', 'Resolve-AdminItemVaultGrantTargets', 'Add-AdminItemVaultGrant', 'Remove-AdminItemVaultTemplate',
+    'Get-AdminItemVaultReceiptPayload', 'Get-AdminItemVaultReceiptBatchPayload'
 )) { Import-PanelFunction -Name $name }
 
 function Add-Audit {
@@ -46,7 +45,12 @@ function Get-ServerProfile {
 function Get-PlayerDirectory {
     param($Profile)
     return [ordered]@{
-        players = @([pscustomobject]@{ username = 'TargetUser'; steamId = '76561198000000002'; online = $false; role = 'user' })
+        onlineKnown = $true
+        players = @(
+            [pscustomobject]@{ username = 'TargetUser'; steamId = '76561198000000002'; online = $false; role = 'user'; lastConnection = '2026-08-01' }
+            [pscustomobject]@{ username = 'OnlineUser'; steamId = '76561198000000003'; online = $true; role = 'user'; lastConnection = '2026-09-01' }
+            [pscustomobject]@{ username = 'HistoryUser'; steamId = '76561198000000004'; online = $false; role = 'user'; lastConnection = '2026-07-01' }
+        )
     }
 }
 
@@ -56,25 +60,6 @@ $serverProfiles = @(
     [pscustomobject]@{ id = 'two'; name = 'Server Two'; serverName = 'server2'; dataRoot = (Join-Path $testRoot 'two') }
 )
 foreach ($profile in $serverProfiles) { New-Item -ItemType Directory -Path (Join-Path $profile.dataRoot 'Lua') -Force | Out-Null }
-$processedSyncRequests = @{}
-
-function Start-Sleep {
-    param([int]$Milliseconds)
-    foreach ($profile in $script:serverProfiles) {
-        $paths = Get-AdminItemVaultProfilePaths -Profile $profile
-        foreach ($row in @(Read-AdminItemVaultJsonLines -Path $paths.import)) {
-            if (-not $row.valid -or [string]$row.value.kind -cne 'sync') { continue }
-            $requestId = [string]$row.value.requestId
-            if ($script:processedSyncRequests[$requestId]) { continue }
-            Add-AdminItemVaultJsonLine -Path $paths.receipt -Value ([ordered]@{
-                schema = 1; kind = 'sync'; requestId = $requestId; status = 'synced'
-                detail = 'attempted=1;completed=1;failed=0;remaining=0'; delivered = 1
-                updatedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-            })
-            $script:processedSyncRequests[$requestId] = $true
-        }
-    }
-}
 
 try {
     $snapshot = [ordered]@{
@@ -98,31 +83,11 @@ try {
         snapshot = $snapshot
     }
     $sourcePaths = Get-AdminItemVaultProfilePaths -Profile $serverProfiles[0]
-    if ([IO.Path]::GetExtension($sourcePaths.export) -cne '.txt' -or
-        [IO.Path]::GetExtension($sourcePaths.import) -cne '.txt' -or
-        [IO.Path]::GetExtension($sourcePaths.receipt) -cne '.txt') {
-        throw 'B42 vault bridge paths must use a whitelisted file extension.'
-    }
-    if ([IO.Path]::GetExtension($sourcePaths.legacyExport) -cne '.jsonl') { throw 'Legacy export compatibility path is missing.' }
-    $legacyTemplate = $template | ConvertTo-Json -Depth 32 | ConvertFrom-Json
-    $legacyTemplate.templateId = 'vault-template-1111111111111111'
-    $legacyTemplate.snapshotHash = '1111111111111111'
-    [IO.File]::WriteAllText($sourcePaths.legacyExport, ($legacyTemplate | ConvertTo-Json -Depth 32 -Compress) + "`n", $utf8)
     [IO.File]::WriteAllText($sourcePaths.export, ($template | ConvertTo-Json -Depth 32 -Compress) + "`n", $utf8)
 
-    $payload = Invoke-AdminItemVaultSync -Remote 'test' -RequestedBy 'admin' -WaitMilliseconds 1000
-    if ($payload.templates.Count -ne 2 -or $payload.imported -ne 2) { throw 'Current and legacy template import failed.' }
-    if ($payload.sync.synced -ne 2 -or $payload.sync.failed -ne 0) { throw 'Triggered server synchronization failed.' }
-    if ($payload.sync.templatesQueued -ne 4) { throw 'Central templates were not queued to every server.' }
+    $payload = Get-AdminItemVaultPayload -Remote 'test' -RequestedBy 'admin'
+    if ($payload.templates.Count -ne 1 -or $payload.imported -ne 1) { throw 'Template import failed.' }
     if ([string]$payload.templates[0].snapshot.modData.nested.mode -cne 'full-auto') { throw 'Nested snapshot data changed during import.' }
-
-    $serverTwoTemplates = @(Read-AdminItemVaultJsonLines -Path (Get-AdminItemVaultProfilePaths -Profile $serverProfiles[1]).import |
-        Where-Object { $_.valid -and [string]$_.value.kind -ceq 'template_sync' })
-    if ($serverTwoTemplates.Count -ne 2) { throw 'Server two did not receive the central template payloads.' }
-    if ([string]$serverTwoTemplates[0].value.template.snapshot.modData.nested.mode -cne 'full-auto' -and
-            [string]$serverTwoTemplates[1].value.template.snapshot.modData.nested.mode -cne 'full-auto') {
-        throw 'Cross-server template payload changed nested snapshot data.'
-    }
 
     $grantResult = Add-AdminItemVaultGrant -Remote 'test' -RequestedBy 'admin' -Body ([pscustomobject]@{
         confirm = 'GRANT_ADMIN_VAULT_ITEM'
@@ -133,38 +98,66 @@ try {
         count = 2
     })
     $targetPaths = Get-AdminItemVaultProfilePaths -Profile $serverProfiles[1]
-    $queueRows = @(Read-AdminItemVaultJsonLines -Path $targetPaths.import | Where-Object {
-        $_.valid -and [string]$_.value.requestId -ceq [string]$grantResult.grant.requestId
-    })
+    $queueRows = @(Read-AdminItemVaultJsonLines -Path $targetPaths.import | Where-Object { $_.valid -and [string]$_.value.requestId -like 'vault-grant-*' })
     if ($queueRows.Count -ne 1 -or -not $queueRows[0].valid) { throw 'Grant queue row was not written.' }
     $queued = $queueRows[0].value
     if ([string]$queued.snapshot.modData.nested.mode -cne 'full-auto' -or [int]$queued.count -ne 2 -or [int]$queued.hashVersion -ne 2) { throw 'Grant queue changed the item snapshot or hash version.' }
+
+    $bulkBody = [pscustomobject]@{
+        confirm = 'GRANT_ADMIN_VAULT_ITEM_BULK'
+        confirmedTargetCount = 3
+        submissionId = '0123456789abcdef0123456789abcdef'
+        targetMode = 'all-registered'
+        serverId = 'two'
+        templateId = 'vault-template-0123456789abcdef'
+        count = 1
+    }
+    $bulkResult = Add-AdminItemVaultGrant -Remote 'test' -RequestedBy 'admin' -Body $bulkBody
+    if ($bulkResult.targetCount -ne 3 -or $bulkResult.grants.Count -ne 3) { throw 'All-registered bulk grant did not resolve all players.' }
+    $queueRows = @(Read-AdminItemVaultJsonLines -Path $targetPaths.import | Where-Object { $_.valid -and [string]$_.value.requestId -like 'vault-grant-*' })
+    if ($queueRows.Count -ne 4) { throw "Bulk queue expected 4 total rows, got $($queueRows.Count)." }
+    $bulkSteamIds = @($bulkResult.grants | ForEach-Object { [string]$_.targetSteamId } | Sort-Object -Unique)
+    if ($bulkSteamIds.Count -ne 3 -or '76561198000000004' -notin $bulkSteamIds) { throw 'Bulk grant targets were not deduplicated from the server player directory.' }
+    $duplicateResult = Add-AdminItemVaultGrant -Remote 'test' -RequestedBy 'admin' -Body $bulkBody
+    $grantRowsAfterDuplicate = @(Read-AdminItemVaultJsonLines -Path $targetPaths.import | Where-Object { $_.valid -and [string]$_.value.requestId -like 'vault-grant-*' })
+    if (-not $duplicateResult.duplicate -or $grantRowsAfterDuplicate.Count -ne 4) { throw 'Submission id did not prevent duplicate bulk queue writes.' }
+    try {
+        [void](Add-AdminItemVaultGrant -Remote 'test' -RequestedBy 'admin' -Body ([pscustomobject]@{
+            confirm = 'GRANT_ADMIN_VAULT_ITEM_BULK'; confirmedTargetCount = 2; targetMode = 'all-registered'
+            serverId = 'two'; templateId = 'vault-template-0123456789abcdef'; count = 1
+        }))
+        throw 'Changed target count was accepted.'
+    }
+    catch {
+        if ($_.Exception.Message -eq 'Changed target count was accepted.') { throw }
+        if ($_.Exception.Message -notmatch '人数已变化') { throw }
+    }
 
     $receipt = [ordered]@{ schema = 1; requestId = $grantResult.grant.requestId; status = 'queued_offline'; detail = 'waiting_for_player'; delivered = 0; updatedMs = 1787330000500 }
     Add-AdminItemVaultJsonLine -Path $targetPaths.receipt -Value $receipt
     $receiptPayload = Get-AdminItemVaultReceiptPayload -RequestId $grantResult.grant.requestId
     if ([string]$receiptPayload.grant.status -cne 'queued_offline') { throw 'Receipt state was not synchronized.' }
+    $batchReceipt = Get-AdminItemVaultReceiptBatchPayload -Body ([pscustomobject]@{ requestIds = @($grantResult.grant.requestId, $bulkResult.grants[0].requestId) })
+    if ($batchReceipt.requested -ne 2 -or $batchReceipt.found -ne 2) { throw 'Batch receipt lookup did not return requested grants.' }
 
     [void](Remove-AdminItemVaultTemplate -Remote 'test' -RequestedBy 'admin' -Body ([pscustomobject]@{
         confirm = 'DELETE_ADMIN_VAULT_TEMPLATE'
         templateId = 'vault-template-0123456789abcdef'
     }))
     $store = Read-AdminItemVaultStore
-    if (@($store.deployments | Where-Object { [string]$_.templateId -ceq 'vault-template-0123456789abcdef' }).Count -ne 0) {
-        throw 'Deleted template deployment metadata was retained.'
-    }
     $store.sourceCursors = @()
     Save-AdminItemVaultStore -Store $store
     $afterDelete = Get-AdminItemVaultPayload -Remote 'test' -RequestedBy 'admin'
-    if ($afterDelete.templates.Count -ne 1 -or [string]$afterDelete.templates[0].templateId -cne 'vault-template-1111111111111111') {
-        throw 'Deleted template was re-imported or the legacy template was lost.'
-    }
+    if ($afterDelete.templates.Count -ne 0) { throw 'Deleted template was re-imported.' }
     if (-not ($auditRecords | Where-Object action -ceq 'admin-item-vault-grant')) { throw 'Grant audit record is missing.' }
 
     [pscustomobject]@{
         ok = $true
-        imported = 2
+        imported = 1
         queuedCopies = 2
+        bulkTargets = 3
+        duplicatePrevented = $true
+        changedRosterRejected = $true
         receipt = 'queued_offline'
         deletedTemplateStayedDeleted = $true
         auditRecords = $auditRecords.Count

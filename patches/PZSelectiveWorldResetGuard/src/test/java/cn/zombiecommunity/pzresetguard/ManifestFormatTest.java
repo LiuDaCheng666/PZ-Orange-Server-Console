@@ -21,13 +21,14 @@ public final class ManifestFormatTest {
                     StandardCharsets.UTF_8);
             SelectiveWorldResetRuntime.ManifestData data =
                     SelectiveWorldResetRuntime.readManifest(manifest);
-            if (data.vehicleChunks.size() != 2 || data.regionEpochs.size() != 1) {
+            if (data.vehicleChunks.length != 2 || data.regionRecords != 1) {
                 throw new AssertionError("unexpected manifest counts");
             }
-            long key = SelectiveWorldResetRuntime.pack(10, 20);
-            if (!Long.valueOf(123456789L).equals(data.regionEpochs.get(key))) {
-                throw new AssertionError("region epoch was not parsed");
+            if (SelectiveWorldResetRuntime.unpackX(data.vehicleChunks[0]) != 10
+                    || SelectiveWorldResetRuntime.unpackY(data.vehicleChunks[0]) != 20) {
+                throw new AssertionError("vehicle coordinate was not parsed");
             }
+            long key = SelectiveWorldResetRuntime.pack(10, 20);
             if (SelectiveWorldResetRuntime.unpackX(key) != 10
                     || SelectiveWorldResetRuntime.unpackY(key) != 20) {
                 throw new AssertionError("coordinate packing is not reversible");

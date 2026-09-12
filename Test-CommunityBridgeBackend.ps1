@@ -18,12 +18,15 @@ function Import-PanelFunction {
 }
 
 foreach ($name in @(
-    'Get-CommunityProfilePaths', 'Assert-CommunityProfileDataRootUnique', 'Get-CommunityText',
-    'Get-CommunityNumber', 'Assert-CommunityReason', 'Get-CommunityCommandMap',
-    'Get-CommunityCommandDefinition', 'Read-CommunityRuntimeState', 'Test-CommunityRuntimeStateFresh',
-    'Test-CommunityCommandConsumer', 'Read-CommunityJsonLines', 'Add-CommunityJsonLine',
-    'Get-CommunityReceiptPayload', 'Get-CommunityQueueEntries', 'Get-CommunityPayload',
-    'Get-CommunityLedgerPayload', 'ConvertTo-CommunityCommandArguments', 'Add-CommunityAdminCommand'
+    'Read-Utf8Tail', 'Get-EconomyFiniteDouble', 'Get-EconomyDecimal', 'Get-EconomyInteger',
+    'Get-EconomyOptionalText', 'Assert-EconomyReason', 'Throw-EconomyHttpError',
+    'Assert-EconomyProfileDataRootUnique', 'Get-CommunityProfilePaths', 'Read-CommunityStateFile',
+    'Read-CommunityRuntimeState', 'Test-CommunityRuntimeStateFresh', 'Read-CommunityTreasuryLedgerState',
+    'Copy-CommunitySectionWithoutProperty', 'Get-CommunityPublicSnapshot', 'Get-CommunityJsonLines',
+    'Get-CommunityQueueRows', 'Get-CommunityPayload', 'Assert-CommunityRequestRateLimit',
+    'Add-CommunityJsonLine', 'Get-CommunityCommandArguments', 'Add-CommunityCommand',
+    'Get-CommunityReceiptPayload', 'Get-CommunityLedgerCategoryName', 'Test-CommunityReadableText',
+    'ConvertTo-CommunityLedgerRow', 'Get-CommunityTreasuryLedgerPayload'
 )) { Import-PanelFunction $name }
 
 $utf8 = [Text.UTF8Encoding]::new($false)
@@ -31,6 +34,8 @@ $communityStateMaximumBytes = 4MB
 $communityQueueMaximumBytes = 512KB
 $communityCommandCompactBytes = 256KB
 $communityBridgeFreshnessMilliseconds = 45000
+$communityStateFileCache = @{}
+$communityRequestRateEvents = [Collections.Generic.List[object]]::new()
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("pz-community-bridge-" + [guid]::NewGuid().ToString('N'))
 $profiles = @(
     [pscustomobject]@{ id = 'one'; name = '一服'; serverName = 'servertest'; dataRoot = (Join-Path $testRoot 'one') },
@@ -56,6 +61,12 @@ function Assert-Throws {
     $raised = $false
     try { & $Action } catch { $raised = $true }
     if (-not $raised) { throw $Message }
+}
+function New-TestLedgerRequest {
+    param([string]$Direction = '', [string]$Kind = '', [string]$Keyword = '')
+    return [pscustomobject]@{ QueryString = @{
+        page = '1'; pageSize = '10'; direction = $Direction; kind = $Kind; keyword = $Keyword
+    } }
 }
 function Write-TestState {
     param($Profile = $script:profiles[0], [int64]$UpdatedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(),
@@ -95,6 +106,7 @@ function Write-TestState {
             economic = [ordered]@{ value = 120 }; horde = [ordered]@{ threat = 450; defense = 800 }
             population = [ordered]@{ previousDayAverage = 12.5 }
         }
+        projects = [ordered]@{ revision = 5; maxActive = 3; templates = @(); projects = @() }
     }
     [IO.File]::WriteAllText($paths.state, ($state | ConvertTo-Json -Depth 20 -Compress), $utf8)
     return $state
@@ -126,26 +138,28 @@ try {
     Assert-Throws { Read-CommunityRuntimeState $profiles[0] } 'A snapshot from another server was accepted.'
     [void](Write-TestState)
 
-    $ledger = Get-CommunityLedgerPayload -Profile $profiles[0] -Page 1 -PageSize 10 -Direction '收入' -Kind '' -Keyword '车辆'
-    if ($ledger.total -ne 1 -or $ledger.rows[0].categoryName -cne '交易税') {
-        throw 'Nested Chinese treasury ledger search or paging failed.'
+    $ledger = Get-CommunityTreasuryLedgerPayload -Profile $profiles[0] `
+        -Request (New-TestLedgerRequest -Direction '收入' -Keyword '车辆')
+    if ($ledger.total -ne 1 -or $ledger.rows -isnot [array] -or @($ledger.rows)[0].categoryName -cne '交易税') {
+        throw "Nested Chinese treasury ledger search or paging failed: $($ledger | ConvertTo-Json -Depth 8 -Compress)"
     }
-    $ledgerByPerson = Get-CommunityLedgerPayload -Profile $profiles[0] -Page 1 -PageSize 10 -Direction '支出' -Kind 'official_salary' -Keyword 'Bob'
+    $ledgerByPerson = Get-CommunityTreasuryLedgerPayload -Profile $profiles[0] `
+        -Request (New-TestLedgerRequest -Direction '支出' -Kind 'official_salary' -Keyword 'Bob')
     if ($ledgerByPerson.total -ne 1) { throw 'Treasury category and nested target-name filtering failed.' }
 
-    $command = Add-CommunityAdminCommand -Body ([pscustomobject]@{
+    $command = Add-CommunityCommand -Profile $profiles[0] -Body ([pscustomobject]@{
         serverId = 'one'; operation = 'admin_override_law'; reason = '测试法律调整'; expectedRevision = 12
         confirmation = 'COMMUNITY_ADMIN_COMMAND'; args = [pscustomobject]@{
             governmentForm = 'democratic'; votingDays = 8; termDays = 60; voteFee = 10
         }
     }) -Remote '127.0.0.1' -RequestedBy 'admin'
-    $commands = @(Read-CommunityJsonLines $paths.command)
+    $commands = @(Get-CommunityJsonLines $paths.command)
     if ($command.requestId -notmatch '^community-[a-f0-9]{32}$' -or $commands[-1].expectedServerName -cne 'servertest' -or
             $commands[-1].operation -cne 'admin_override_law' -or $commands[-1].args.governmentForm -cne 'democratic') {
         throw 'Community command queue contract is inconsistent.'
     }
     Assert-Throws {
-        Add-CommunityAdminCommand -Body ([pscustomobject]@{
+        Add-CommunityCommand -Profile $profiles[0] -Body ([pscustomobject]@{
             serverId = 'one'; operation = 'admin_override_law'; reason = '旧页面提交'; expectedRevision = 11
             confirmation = 'COMMUNITY_ADMIN_COMMAND'; args = [pscustomobject]@{
                 governmentForm = 'constitutional'; votingDays = 4; termDays = 30; voteFee = 0

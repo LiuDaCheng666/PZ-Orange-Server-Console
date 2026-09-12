@@ -47,6 +47,30 @@
       </aside>
     </main>
 
+    <section class="maintenance-pane" id="maintenancePane" hidden>
+      <div class="maintenance-heading">
+        <div><span class="eyebrow">服务器维护</span><h2>Mod 更新与安全重启</h2></div>
+        <span class="maintenance-state" id="maintenanceServerState">读取状态</span>
+      </div>
+      <div class="maintenance-summary">
+        <div><span>当前服务器</span><strong id="maintenanceServerName">--</strong><small id="maintenanceServerNote">等待读取</small></div>
+        <div><span>Mod 检查</span><strong id="maintenanceModState">--</strong><small id="maintenanceModResult">尚未检查</small></div>
+        <div><span>更新处理</span><strong id="maintenanceAutoRestart">--</strong><small id="maintenanceLastCheck">上次检查 --</small></div>
+        <div><span>生命周期</span><strong id="maintenanceOperationState">空闲</strong><small id="maintenanceOperationMessage">当前没有维护任务</small></div>
+      </div>
+      <div class="maintenance-controls">
+        <div class="maintenance-check">
+          <button class="secondary-action" id="checkModsButton" type="button"><i data-lucide="refresh-cw"></i><span>检查 Mod 更新</span></button>
+          <small id="maintenanceResult">等待操作</small>
+        </div>
+        <form id="restartForm">
+          <label>通知倒计时（秒）<input name="warningSeconds" type="number" min="10" max="600" value="60" required></label>
+          <label>停服缓冲（秒）<input name="restartStabilizationSeconds" type="number" min="10" max="600" value="90" required></label>
+          <button class="danger-action" id="restartButton" type="submit"><i data-lucide="rotate-cw"></i><span>安全重启</span></button>
+        </form>
+      </div>
+    </section>
+
     <section class="notice-pane">
       <div class="notice-heading">
         <div><span class="eyebrow">PZWebNotices</span><h2>游戏内弹窗</h2></div>

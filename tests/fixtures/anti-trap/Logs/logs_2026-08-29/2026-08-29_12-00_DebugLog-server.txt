@@ -1,0 +1,11 @@
+[29-08-26 12:01:00.000] LOG  : General > trap: user "TrapHammer" added Base.Hammer at 100,200,0.
+[29-08-26 12:02:00.000] LOG  : General > trap: user "TrapHammer" added Base.Hammer at 101,200,0.
+[29-08-26 12:03:00.000] LOG  : General > trap: user "TrapHammer" added Base.Hammer at 102,200,0.
+[29-08-26 12:04:00.000] LOG  : General > trap: user "TrapHammer" added Base.Hammer at 103,200,0.
+[29-08-26 12:05:00.000] LOG  : General > trap: user "LegitimateThrow" added Base.Molotov at 300,400,0.
+[29-08-26 12:06:00.000] LOG  : General > trap: user "LegitimateThrow" added Base.PipeBomb at 301,400,0.
+[29-08-26 12:07:00.000] LOG  : General > trap: user "LegitimateThrow" added Base.PipeBomb at 302,400,0.
+[29-08-26 12:08:00.000] LOG  : General > trap: user "LegitimateThrow" added Base.PipeBomb at 303,400,0.
+[29-08-26 12:11:00.100] LOG  : General > trap: user "KFFC" added Base.Hammer at 500,600,0.
+[29-08-26 12:12:00.100] LOG  : General > trap: user "KFFC" added Base.Hammer at 501,600,0.
+[29-08-26 12:13:00.100] LOG  : General > trap: user "KFFC" added Base.Hammer at 502,600,0.

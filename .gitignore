@@ -40,6 +40,11 @@ tools/*
 !tools/PZSelectiveWorldReset/Invoke-PZSelectiveWorldReset.ps1
 !tools/PZSelectiveWorldReset/pz_selective_world_reset.py
 !tools/PZSelectiveWorldReset/README.md
+!tools/PZChunkRecovery/
+!tools/PZChunkRecovery/Invoke-PZChunkRecovery.ps1
+!tools/PZChunkRecovery/pz_chunk_recovery.py
+!tools/PZChunkRecovery/README.md
+!tools/PZChunkRecovery/test_pz_chunk_recovery.py
 runtime/node.exe
 
 # Managed server runtime state and queues
@@ -53,6 +58,8 @@ managed/*/
 
 # Local test output
 pz-panel-*.png
+admin-item-vault-*.png
+community-navigation-*.png
 Test-*.result.json
 __pycache__/
 

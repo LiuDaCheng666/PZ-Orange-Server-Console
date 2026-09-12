@@ -1,20 +1,11 @@
 package cn.zombiecommunity.pzresetguard;
 
-import java.io.File;
-import java.lang.reflect.Method;
+import java.io.BufferedReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import zombie.ZomboidFileSystem;
-import zombie.iso.IsoChunk;
-import zombie.iso.areas.isoregion.IsoRegions;
 import zombie.vehicles.VehiclesDB2;
 
 public final class SelectiveWorldResetRuntime {
@@ -22,11 +13,6 @@ public final class SelectiveWorldResetRuntime {
     private static final String HEADER = "PZ_SELECTIVE_RESET_GUARD_V1";
     private static final int MAX_RECORDS = 5_000_000;
     private static final AtomicBoolean LOADED = new AtomicBoolean();
-    private static final AtomicBoolean FAILURE_LOGGED = new AtomicBoolean();
-    private static final ConcurrentHashMap<Long, Long> PENDING_REGIONS = new ConcurrentHashMap<>();
-    private static final AtomicInteger QUEUED_REGIONS = new AtomicInteger();
-    private static volatile Method getRegionWorker;
-    private static volatile Method readSurroundingChunks;
 
     private SelectiveWorldResetRuntime() {
     }
@@ -41,149 +27,87 @@ public final class SelectiveWorldResetRuntime {
                 System.out.println("[PZSelectiveResetGuard] ACTIVE no reset manifest; vanilla world generation unchanged");
                 return;
             }
+            long startedAt = System.nanoTime();
             ManifestData manifest = readManifest(manifestPath);
-            for (ChunkCoordinate coordinate : manifest.vehicleChunks) {
-                VehiclesDB2.instance.setChunkSeen(coordinate.wx, coordinate.wy);
+            for (long coordinate : manifest.vehicleChunks) {
+                VehiclesDB2.instance.setChunkSeen(unpackX(coordinate), unpackY(coordinate));
             }
-            for (Map.Entry<Long, Long> entry : manifest.regionEpochs.entrySet()) {
-                int wx = unpackX(entry.getKey());
-                int wy = unpackY(entry.getKey());
-                if (!isRegionCacheFresh(wx, wy, entry.getValue())) {
-                    PENDING_REGIONS.put(entry.getKey(), entry.getValue());
-                }
-            }
+            long elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L;
             System.out.println("[PZSelectiveResetGuard] ACTIVE manifest=" + manifestPath
-                    + " vehicleChunks=" + manifest.vehicleChunks.size()
-                    + " regionPending=" + PENDING_REGIONS.size());
+                    + " vehicleChunks=" + manifest.vehicleChunks.length
+                    + " regionRecordsIgnored=" + manifest.regionRecords
+                    + " regionRebuild=vanilla"
+                    + " loadMs=" + elapsedMillis);
         } catch (Throwable failure) {
             System.err.println("[PZSelectiveResetGuard] MANIFEST_FAILED; vanilla world generation remains active: "
                     + failure);
         }
     }
 
-    public static void onChunkLoaded(IsoChunk chunk) {
-        if (chunk == null || PENDING_REGIONS.isEmpty()) {
-            return;
-        }
-        long key = pack(chunk.wx, chunk.wy);
-        Long epoch = PENDING_REGIONS.get(key);
-        if (epoch == null) {
-            return;
-        }
-        try {
-            if (isRegionCacheFresh(chunk.wx, chunk.wy, epoch)) {
-                PENDING_REGIONS.remove(key, epoch);
-                return;
-            }
-            Method workerAccessor = getRegionWorkerMethod();
-            Object worker = workerAccessor.invoke(null);
-            if (worker == null) {
-                return;
-            }
-            Method rebuild = getReadSurroundingChunksMethod(worker.getClass());
-            rebuild.invoke(worker, chunk.wx, chunk.wy, 1, true, true);
-            PENDING_REGIONS.remove(key, epoch);
-            int queued = QUEUED_REGIONS.incrementAndGet();
-            if (queued == 1 || queued % 1000 == 0) {
-                System.out.println("[PZSelectiveResetGuard] region rebuild queued=" + queued
-                        + " remaining=" + PENDING_REGIONS.size());
-            }
-        } catch (Throwable failure) {
-            if (FAILURE_LOGGED.compareAndSet(false, true)) {
-                System.err.println("[PZSelectiveResetGuard] REGION_REBUILD_FAILED; will retry when chunk reloads: "
-                        + failure);
-            }
-        }
-    }
-
     static ManifestData readManifest(Path path) throws Exception {
-        List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
-        if (lines.isEmpty() || !HEADER.equals(lines.get(0).strip())) {
-            throw new IllegalArgumentException("unsupported reset guard manifest header");
-        }
-        if (lines.size() - 1 > MAX_RECORDS) {
-            throw new IllegalArgumentException("reset guard manifest exceeds record limit");
-        }
-        List<ChunkCoordinate> vehicleChunks = new ArrayList<>();
-        Map<Long, Long> regionEpochs = new HashMap<>();
-        for (int index = 1; index < lines.size(); index++) {
-            String line = lines.get(index).strip();
-            if (line.isEmpty() || line.startsWith("#")) {
-                continue;
+        long estimatedRecords = Math.min(MAX_RECORDS, Math.max(16L, Files.size(path) / 18L));
+        LongArrayBuilder vehicleChunks = new LongArrayBuilder((int) Math.min(estimatedRecords / 2L, 1_500_000L));
+        int regionRecords = 0;
+
+        try (BufferedReader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+            String header = reader.readLine();
+            if (header == null || !HEADER.equals(header.strip())) {
+                throw new IllegalArgumentException("unsupported reset guard manifest header");
             }
-            String[] fields = line.split("\\t", -1);
-            if (fields.length < 3) {
-                throw new IllegalArgumentException("invalid record at line " + (index + 1));
-            }
-            int wx = parseCoordinate(fields[1], index);
-            int wy = parseCoordinate(fields[2], index);
-            if ("V".equals(fields[0]) && fields.length == 3) {
-                vehicleChunks.add(new ChunkCoordinate(wx, wy));
-            } else if ("R".equals(fields[0]) && fields.length == 4) {
-                long epoch = Long.parseLong(fields[3]);
-                if (epoch <= 0L) {
-                    throw new IllegalArgumentException("invalid region epoch at line " + (index + 1));
+
+            int lineNumber = 1;
+            int records = 0;
+            String rawLine;
+            while ((rawLine = reader.readLine()) != null) {
+                lineNumber++;
+                String line = rawLine.strip();
+                if (line.isEmpty() || line.startsWith("#")) {
+                    continue;
                 }
-                regionEpochs.put(pack(wx, wy), epoch);
-            } else {
-                throw new IllegalArgumentException("unknown record at line " + (index + 1));
+                if (++records > MAX_RECORDS) {
+                    throw new IllegalArgumentException("reset guard manifest exceeds record limit");
+                }
+
+                int firstTab = line.indexOf('\t');
+                int secondTab = firstTab < 0 ? -1 : line.indexOf('\t', firstTab + 1);
+                if (firstTab != 1 || secondTab < 0) {
+                    throw new IllegalArgumentException("invalid record at line " + lineNumber);
+                }
+                int wx = parseCoordinate(line, firstTab + 1, secondTab, lineNumber);
+                int thirdTab = line.indexOf('\t', secondTab + 1);
+
+                if (line.charAt(0) == 'V' && thirdTab < 0) {
+                    int wy = parseCoordinate(line, secondTab + 1, line.length(), lineNumber);
+                    vehicleChunks.add(pack(wx, wy));
+                } else if (line.charAt(0) == 'R' && thirdTab > secondTab + 1
+                        && line.indexOf('\t', thirdTab + 1) < 0) {
+                    int wy = parseCoordinate(line, secondTab + 1, thirdTab, lineNumber);
+                    long epoch = Long.parseLong(line, thirdTab + 1, line.length(), 10);
+                    if (epoch <= 0L) {
+                        throw new IllegalArgumentException("invalid region epoch at line " + lineNumber);
+                    }
+                    regionRecords++;
+                } else {
+                    throw new IllegalArgumentException("unknown record at line " + lineNumber);
+                }
             }
         }
-        return new ManifestData(List.copyOf(vehicleChunks), Map.copyOf(regionEpochs));
+        return new ManifestData(vehicleChunks.toArray(), regionRecords);
     }
 
-    private static int parseCoordinate(String value, int index) {
-        int coordinate = Integer.parseInt(value);
+    private static int parseCoordinate(String line, int start, int end, int lineNumber) {
+        if (start >= end) {
+            throw new IllegalArgumentException("missing coordinate at line " + lineNumber);
+        }
+        int coordinate = Integer.parseInt(line, start, end, 10);
         if (coordinate < -1_000_000 || coordinate > 1_000_000) {
-            throw new IllegalArgumentException("coordinate out of range at line " + (index + 1));
+            throw new IllegalArgumentException("coordinate out of range at line " + lineNumber);
         }
         return coordinate;
     }
 
-    private static boolean isRegionCacheFresh(int wx, int wy, long epoch) throws Exception {
-        Path path = currentSavePath("isoregiondata" + File.separator
-                + "datachunk_" + wx + "_" + wy + ".bin");
-        return Files.isRegularFile(path) && Files.getLastModifiedTime(path).toMillis() >= epoch;
-    }
-
     private static Path currentSavePath(String relative) {
         return Path.of(ZomboidFileSystem.instance.getFileNameInCurrentSave(relative));
-    }
-
-    private static Method getRegionWorkerMethod() throws Exception {
-        Method method = getRegionWorker;
-        if (method == null) {
-            synchronized (SelectiveWorldResetRuntime.class) {
-                method = getRegionWorker;
-                if (method == null) {
-                    method = IsoRegions.class.getDeclaredMethod("getRegionWorker");
-                    method.setAccessible(true);
-                    getRegionWorker = method;
-                }
-            }
-        }
-        return method;
-    }
-
-    private static Method getReadSurroundingChunksMethod(Class<?> workerClass) throws Exception {
-        Method method = readSurroundingChunks;
-        if (method == null) {
-            synchronized (SelectiveWorldResetRuntime.class) {
-                method = readSurroundingChunks;
-                if (method == null) {
-                    method = workerClass.getDeclaredMethod(
-                            "readSurroundingChunks",
-                            int.class,
-                            int.class,
-                            int.class,
-                            boolean.class,
-                            boolean.class);
-                    method.setAccessible(true);
-                    readSurroundingChunks = method;
-                }
-            }
-        }
-        return method;
     }
 
     static long pack(int wx, int wy) {
@@ -199,22 +123,39 @@ public final class SelectiveWorldResetRuntime {
     }
 
     static final class ManifestData {
-        final List<ChunkCoordinate> vehicleChunks;
-        final Map<Long, Long> regionEpochs;
+        final long[] vehicleChunks;
+        final int regionRecords;
 
-        ManifestData(List<ChunkCoordinate> vehicleChunks, Map<Long, Long> regionEpochs) {
+        ManifestData(long[] vehicleChunks, int regionRecords) {
             this.vehicleChunks = vehicleChunks;
-            this.regionEpochs = regionEpochs;
+            this.regionRecords = regionRecords;
         }
     }
 
-    static final class ChunkCoordinate {
-        final int wx;
-        final int wy;
+    private static final class LongArrayBuilder {
+        private long[] values;
+        private int size;
 
-        ChunkCoordinate(int wx, int wy) {
-            this.wx = wx;
-            this.wy = wy;
+        LongArrayBuilder(int initialCapacity) {
+            values = new long[Math.max(16, initialCapacity)];
+        }
+
+        void add(long value) {
+            if (size == values.length) {
+                long[] expanded = new long[Math.min(MAX_RECORDS, values.length + (values.length >> 1) + 1)];
+                System.arraycopy(values, 0, expanded, 0, size);
+                values = expanded;
+            }
+            values[size++] = value;
+        }
+
+        long[] toArray() {
+            if (size == values.length) {
+                return values;
+            }
+            long[] result = new long[size];
+            System.arraycopy(values, 0, result, 0, size);
+            return result;
         }
     }
 }

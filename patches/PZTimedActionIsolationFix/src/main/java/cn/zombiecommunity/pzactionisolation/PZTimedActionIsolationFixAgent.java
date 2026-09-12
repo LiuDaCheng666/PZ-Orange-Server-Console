@@ -68,7 +68,7 @@ public final class PZTimedActionIsolationFixAgent {
                             + visitor.hooks + "; using vanilla class");
                     return null;
                 }
-                System.out.println("[PZTimedActionIsolationFix] ACTIVE exact per-player timed-action stop");
+                System.out.println("[PZTimedActionIsolationFix] ACTIVE v2 owner+action-id timed-action stop");
                 return writer.toByteArray();
             } catch (Throwable failure) {
                 System.err.println("[PZTimedActionIsolationFix] REFUSED transform failed; using vanilla class: "
@@ -117,7 +117,7 @@ public final class PZTimedActionIsolationFixAgent {
                     output.visitMethodInsn(
                             Opcodes.INVOKESTATIC,
                             RUNTIME,
-                            "stopExactOnServer",
+                            "stopOwnedOnServer",
                             "(Ljava/lang/Object;)Z",
                             false);
                     output.visitJumpInsn(Opcodes.IFEQ, vanilla);

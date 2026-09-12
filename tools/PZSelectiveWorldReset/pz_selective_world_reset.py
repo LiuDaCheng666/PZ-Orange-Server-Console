@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import zipfile
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -290,7 +291,7 @@ def read_player_areas(players_db: Path, margin_chunks: int) -> tuple[list[Protec
 
     areas: list[ProtectedArea] = []
     players: list[dict] = []
-    with open_readonly_sqlite(players_db) as connection:
+    with closing(open_readonly_sqlite(players_db)) as connection:
         tables = {
             str(row[0])
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -311,11 +312,23 @@ def read_player_areas(players_db: Path, margin_chunks: int) -> tuple[list[Protec
         for row in connection.execute(query):
             record = dict(row)
             is_dead = bool(record.get("isDead", 0))
+            record["positionProtection"] = "not-applicable" if is_dead else "pending"
+            record["positionProtectionReason"] = "dead-player" if is_dead else ""
             players.append(record)
             if is_dead:
                 continue
-            x = math.floor(float(record["x"]))
-            y = math.floor(float(record["y"]))
+            try:
+                raw_x = float(record["x"])
+                raw_y = float(record["y"])
+                if not math.isfinite(raw_x) or not math.isfinite(raw_y):
+                    raise ValueError("non-finite player position")
+                x = math.floor(raw_x)
+                y = math.floor(raw_y)
+            except (TypeError, ValueError, OverflowError):
+                record["positionProtection"] = "skipped"
+                record["positionProtectionReason"] = "missing-or-invalid-position"
+                continue
+            record["positionProtection"] = "protected"
             label = str(record.get("username") or record.get("name") or record.get("id") or "unknown")
             areas.append(
                 ProtectedArea(
@@ -516,16 +529,13 @@ def read_reset_guard_manifest(
 def write_reset_guard_manifest(
     path: Path,
     vehicle_chunks: Iterable[tuple[int, int]],
-    region_epochs: dict[tuple[int, int], int],
 ) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="\n") as stream:
         stream.write(RESET_GUARD_HEADER + "\n")
-        stream.write("# V=disable vanilla vehicle regeneration; R=rebuild IsoRegion after epoch-ms\n")
+        stream.write("# V=disable vanilla vehicle regeneration; IsoRegion rebuild is vanilla\n")
         for wx, wy in sorted(set(vehicle_chunks)):
             stream.write(f"V\t{wx}\t{wy}\n")
-        for (wx, wy), epoch in sorted(region_epochs.items()):
-            stream.write(f"R\t{wx}\t{wy}\t{epoch}\n")
     os.replace(temporary, path)
 
 
@@ -551,7 +561,7 @@ def inspect_reset_guard_plan(
     else:
         version = None
     manifest_path = save_root / RESET_GUARD_MANIFEST
-    previous_vehicle_chunks, previous_region_epochs = read_reset_guard_manifest(manifest_path)
+    previous_vehicle_chunks, _previous_region_epochs = read_reset_guard_manifest(manifest_path)
     return {
         "regionChunks": region_chunks,
         "regionFiles": region_files,
@@ -561,7 +571,6 @@ def inspect_reset_guard_plan(
         "removedRegionHeaderEntries": removed_header_entries,
         "manifestPath": manifest_path,
         "previousVehicleChunks": previous_vehicle_chunks,
-        "previousRegionEpochs": previous_region_epochs,
     }
 
 
@@ -585,9 +594,6 @@ def apply_reset_transaction(
     reset_coordinates = {(wx, wy) for wx, wy, _path, _size in reset_chunks}
     vehicle_chunks = set(guard_plan["previousVehicleChunks"])
     vehicle_chunks.update(reset_coordinates)
-    region_epochs = dict(guard_plan["previousRegionEpochs"])
-    for coordinate in guard_plan["regionChunks"]:
-        region_epochs[coordinate] = epoch_millis
 
     try:
         moved = 0
@@ -637,7 +643,7 @@ def apply_reset_transaction(
         if original_manifest is not None:
             (quarantine / f"{RESET_GUARD_MANIFEST}.before-reset").write_bytes(original_manifest)
         write_progress(progress_path, "reset-manifest", 0, 1, "Writing reset guard manifest")
-        write_reset_guard_manifest(manifest_path, vehicle_chunks, region_epochs)
+        write_reset_guard_manifest(manifest_path, vehicle_chunks)
         write_progress(progress_path, "reset-manifest", 1, 1, "Reset guard manifest committed")
         return {
             "movedMapChunkCount": moved,
@@ -1120,6 +1126,11 @@ def main() -> int:
         "cellChunkSize": CELL_CHUNKS,
         "safehouseCount": len(safehouses),
         "livingPlayerProtectionCount": len(player_areas),
+        "livingPlayerPositionUnavailableCount": sum(
+            1
+            for player in players
+            if player.get("positionProtection") == "skipped"
+        ),
         "manualAreaCount": len(manual_areas),
         "livestockZoneProtectionCount": len(livestock_areas),
         "livestockProtectionAddedChunkCount": livestock_added_protected_chunks,
@@ -1190,7 +1201,17 @@ def main() -> int:
     write_csv(
         report_dir / "players.csv",
         players,
-        ["id", "username", "name", "x", "y", "z", "isDead"],
+        [
+            "id",
+            "username",
+            "name",
+            "x",
+            "y",
+            "z",
+            "isDead",
+            "positionProtection",
+            "positionProtectionReason",
+        ],
     )
     write_csv(
         report_dir / "vehicles.csv",

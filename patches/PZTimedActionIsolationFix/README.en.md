@@ -10,9 +10,11 @@ action without sending that player Done or Reject.
 
 This Java agent changes only the dedicated-server `stop(Action)` path:
 
-- remove the supplied Action instance by object identity;
-- run the original `Action.stop()` cleanup for that instance;
-- remove only that instance from `AnimEventEmulator` when it is a `NetTimedAction`;
+- read the owner ID and one-byte action ID from the cancellation request;
+- remove only queued actions matching both fields and run their original `Action.stop()` cleanup;
+- remove every same-owner match after an ID wrap, matching the client cancellation semantics;
+- ignore stale cancellation requests without touching another player's same-ID action;
+- remove each matching `NetTimedAction` from `AnimEventEmulator`;
 - leave client behavior and normal Done, Reject and timeout cleanup unchanged;
 - rate-limit diagnostics when a cross-player ID collision is prevented.
 
@@ -35,8 +37,9 @@ The included tests verify:
 
 - the expected 42.20 target method shape and transform hook;
 - hash refusal for altered class bytes;
-- two players with action ID 126, where only the requested action is stopped;
-- animation-emulator cleanup for the exact action;
+- a distinct `GeneralActionPacket` request object cancelling queued actions by owner and ID;
+- two players with action ID 126, where only the requesting player's actions are stopped;
+- stale cancellation isolation and animation-emulator cleanup;
 - successful JVM verification and loading of the transformed real game class.
 
 The fix was subsequently confirmed effective on the affected dedicated server. Source is provided as

@@ -15,14 +15,11 @@ import org.objectweb.asm.Opcodes;
 
 public final class PZSelectiveWorldResetGuardAgent {
     private static final String VEHICLES_DB = "zombie/vehicles/VehiclesDB2";
-    private static final String ISO_CHUNK = "zombie/iso/IsoChunk";
     private static final String RUNTIME =
             "cn/zombiecommunity/pzresetguard/SelectiveWorldResetRuntime";
     private static final Map<String, Set<String>> SUPPORTED_HASHES = Map.of(
             VEHICLES_DB, Set.of(
-                    "f908628f3a94a018cc4666ef14bdb01326eeb90ca27f55d7b744d215a7a9f9ba"),
-            ISO_CHUNK, Set.of(
-                    "68431ace471b30c842ff7c2a6e706d8ba48d7a84ae07f876484153c0d62a794b"));
+                    "f908628f3a94a018cc4666ef14bdb01326eeb90ca27f55d7b744d215a7a9f9ba"));
 
     private PZSelectiveWorldResetGuardAgent() {
     }
@@ -30,7 +27,7 @@ public final class PZSelectiveWorldResetGuardAgent {
     public static void premain(String args, Instrumentation instrumentation) {
         try {
             instrumentation.addTransformer(new Transformer(), false);
-            System.out.println("[PZSelectiveResetGuard] agent installed; unsupported classes remain vanilla");
+            System.out.println("[PZSelectiveResetGuard] agent installed mode=vehicle-only regionRebuild=vanilla; unsupported classes remain vanilla");
         } catch (Throwable failure) {
             System.err.println("[PZSelectiveResetGuard] DISABLED setup failed; using vanilla reset behavior: "
                     + failure);
@@ -102,10 +99,7 @@ public final class PZSelectiveWorldResetGuardAgent {
             boolean vehiclesInit = VEHICLES_DB.equals(className)
                     && "init".equals(name)
                     && "()V".equals(descriptor);
-            boolean chunkLoaded = ISO_CHUNK.equals(className)
-                    && "doLoadGridsquare".equals(name)
-                    && "()V".equals(descriptor);
-            if (!vehiclesInit && !chunkLoaded) {
+            if (!vehiclesInit) {
                 return output;
             }
             targetMethods++;
@@ -113,22 +107,12 @@ public final class PZSelectiveWorldResetGuardAgent {
                 @Override
                 public void visitInsn(int opcode) {
                     if (opcode == Opcodes.RETURN) {
-                        if (vehiclesInit) {
-                            super.visitMethodInsn(
-                                    Opcodes.INVOKESTATIC,
-                                    RUNTIME,
-                                    "seedVehicleChunks",
-                                    "()V",
-                                    false);
-                        } else {
-                            super.visitVarInsn(Opcodes.ALOAD, 0);
-                            super.visitMethodInsn(
-                                    Opcodes.INVOKESTATIC,
-                                    RUNTIME,
-                                    "onChunkLoaded",
-                                    "(Lzombie/iso/IsoChunk;)V",
-                                    false);
-                        }
+                        super.visitMethodInsn(
+                                Opcodes.INVOKESTATIC,
+                                RUNTIME,
+                                "seedVehicleChunks",
+                                "()V",
+                                false);
                         hooks++;
                     }
                     super.visitInsn(opcode);

@@ -22,9 +22,19 @@ function ConvertTo-PZAIQueueEnvelope {
             ($bytes.Length -eq 0 -or $bytes.Length -gt $script:PZAIQueueMaxPayloadBytes)) {
         throw "Queue payload exceeds the 16384-byte protocol limit."
     }
-    $base64 = [Convert]::ToBase64String($bytes)
-    return '{"schema":"pzai.agent-response-record/2","encoding":"base64","payload":"' +
-        $base64 + '"}'
+    $literal = [Text.StringBuilder]::new($Payload.Length)
+    foreach ($character in $Payload.ToCharArray()) {
+        $code = [int]$character
+        if ($code -le 31 -or $code -eq 127 -or $character -eq '%' -or
+                $character -eq '"' -or $character -eq '\') {
+            [void]$literal.Append(('%{0:X2}' -f $code))
+        }
+        else {
+            [void]$literal.Append($character)
+        }
+    }
+    return '{"schema":"pzai.agent-response-record/2","encoding":"percent-literal","payload":"' +
+        $literal.ToString() + '"}'
 }
 
 function Write-PZAIAtomicUtf8 {

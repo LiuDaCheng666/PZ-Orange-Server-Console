@@ -63,7 +63,7 @@ public final class TransformSmokeTest {
                             String methodDescriptor,
                             boolean isInterface) {
                         if ("cn/zombiecommunity/pzactionisolation/TimedActionIsolationRuntime".equals(owner)
-                                && "stopExactOnServer".equals(methodName)) {
+                                && "stopOwnedOnServer".equals(methodName)) {
                             guardCalls.incrementAndGet();
                         }
                         if (TARGET.equals(owner)

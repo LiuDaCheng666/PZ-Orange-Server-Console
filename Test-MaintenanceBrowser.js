@@ -5,18 +5,19 @@ const { chromium } = require('playwright-core');
 
 const webRoot = path.join(__dirname, 'web');
 const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-const requests = { saveBackup: null, schedule: null, restart: null, checkNow: null };
+const requests = { saveBackup: null, schedule: null, restart: null, forceStop: null, checkNow: null };
+let operationAction = 'restart';
 
 const serverProfile = {
   id: 'mock', name: '测试服务器', kind: 'test', alive: true, status: 'running', writable: true,
   commandChannel: 'queue', note: '', lanAddress: '127.0.0.1:16261', onlineCount: 2,
   onlineKnown: true, maxPlayers: 32, memoryMB: 8192, memoryPeakMB: 10240,
   startedAt: new Date(Date.now() - 3600000).toISOString(), javaPid: 1234, ports: [16261],
-  canStart: false, canStop: true, canRestart: true, jvmMemory: { available: false },
+  canStart: false, canStop: true, canRestart: true, canForceStop: true, jvmMemory: { available: false },
 };
 
 let schedule = {
-  ok: true, serverId: 'mock', enabled: false, intervalHours: 3, nextRunAt: null,
+  ok: true, serverId: 'mock', enabled: false, intervalMinutes: 15, intervalHours: 0.25, nextRunAt: null,
   running: false, lastRunAt: null, lastStatus: 'never', lastResultCode: null,
   lastMessage: '尚未执行自动 Mod 更新检查。', lastRequestId: null,
   updateNotificationPending: false, lastNotificationAt: null,
@@ -62,7 +63,7 @@ async function handleApi(request, response, url) {
   if (url.pathname === '/api/maintenance/schedule' && request.method === 'GET') return sendJson(response, 200, schedule);
   if (url.pathname === '/api/maintenance/schedule' && request.method === 'PUT') {
     requests.schedule = await readBody(request);
-    schedule = { ...schedule, ...requests.schedule, nextRunAt: new Date(Date.now() + requests.schedule.intervalHours * 3600000).toISOString() };
+    schedule = { ...schedule, ...requests.schedule, intervalHours: requests.schedule.intervalMinutes / 60, nextRunAt: new Date(Date.now() + requests.schedule.intervalMinutes * 60000).toISOString() };
     return sendJson(response, 200, { ...schedule, message: '自动 Mod 检查计划已保存。' });
   }
   if (url.pathname === '/api/maintenance/check-now' && request.method === 'POST') {
@@ -72,9 +73,15 @@ async function handleApi(request, response, url) {
   }
   if (url.pathname === '/api/server/restart' && request.method === 'POST') {
     requests.restart = await readBody(request);
+    operationAction = 'restart';
     return sendJson(response, 202, { ok: true, message: '安全重启已提交。', operationId: '0123456789abcdef0123456789abcdef' });
   }
-  if (url.pathname === '/api/server/operation') return sendJson(response, 200, { ok: true, available: true, operation: { id: '0123456789abcdef0123456789abcdef', action: 'restart', status: 'completed', stage: 'completed', message: '安全重启测试已完成。', startedAt: new Date().toISOString(), oldJavaPid: 1234, newJavaPid: 1235, warnings: [] } });
+  if (url.pathname === '/api/server/force-stop' && request.method === 'POST') {
+    requests.forceStop = await readBody(request);
+    operationAction = 'force-stop';
+    return sendJson(response, 200, { ok: true, message: '测试服务器已强制终止；本次未保存存档。', operationId: 'fedcba9876543210fedcba9876543210', javaPid: 1234, hostPid: 1233 });
+  }
+  if (url.pathname === '/api/server/operation') return sendJson(response, 200, { ok: true, available: true, operation: { id: operationAction === 'force-stop' ? 'fedcba9876543210fedcba9876543210' : '0123456789abcdef0123456789abcdef', action: operationAction, status: 'completed', stage: 'completed', message: operationAction === 'force-stop' ? '强制终止测试已完成。' : '安全重启测试已完成。', startedAt: new Date().toISOString(), oldJavaPid: 1234, newJavaPid: operationAction === 'force-stop' ? null : 1235, warnings: [] } });
   if (url.pathname === '/api/audit') return sendJson(response, 200, { ok: true, lines: [] });
   if (url.pathname === '/api/log') return sendJson(response, 200, { ok: true, serverId: 'mock', cursor: 0, reset: false, text: '' });
   if (url.pathname === '/api/players') return sendJson(response, 200, { ok: true, serverId: 'mock', onlineKnown: true, online: [], players: [] });
@@ -112,6 +119,8 @@ async function inspectLayout(page) {
     const schedulePanel = document.querySelector('.maintenance-schedule').getBoundingClientRect();
     const restartRow = document.querySelector('.restart-row').getBoundingClientRect();
     const restartButton = document.querySelector('#restartServer').getBoundingClientRect();
+    const forceStopRow = document.querySelector('#forceStopRow').getBoundingClientRect();
+    const forceStopButton = document.querySelector('#forceStopServer').getBoundingClientRect();
     return {
       clientWidth: document.documentElement.clientWidth,
       scrollWidth: document.documentElement.scrollWidth,
@@ -120,6 +129,9 @@ async function inspectLayout(page) {
       restartRight: restartRow.right,
       restartButtonRight: restartButton.right,
       restartButtonWidth: restartButton.width,
+      forceStopRight: forceStopRow.right,
+      forceStopButtonRight: forceStopButton.right,
+      forceStopButtonWidth: forceStopButton.width,
     };
   });
 }
@@ -148,7 +160,7 @@ async function inspectLayout(page) {
     await desktop.waitForFunction(() => document.querySelector('#saveBackupPlanBadge').textContent.includes('全部启用'));
 
     await desktop.check('#maintenanceScheduleForm input[name="enabled"]');
-    await desktop.fill('#maintenanceScheduleForm input[name="intervalHours"]', '6');
+    await desktop.fill('#maintenanceScheduleForm input[name="intervalMinutes"]', '15');
     await desktop.fill('#maintenanceScheduleForm input[name="restartStabilizationSeconds"]', '90');
     await desktop.check('#maintenanceScheduleForm input[name="autoRestartOnUpdate"]');
     await desktop.click('#maintenanceScheduleForm button[type="submit"]');
@@ -158,24 +170,28 @@ async function inspectLayout(page) {
     await desktop.fill('#restartWarningSeconds', '90');
     await desktop.click('#restartServer');
     await desktop.waitForFunction(() => document.querySelector('#lifecycleBadge').textContent.includes('成功'));
+    await desktop.click('#forceStopServer');
+    await desktop.waitForFunction(() => document.querySelector('#lifecycleTitle').textContent.includes('强制终止'));
     const desktopLayout = await inspectLayout(desktop);
 
     const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true });
     collectErrors(mobile, 'mobile', errors);
+    await mobile.addInitScript(() => { window.confirm = () => true; });
     await mobile.goto(`http://127.0.0.1:${port}/?view=maintenance&server=mock`, { waitUntil: 'domcontentloaded' });
     await mobile.waitForSelector('#authScreen', { state: 'hidden' });
-    await mobile.waitForFunction(() => document.querySelector('#saveBackupPlanForm input[name="backupIntervalMinutes"]').value === '120' && document.querySelector('#maintenanceScheduleForm input[name="intervalHours"]').value === '6' && document.querySelector('#maintenanceLastResult').textContent.includes('检查中'));
+    await mobile.waitForFunction(() => document.querySelector('#saveBackupPlanForm input[name="backupIntervalMinutes"]').value === '120' && document.querySelector('#maintenanceScheduleForm input[name="intervalMinutes"]').value === '15' && document.querySelector('#maintenanceLastResult').textContent.includes('检查中'));
     const mobileLayout = await inspectLayout(mobile);
 
     const result = { requests, desktop: desktopLayout, mobile: mobileLayout, browserErrors: errors };
     console.log(JSON.stringify(result, null, 2));
     if (errors.length) process.exitCode = 2;
     if (!requests.saveBackup || requests.saveBackup.serverId !== 'mock' || requests.saveBackup.autoSaveEnabled !== true || requests.saveBackup.saveIntervalMinutes !== 10 || requests.saveBackup.autoBackupEnabled !== true || requests.saveBackup.backupIntervalMinutes !== 120 || requests.saveBackup.backupCount !== 5) process.exitCode = 7;
-    if (!requests.schedule || requests.schedule.serverId !== 'mock' || requests.schedule.enabled !== true || requests.schedule.intervalHours !== 6 || requests.schedule.restartStabilizationSeconds !== 90 || requests.schedule.autoRestartOnUpdate !== true) process.exitCode = 3;
+    if (!requests.schedule || requests.schedule.serverId !== 'mock' || requests.schedule.enabled !== true || requests.schedule.intervalMinutes !== 15 || requests.schedule.restartStabilizationSeconds !== 90 || requests.schedule.autoRestartOnUpdate !== true) process.exitCode = 3;
     if (!requests.checkNow || requests.checkNow.serverId !== 'mock') process.exitCode = 4;
     if (!requests.restart || requests.restart.serverId !== 'mock' || requests.restart.confirm !== 'SAVE_QUIT_RESTART' || requests.restart.warningSeconds !== 90 || requests.restart.restartStabilizationSeconds !== 90) process.exitCode = 5;
+    if (!requests.forceStop || requests.forceStop.serverId !== 'mock' || requests.forceStop.confirm !== 'FORCE_STOP') process.exitCode = 8;
     for (const layout of [desktopLayout, mobileLayout]) {
-      if (layout.scrollWidth > layout.clientWidth || layout.saveBackupRight > layout.clientWidth || layout.scheduleRight > layout.clientWidth || layout.restartRight > layout.clientWidth || layout.restartButtonRight > layout.clientWidth || layout.restartButtonWidth < 80) process.exitCode = 6;
+      if (layout.scrollWidth > layout.clientWidth || layout.saveBackupRight > layout.clientWidth || layout.scheduleRight > layout.clientWidth || layout.restartRight > layout.clientWidth || layout.restartButtonRight > layout.clientWidth || layout.restartButtonWidth < 80 || layout.forceStopRight > layout.clientWidth || layout.forceStopButtonRight > layout.clientWidth || layout.forceStopButtonWidth < 80) process.exitCode = 6;
     }
   } finally {
     await browser.close();

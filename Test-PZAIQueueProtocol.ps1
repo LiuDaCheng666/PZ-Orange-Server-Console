@@ -13,8 +13,13 @@ function Read-EnvelopePayload {
     param([string]$Line)
     $envelope = $Line | ConvertFrom-Json
     Assert-True ($envelope.schema -eq "pzai.agent-response-record/2") "JSONL schema mismatch."
-    Assert-True ($envelope.encoding -eq "base64") "JSONL encoding mismatch."
-    return $utf8.GetString([Convert]::FromBase64String([string]$envelope.payload))
+    Assert-True ($envelope.encoding -eq "percent-literal") "JSONL encoding mismatch."
+    $literal = [string]$envelope.payload
+    Assert-True ($literal -notmatch '%(?![0-9A-Fa-f]{2})') "JSONL payload has an invalid escape."
+    return [Text.RegularExpressions.Regex]::Replace($literal, '%([0-9A-Fa-f]{2})', {
+        param($Match)
+        return [char][Convert]::ToInt32($Match.Groups[1].Value, 16)
+    })
 }
 
 try {
@@ -22,7 +27,7 @@ try {
     . (Join-Path $bridgeRoot "PZAIQueueProtocol.ps1")
 
     $legacyPath = Join-Path $tempRoot "PZAI-agent-response-queue.txt"
-    [IO.File]::WriteAllText($legacyPath, "already-consumed`n待迁移%`t🙂`nunfinished", $utf8)
+    [IO.File]::WriteAllText($legacyPath, "already-consumed`n待迁移%`t引号`"与反斜杠\`nunfinished", $utf8)
     [IO.File]::WriteAllText((Join-Path $tempRoot "PZAI-agent-response-state.ini"),
         "cursor=1`n", $utf8)
 
@@ -33,10 +38,10 @@ try {
     $generation1Path = Join-Path $tempRoot $manifest.filename
     $migrated = @(Get-Content -LiteralPath $generation1Path -Encoding UTF8)
     Assert-True ($migrated.Count -eq 1) "Migrated queue line count mismatch."
-    Assert-True ((Read-EnvelopePayload $migrated[0]) -eq "待迁移%`t🙂") `
+    Assert-True ((Read-EnvelopePayload $migrated[0]) -eq "待迁移%`t引号`"与反斜杠\") `
         "v1 migration changed UTF-8 or delimiters."
 
-    $special = "中文%`t字段🙂"
+    $special = "中文%`t字段；引号`"；反斜杠\；第二段中文"
     $manifest = Write-PZAIResponseQueueLine -LuaDir $tempRoot -Payload $special
     $lines = @(Get-Content -LiteralPath $generation1Path -Encoding UTF8)
     Assert-True ($manifest.publishedLines -eq 2) "Special record was not published."
@@ -126,12 +131,12 @@ try {
         serverId = "server-1"; sessionId = "session-1"; requestId = "request-1"
         username = "测试玩家"; attempts = 1
     }
-    $recordId = Write-AIManagedRecord -Request $request -Kind response -StartedMs 100 -CompletedMs 120 -LatencyMs 20 -Code agent_answered -Title "标题%" -Message "中文%字段🙂 第二行"
+    $recordId = Write-AIManagedRecord -Request $request -Kind response -StartedMs 100 -CompletedMs 120 -LatencyMs 20 -Code agent_answered -Title "标题%" -Message "中文%字段%0A第二行`"\末尾"
     $panelManifest = Get-PZAIQueueManifest -LuaDir $panelLuaRoot
     Assert-True ($panelManifest.publishedLines -eq 1) "Write-AIManagedRecord did not publish one v2 record."
     $panelLine = Get-Content -LiteralPath (Join-Path $panelLuaRoot $panelManifest.filename) -Encoding UTF8
     $panelFields = (Read-EnvelopePayload $panelLine) -split "\t"
-    Assert-True ($panelFields.Count -eq 17 -and $panelFields[1] -eq $recordId -and $panelFields[2] -eq "response" -and $panelFields[5] -eq "测试玩家" -and $panelFields[14] -eq "标题%25" -and $panelFields[15] -eq "中文%25字段🙂 第二行") "Write-AIManagedRecord changed identity or escaped response content."
+    Assert-True ($panelFields.Count -eq 17 -and $panelFields[1] -eq $recordId -and $panelFields[2] -eq "response" -and $panelFields[5] -eq "测试玩家" -and $panelFields[14] -eq "标题%25" -and $panelFields[15] -eq "中文%25字段%250A第二行`"\末尾") "Write-AIManagedRecord changed identity or escaped response content."
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $panelLuaRoot "PZAI-agent-response-queue.txt"))) "Write-AIManagedRecord unexpectedly appended to the legacy queue."
 
     Write-Host "PASS: queue v2 migration, UTF-8, 16 KiB, crash recovery, rotation, and panel integration"

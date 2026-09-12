@@ -32,6 +32,7 @@ const protectedCommands = new Map([
   ['event.thunder', 'debug-thunder'],
 ]);
 const selfOnlyCommands = ['player.onVehicleSleep', 'player.onDropHeavyItem'];
+const vanillaExplosiveTrapType = /^Base\.(?:Aerosolbomb|FlameTrap|NoiseTrap|PipeBomb|SmokeBomb|Molotov|Firecracker)(?:Remote|SensorV[123]|Triggered)?$/i;
 
 const identities = new Map();
 const identitiesBySteamId = new Map();
@@ -44,6 +45,7 @@ const events = [];
 const eventKeys = new Set();
 const globalSignals = [];
 const pendingAdminHealthActions = [];
+const trapSteamIdsByEvent = new Map();
 const reviewedThrough = new Map();
 let reviewedNoiseEvents = 0;
 let filesScanned = 0;
@@ -110,7 +112,7 @@ function eventReviewKey(event) {
     ? String(event.steamId) : `user:${String(event.username || 'unknown').toLowerCase()}`;
   const signature = [
     subject, event.type || '', event.code || '', event.command || '', event.reason || '',
-    event.sourceType || '', event.targetType || '', event.packet || '',
+    event.sourceType || '', event.targetType || '', event.packet || '', event.itemType || '',
   ].map(value => String(value).trim().toLowerCase()).join('|');
   return crypto.createHash('sha256').update(signature, 'utf8').digest('hex');
 }
@@ -243,6 +245,8 @@ function ensurePlayer(steamId, username) {
       usernames: new Set(), ips: new Set(), score: 0,
       protectedCalls: 0, blockedCalls: 0, blockedCommandCalls: 0,
       blockedItemTransforms: 0, blockedHealthOverwrites: 0, observedHealthSyncs: 0,
+      explosiveTrapAdds: 0, explosiveTrapEvents: [], explosiveTrapTypes: new Map(),
+      explosiveTrapCoordinates: new Set(), explosiveTrapTimes: [], explosiveTrapBurst: 0,
       nativeSignals: 0, checksumSignals: 0,
       speedSignals: 0, speedNoiseSignals: 0, speedReviewSignals: 0,
       actionableNativeSignals: 0, otherNativeSignals: 0, nativeWeight: 0,
@@ -412,8 +416,16 @@ function parseStructuredGuard(file, line, lineNumber) {
   const blockedItemTransform = line.includes('event=blocked_item_transform');
   const blockedHealthOverwrite = line.includes('event=blocked_health_overwrite');
   const observedHealthSync = line.includes('event=observed_health_sync');
-  if (!blockedCommand && !blockedItemTransform && !blockedHealthOverwrite && !observedHealthSync) return false;
+  const observedExplosiveTrap = line.includes('event=observed_explosive_trap');
+  if (!blockedCommand && !blockedItemTransform && !blockedHealthOverwrite
+      && !observedHealthSync && !observedExplosiveTrap) return false;
   const values = parseKeyValues(line);
+  const suppressedSincePrevious = Math.max(0, Math.min(999999,
+    Math.trunc(Number(values.suppressedSincePrevious || 0)) || 0));
+  const occurrenceCount = 1 + suppressedSincePrevious;
+  const aggregationNote = suppressedSincePrevious > 0
+    ? ` 此记录还合并了前一窗口内 ${suppressedSincePrevious} 次相同操作。`
+    : '';
   const parsed = lineTime(line);
   const username = String(values.username || 'unknown').replace(/_/g, ' ');
   const steamId = isSteamId(values.steamId) ? values.steamId : (identityFor(username).steamId || '');
@@ -429,23 +441,46 @@ function parseStructuredGuard(file, line, lineNumber) {
       values.increasedParts, values.action,
       values.reason, values.targetId].join('|')
       : '';
+  if (observedExplosiveTrap) {
+    recordExplosiveTrap({
+      file, lineNumber, parsed, username, steamId: player.steamId,
+      itemType: values.itemType || 'unknown',
+      x: values.x || '0', y: values.y || '0', z: values.z || '0',
+      plausibleExplosive: values.plausibleExplosive === 'true',
+      sourceKind: 'OrangeAntiCheat Java Agent',
+    });
+    return true;
+  }
   if (observedHealthSync) {
     const reason = values.reason || '';
+    const signalLabels = {
+      body_health_increase: '身体部位生命增加', overall_health_increase: '整体生命增加',
+      infection_cleared: '感染状态被清除', infection_time_reduced: '感染时间倒退',
+      max_weight_increase: '最大负重跳增', non_finite_health: '出现 NaN/Infinity',
+      target_not_owned_by_connection: '目标不属于发包连接',
+    };
+    const signals = String(values.signals || reason).split(',').filter(Boolean);
+    const signalText = signals.map(signal => signalLabels[signal] || signal).join('、');
+    let healthDetail;
+    if (reason === 'target_not_owned_by_connection') {
+      healthDetail = '观察到连接提交了不属于自身玩家的健康同步；Agent 仅记录，未拦截。';
+    } else if (reason === 'non_finite_health') {
+      healthDetail = `观察到客户端健康同步包含无效数值（${signalText || 'NaN/Infinity'}）；Agent 仅记录，未拦截。`;
+    } else {
+      healthDetail = `观察到客户端状态同步异常：${signalText || '状态增加'}。身体部位 ${values.increasedParts || 0} 个，最大增量 ${values.maxIncrease || 0}；整体生命 ${values.overallBefore || '?'} -> ${values.overallAfter || '?'}；感染 ${values.infectedBefore || '?'} -> ${values.infectedAfter || '?'}；感染时间 ${values.infectionTimeBefore || '?'} -> ${values.infectionTimeAfter || '?'}；最大负重 ${values.maxWeightBefore || '?'} -> ${values.maxWeightAfter || '?'}。自然恢复、治疗或服务器 Mod 也可能触发，不能单独定性。`;
+    }
     const added = addEvent({
       time, displayTime: parsed.raw, severity: 'warning', type: 'observed-health-sync', code: 'health-sync-observed',
       steamId: player.steamId, username, command: values.packet || 'PlayerHealthSync',
       coordinate: [values.x, values.y, values.z].join(','),
       packet: values.packet || '', increasedParts: Number(values.increasedParts || 0),
-      maxIncrease: values.maxIncrease || '', reason, action: values.action || 'observed_not_blocked',
-      detail: reason === 'target_not_owned_by_connection'
-        ? '观察到连接提交了不属于自身玩家的健康同步；Agent 仅记录，未拦截。'
-        : reason === 'non_finite_health'
-          ? '观察到客户端健康同步包含 NaN 或 Infinity；Agent 仅记录，未拦截。'
-          : `观察到客户端同步的身体部位生命增加：数据包 ${values.packet || 'unknown'}，身体部位 ${values.increasedParts || 'unknown'} 个，最大增加 ${values.maxIncrease || 'unknown'}。自然恢复或治疗也可能产生记录，Agent 未拦截。`,
+      maxIncrease: values.maxIncrease || '', signals, reason,
+      action: values.action || 'observed_not_blocked', occurrenceCount, suppressedSincePrevious,
+      detail: healthDetail + aggregationNote,
       dedupe: guardDedupe,
       ...eventSource(file, lineNumber),
     });
-    if (added) player.observedHealthSyncs += 1;
+    if (added) player.observedHealthSyncs += occurrenceCount;
     return true;
   }
   if (blockedHealthOverwrite) {
@@ -475,13 +510,14 @@ function parseStructuredGuard(file, line, lineNumber) {
       steamId: player.steamId, username, command: `${sourceType} -> ${targetType}`,
       coordinate: [values.x, values.y, values.z].join(','),
       sourceType, targetType, itemId: values.itemId || '',
-      detail: `服务端已拒绝非法物品替换：载体 ${sourceType}，请求目标 ${targetType}，物品 ID ${values.itemId || 'unknown'}。`,
+      occurrenceCount, suppressedSincePrevious,
+      detail: `服务端已拒绝非法物品替换：载体 ${sourceType}，请求目标 ${targetType}，物品 ID ${values.itemId || 'unknown'}。${aggregationNote}`,
       dedupe: guardDedupe,
       ...eventSource(file, lineNumber),
     });
     if (added) {
-      player.blockedCalls += 1;
-      player.blockedItemTransforms += 1;
+      player.blockedCalls += occurrenceCount;
+      player.blockedItemTransforms += occurrenceCount;
     }
     return true;
   }
@@ -489,15 +525,16 @@ function parseStructuredGuard(file, line, lineNumber) {
     time, displayTime: parsed.raw, severity: 'critical', type: 'blocked-command', code: 'server-blocked',
     steamId: player.steamId, username, command: `${values.module || '?'}.${values.command || '?'}`,
     coordinate: [values.x, values.y, values.z].join(','),
+    occurrenceCount, suppressedSincePrevious,
     detail: values.capability === 'OwnPlayerOnly'
-      ? `服务端已拒绝冒用其他玩家目标，targetId=${values.targetId || 'unknown'}。`
-      : `服务端已拒绝，缺少 ${values.capability || 'required capability'}。`,
+      ? `服务端已拒绝冒用其他玩家目标，targetId=${values.targetId || 'unknown'}。${aggregationNote}`
+      : `服务端已拒绝，缺少 ${values.capability || 'required capability'}。${aggregationNote}`,
     dedupe: guardDedupe,
     ...eventSource(file, lineNumber),
   });
   if (added) {
-    player.blockedCalls += 1;
-    player.blockedCommandCalls += 1;
+    player.blockedCalls += occurrenceCount;
+    player.blockedCommandCalls += occurrenceCount;
   }
   return true;
 }
@@ -521,9 +558,99 @@ function nativeSignalMetadata(type, reason) {
   };
 }
 
+function trapEventKey(parsed, username, itemType, x, y, z) {
+  const timeMs = parsed?.date?.getTime() || 0;
+  const timeBucket = timeMs > 0 ? Math.floor(timeMs / 1000) : String(parsed?.raw || '');
+  return [timeBucket, usernameKey(username), String(itemType || '').toLowerCase(), x, y, z].join('|');
+}
+
+function steamIdForTrapEvent(parsed, username, itemType, x, y, z) {
+  const matches = trapSteamIdsByEvent.get(trapEventKey(parsed, username, itemType, x, y, z));
+  return matches?.size === 1 ? [...matches][0] : '';
+}
+
+function classifyExplosiveTrapItem(itemType, plausibleExplosive) {
+  if (plausibleExplosive === true || vanillaExplosiveTrapType.test(String(itemType || ''))) return 'plausible';
+  if (plausibleExplosive === false || /^Base\.Hammer$/i.test(String(itemType || ''))) return 'non-explosive';
+  return 'unknown';
+}
+
+function maxEventsInWindow(items, windowMs) {
+  const times = items.map(event => Date.parse(String(event.time || '')))
+    .filter(Number.isFinite).sort((a, b) => a - b);
+  let start = 0;
+  let maximum = 0;
+  for (let end = 0; end < times.length; end += 1) {
+    while (times[end] - times[start] > windowMs) start += 1;
+    maximum = Math.max(maximum, end - start + 1);
+  }
+  return maximum;
+}
+
+async function scanTrapMapIdentities(files) {
+  for (const file of files) {
+    forEachLine(file, (line) => {
+      if (!inWindow(line)) return;
+      const match = /^\[([^\]]+)\]\s+(7656119\d{10})\s+"([^"]+)"\s+added\s+([A-Za-z0-9_.-]+)\s+at\s+(-?\d+),(-?\d+),(-?\d+)\.?/i.exec(line);
+      if (!match) return;
+      const [, rawTime, steamId, username, itemType, x, y, z] = match;
+      const parsed = { raw: rawTime, date: parsePzTime(rawTime) };
+      const key = trapEventKey(parsed, username, itemType, x, y, z);
+      if (!trapSteamIdsByEvent.has(key)) trapSteamIdsByEvent.set(key, new Set());
+      trapSteamIdsByEvent.get(key).add(steamId);
+      rememberIdentity(username, steamId, '');
+    });
+    finishFile(file, 'identities', `正在关联地图事件身份 ${progressFilesDone + 1}/${progressFilesTotal}`);
+  }
+}
+
+function recordExplosiveTrap({
+  file, lineNumber, parsed, username, steamId = '', itemType, x, y, z,
+  plausibleExplosive = null, sourceKind = '原版 AddExplosiveTrapPacket',
+}) {
+  const known = identityFor(username);
+  const mappedSteamId = isSteamId(steamId) ? '' : steamIdForTrapEvent(parsed, username, itemType, x, y, z);
+  const resolvedSteamId = isSteamId(steamId) ? steamId : (mappedSteamId || known.steamId || '');
+  const trapClassification = classifyExplosiveTrapItem(itemType, plausibleExplosive);
+  const time = isoTime(parsed.raw);
+  const timeMs = parsed.date?.getTime() || 0;
+  const timeBucket = timeMs > 0 ? Math.floor(timeMs / 1000) : parsed.raw;
+  const event = {
+    time, displayTime: parsed.raw, severity: 'warning', type: 'explosive-trap-add', code: 'explosive-trap-packet',
+    steamId: resolvedSteamId, username, command: 'AddExplosiveTrapPacket', itemType,
+    coordinate: `${x},${y},${z}`, packet: 'AddExplosiveTrapPacket',
+    plausibleExplosive: trapClassification === 'plausible' ? true : trapClassification === 'non-explosive' ? false : null,
+    trapClassification,
+    identitySource: isSteamId(steamId) ? 'event' : mappedSteamId ? 'map-log' : known.steamId ? 'username' : 'unresolved',
+    detail: `${sourceKind}记录客户端提交的爆炸陷阱创建包，载荷物品为 ${itemType}。单次正常爆炸物投放不能单独定性，非爆炸物或重复调用需要重点复核。`,
+    dedupe: ['explosive-trap-add', String(username).toLowerCase(), itemType, x, y, z, timeBucket].join('|'),
+    ...eventSource(file, lineNumber),
+  };
+  if (!addEvent(event)) return false;
+  const player = ensurePlayer(resolvedSteamId, username);
+  updateSeen(player, time);
+  player.explosiveTrapAdds += 1;
+  player.explosiveTrapTypes.set(itemType, (player.explosiveTrapTypes.get(itemType) || 0) + 1);
+  player.explosiveTrapCoordinates.add(`${x},${y},${z}`);
+  if (timeMs > 0) {
+    player.explosiveTrapTimes.push(timeMs);
+    const windowStart = timeMs - 10 * 60 * 1000;
+    const burst = player.explosiveTrapTimes.filter(value => value >= windowStart && value <= timeMs).length;
+    player.explosiveTrapBurst = Math.max(player.explosiveTrapBurst, burst);
+  }
+  player.explosiveTrapEvents.push(event);
+  return true;
+}
+
 function parseNativeSignals(file, line, lineNumber) {
   const parsed = lineTime(line);
   const time = isoTime(parsed.raw);
+  const trap = /trap:\s+user\s+"([^"]+)"\s+added\s+([A-Za-z0-9_.-]+)\s+at\s+(-?\d+),(-?\d+),(-?\d+)\.?/i.exec(line);
+  if (trap) {
+    const [, username, itemType, x, y, z] = trap;
+    recordExplosiveTrap({ file, lineNumber, parsed, username, itemType, x, y, z });
+    return;
+  }
   const anti = /Anti-cheat="([^"]+)"[^\n]*connection="([^"]+)"[^\n]*reason="([^"]*)"[^\n]*action="([^"]+)"/.exec(line);
   if (anti) {
     const [, antiType, username, reason, action] = anti;
@@ -534,7 +661,10 @@ function parseNativeSignals(file, line, lineNumber) {
     const metadata = nativeSignalMetadata(antiType, reason);
     updateSeen(player, time);
     const added = addEvent({
-      time, displayTime: parsed.raw, severity: metadata.noiseLikely ? 'low' : (/Kick|Ban/i.test(action) ? 'high' : 'warning'),
+      time, displayTime: parsed.raw,
+      severity: antiType === 'Speed'
+        ? (metadata.noiseLikely ? 'low' : 'warning')
+        : (/Kick|Ban/i.test(action) ? 'high' : 'warning'),
       type: 'native-anticheat', code: antiType, steamId: player.steamId, username,
       command: '', coordinate: '', detail: `${reason}；action=${action}`,
       speed: metadata.speed, cooldown: metadata.cooldown, noiseLikely: metadata.noiseLikely,
@@ -722,6 +852,47 @@ function finalizePlayers() {
       addReason(player, 'observed-health-sync', '健康同步异常（仅记录）', player.observedHealthSyncs,
         'warning', points);
     }
+    if (player.explosiveTrapAdds > 0) {
+      const suspiciousEvents = player.explosiveTrapEvents.filter(event => event.trapClassification === 'non-explosive');
+      const unknownEvents = player.explosiveTrapEvents.filter(event => event.trapClassification === 'unknown');
+      const plausibleEvents = player.explosiveTrapEvents.filter(event => event.trapClassification === 'plausible');
+      const suspiciousBurst = maxEventsInWindow(suspiciousEvents, 10 * 60 * 1000);
+      const unknownBurst = maxEventsInWindow(unknownEvents, 10 * 60 * 1000);
+      const strong = suspiciousEvents.length >= 3 || suspiciousBurst >= 3;
+      if (strong) {
+        player.score += 90;
+        addReason(player, 'explosive-trap-add', '非爆炸物重复创建爆炸陷阱', suspiciousEvents.length, 'critical', 90);
+      } else if (suspiciousEvents.length > 0) {
+        player.score += 25;
+        addReason(player, 'explosive-trap-add', '非爆炸物创建爆炸陷阱（需要复核）', suspiciousEvents.length, 'warning', 25);
+      }
+      if (unknownEvents.length > 0) {
+        const repeatedUnknown = unknownEvents.length >= 3 || unknownBurst >= 3;
+        const points = repeatedUnknown ? 8 : 2;
+        player.score += points;
+        addReason(player, 'explosive-trap-unknown', '未识别陷阽物品（需要复核）', unknownEvents.length, 'warning', points);
+      }
+      if (plausibleEvents.length > 0) {
+        addReason(player, 'explosive-trap-valid', '合法爆炸物投放（审计记录）', plausibleEvents.length, 'low', 0);
+      }
+      for (const event of player.explosiveTrapEvents) {
+        event.repeatCount = player.explosiveTrapAdds;
+        event.burstCount = player.explosiveTrapBurst;
+        event.suspiciousNonExplosiveItem = event.trapClassification === 'non-explosive';
+        if (event.trapClassification === 'plausible') {
+          event.severity = 'info';
+          event.detail = `${event.itemType} 是有效爆炸物或陷阽物品；本记录来自正常 AddExplosiveTrapPacket 流程，仅保留操作审计，不计作弊风险。`;
+        } else if (event.trapClassification === 'non-explosive' && strong) {
+          event.severity = 'critical';
+          event.detail = `服务端接受了客户端反复提交的爆炸陷阱创建包；载荷 ${event.itemType} 不是有效爆炸物。异常物品共 ${suspiciousEvents.length} 次，10 分钟峰值 ${suspiciousBurst} 次。日志证明请求进入服务端创建流程，但不证明外挂声称的其他目标物品已经生成。`;
+        } else if (event.trapClassification === 'non-explosive') {
+          event.severity = 'warning';
+        } else {
+          event.severity = 'warning';
+          event.detail = `${event.itemType} 来自旧版日志，当前无法确认其爆炸物属性；仅作低权重复核，不按合法物品的重复投放判定高危。`;
+        }
+      }
+    }
     if (player.otherNativeSignals > 0) {
       const points = Math.min(30, player.nativeWeight);
       player.score += points;
@@ -748,11 +919,16 @@ function finalizePlayers() {
     const steamId = player.steamId || '';
     players.push({
       steamId, usernames: [...player.usernames], ips: [...player.ips], score: Math.min(100, player.score),
-      severity: player.protectedCalls || player.blockedCalls ? 'critical' : player.score >= 40 ? 'high' : player.score >= 15 ? 'warning' : 'low',
+      severity: player.protectedCalls || player.blockedCalls
+        || player.explosiveTrapEvents.filter(event => event.trapClassification === 'non-explosive').length >= 3
+        ? 'critical' : player.score >= 40 ? 'high' : player.score >= 15 ? 'warning' : 'low',
       protectedCalls: player.protectedCalls, blockedCalls: player.blockedCalls,
       blockedCommandCalls: player.blockedCommandCalls, blockedItemTransforms: player.blockedItemTransforms,
       blockedHealthOverwrites: player.blockedHealthOverwrites,
       observedHealthSyncs: player.observedHealthSyncs,
+      explosiveTrapAdds: player.explosiveTrapAdds, explosiveTrapBurst: player.explosiveTrapBurst,
+      explosiveTrapTypes: [...player.explosiveTrapTypes.entries()].map(([itemType, count]) => ({ itemType, count })),
+      explosiveTrapCoordinates: [...player.explosiveTrapCoordinates].slice(0, 40),
       nativeSignals: player.nativeSignals, actionableNativeSignals: player.actionableNativeSignals,
       speedSignals: player.speedSignals, speedNoiseSignals: player.speedNoiseSignals, speedReviewSignals: player.speedReviewSignals,
       speedNoiseOnly: player.nativeSignals > 0 && player.nativeSignals === player.speedNoiseSignals && player.score === 0,
@@ -815,7 +991,7 @@ async function main() {
       }
     } catch {}
   }
-  const allowed = /(_cmd|_user|_admin|_connections|_DebugLog-server)\.txt$/i;
+  const allowed = /(_cmd|_user|_admin|_connections|_map|_DebugLog-server)\.txt$/i;
   const files = walk(logsRoot).filter(file => allowed.test(path.basename(file)) && fs.statSync(file).mtimeMs >= cutoff - 3600000);
   if (fs.existsSync(consoleLogPath) && fs.statSync(consoleLogPath).mtimeMs >= cutoff - 3600000) files.push(consoleLogPath);
   const luaRoot = path.join(dataRoot, 'Lua');
@@ -827,9 +1003,10 @@ async function main() {
     ? walk(luaRoot).filter(file => /^PZAI-session-\d+-events\.log$/i.test(path.basename(file)) && fs.statSync(file).mtimeMs >= cutoff - 3600000)
     : [];
   const identityFiles = files.filter(file => /(connections|admin)\.txt$/i.test(path.basename(file)));
+  const trapMapFiles = files.filter(file => /_map\.txt$/i.test(path.basename(file)));
   const eventFiles = files.filter(file => /(_cmd|_user|_DebugLog-server|server-console)\.txt$/i.test(path.basename(file))
     || /^OrangeAntiCheat-events(?:\.\d+)?\.jsonl$/i.test(path.basename(file)));
-  const workload = [...identityFiles, ...pzaiFiles, ...eventFiles, ...pzaiFiles];
+  const workload = [...identityFiles, ...pzaiFiles, ...trapMapFiles, ...eventFiles, ...pzaiFiles];
   progressFilesTotal = workload.length;
   progressBytesTotal = workload.reduce((sum, file) => {
     try { return sum + fs.statSync(file).size; } catch { return sum; }
@@ -837,6 +1014,7 @@ async function main() {
   reportProgress('identities', `发现 ${progressFilesTotal} 个解析任务`, 'running', true);
   await scanIdentities(identityFiles);
   await scanPzaiIdentities(pzaiFiles);
+  await scanTrapMapIdentities(trapMapFiles);
   await scanEvents(eventFiles);
   await scanPzaiEvents(pzaiFiles);
   reportProgress('finalizing', '正在汇总风险评分和证据', 'running', true);
@@ -893,6 +1071,7 @@ async function main() {
       blockedItemTransforms: players.reduce((sum, player) => sum + player.blockedItemTransforms, 0),
       blockedHealthOverwrites: players.reduce((sum, player) => sum + player.blockedHealthOverwrites, 0),
       observedHealthSyncs: players.reduce((sum, player) => sum + player.observedHealthSyncs, 0),
+      explosiveTrapAdds: players.reduce((sum, player) => sum + player.explosiveTrapAdds, 0),
       reviewedNoiseEvents,
       nativeSignals: players.reduce((sum, player) => sum + player.nativeSignals, 0),
       speedNoiseSignals: players.reduce((sum, player) => sum + player.speedNoiseSignals, 0),
